@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { portfolioProjects } from './content';
+import Triage from './Triage';
 
 type ApiHealth = { ok: boolean; service: string; mode: string };
 
@@ -24,6 +25,7 @@ export default function App() {
         <a href="#home" className="wordmark"><span className="logo">A</span> AEGIS <span>AI</span></a>
         <nav aria-label="Primary navigation">
           <a href="#project">Projects</a>
+          <a href="#triage">Triage demo</a>
           <a href="#architecture">Architecture</a>
           <a href="https://github.com/AnkurSingh16/aegis-ai-architect-portfolio" target="_blank" rel="noreferrer">GitHub ↗</a>
         </nav>
@@ -45,6 +47,7 @@ export default function App() {
             </article>)}
           </div>
         </section>
+        <Triage />
         <section id="architecture" className="principles wrap">
           <div><p className="eyebrow">ENGINEERING APPROACH</p><h2>Intentional quality.<br />Not just a polished demo.</h2></div>
           <div className="principle-list">
