@@ -1,0 +1,24 @@
+{
+  "name": "aegis-ai-architect-portfolio",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "engines": {"node": ">=24 <27"},
+  "workspaces": ["apps/api", "apps/web"],
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB \"npm run dev -w apps/api\" \"npm run dev -w apps/web\"",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces",
+    "test:coverage": "npm run test:coverage --workspaces",
+    "build": "npm run build --workspaces"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "concurrently": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^16.0.0",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}
