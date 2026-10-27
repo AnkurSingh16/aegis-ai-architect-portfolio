@@ -15,6 +15,28 @@ npm run dev
 
 Open http://localhost:5173 in your browser. API health is at http://localhost:4000/api/health.
 
+## Synthetic support triage
+
+In the **Customer support case triage** section, choose a supplied synthetic case and select **Triage synthetic case**. React sends its allowlisted ID to Fastify, then displays category, priority, suggested team, rationale and a suggested next step. Changing cases clears the previous result. Failed requests can be retried; requests time out after ten seconds.
+
+| Invented case | Category | Priority | Suggested team |
+| --- | --- | --- | --- |
+| Login outage | incident | high | Platform support |
+| Duplicate invoice | billing | medium | Billing support |
+| Documentation request | guidance | low | Customer support |
+
+These are fixed fixture lookups, **not LLM inference or RAG**. Nothing is stored, sent to a support team, escalated, refunded or otherwise executed. The interface accepts no customer text. No paid service or credentials are needed.
+
+`POST /api/demo/triage` accepts JSON containing exactly one supported case ID:
+
+```json
+{"caseId":"SYNTHETIC-LOGIN-001"}
+```
+
+The response contract contains `mode: "synthetic-mock"`, the same `caseId`, `category`, `priority`, `suggestedTeam`, `rationale`, `nextStep`, and an explicit synthetic warning. The shared dependency-free contract lives in `apps/api/src/contracts/triage.ts`; the browser validates the result before displaying it. Requests reject extra fields and incorrect types, with a 1 KiB body limit. Errors use stable messages: invalid requests return 400, oversized requests 413, unsupported media types 415, and unexpected failures 500.
+
+**Local development only:** the API and Vite development server bind to loopback. Both demo API routes are absent when `NODE_ENV=production`; production frontend builds display a local-availability message instead of the triage form. Do not expose the unauthenticated development servers through a public proxy or tunnel. There is no authentication, tenant isolation, persistence, rate limiting or production support workflow. See [the triage design decision](docs/TRIAGE-DEMO-DECISION.md).
+
 ```bash
 npm run lint
 npm run typecheck

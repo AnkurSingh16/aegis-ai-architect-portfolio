@@ -41,4 +41,21 @@ h1 em { color: #73e6d0; font-style: normal; }
 .principle-list p { padding: 10px 0 20px; border-bottom: 1px solid #263c49; }
 .principle-list strong { display: block; color: #e9f1f6; margin-bottom: 3px; }
 footer { border-top: 1px solid #1a303d; font-size: 12px; color: #7d95a0; padding: 33px 0 50px; }
+.triage { padding: 35px 0 85px; border-top: 1px solid #1f3542; line-height: 1.7; }
+.triage h2 { font-size: clamp(28px, 3.3vw, 40px); letter-spacing: -.04em; }
+.triage > p, .triage form p { color: #b1c4cd; }
+.triage form { max-width: 700px; }
+.triage label { display: block; font-weight: 700; margin-bottom: 8px; }
+.triage select { width: 100%; padding: 12px; border: 1px solid #7396a6; border-radius: 7px; color: #e9f1f6; background: #102633; font: inherit; }
+.triage button { border: 0; border-radius: 7px; padding: 13px 22px; font: inherit; font-weight: 700; cursor: pointer; }
+.triage :disabled { opacity: .65; cursor: wait; }
+.triage :focus-visible { outline: 3px solid #a5ffeb; outline-offset: 4px; }
+.triage .triage-error { color: #ffb5ad; }
+.triage-result { border: 1px solid #397b79; border-radius: 10px; background: #10242e; padding: 24px; max-width: 800px; }
+.triage-result h3 { margin-top: 0; }
+.triage-result dl { margin: 0; }
+.triage-result dl div { padding: 8px 0; }
+.triage-result dt { color: #8ce8d5; font-weight: 700; }
+.triage-result dd { margin: 0; }
+.triage-result > p { font-size: 13px; color: #b1c4cd; }
 @media (max-width: 800px) { .hero { padding: 85px 0; } .cards { grid-template-columns: 1fr; } .principles { grid-template-columns: 1fr; gap: 10px; } nav { gap: 14px; } }
