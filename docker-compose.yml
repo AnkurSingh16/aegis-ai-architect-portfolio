@@ -1,11 +1,11 @@
-# OPTIONAL phase-2 local development database. Not required for first `npm run dev`.
-# Change credentials before exposing outside your Mac. Bound to loopback only.
+# Persistent local-development database. The stateless browser demo remains optional-DB.
+# Set POSTGRES_PASSWORD in ignored .env; never expose the database publicly.
 services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: aegis_local
-      POSTGRES_PASSWORD: local_development_only
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: aegis_local
     ports:
       - '127.0.0.1:5432:5432'

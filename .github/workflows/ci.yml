@@ -9,6 +9,22 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: aegis_ci_admin
+          POSTGRES_PASSWORD: ci_isolated_admin_only
+          POSTGRES_DB: aegis_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aegis_ci_admin -d aegis_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_ADMIN_URL: postgres://aegis_ci_admin:ci_isolated_admin_only@127.0.0.1:5432/aegis_test
+      TEST_DATABASE_URL: postgres://aegis_app:ci_isolated_runtime_only@127.0.0.1:5432/aegis_test
+      DATABASE_APP_PASSWORD: ci_isolated_runtime_only
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -25,8 +41,12 @@ jobs:
         run: npm run typecheck
       - name: Automated tests and measured coverage
         run: npm run test:coverage
+      - name: PostgreSQL integration tests
+        run: npm run test:integration
       - name: Build
         run: npm run build
+      - name: Check whitespace errors
+        run: git diff --check
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4

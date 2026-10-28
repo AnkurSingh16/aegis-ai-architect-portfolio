@@ -9,6 +9,17 @@ Demonstrate enterprise-ready systems thinking: multi-tenant support copilot, sou
 - Unit/component tests with published HTML coverage artifacts and GitHub CI.
 - Example private S3 Terraform template; **no provisioning**.
 
+## Milestone 2A — local persistent multi-tenant case foundation
+
+- Existing PostgreSQL 17 Compose service stores synthetic tenants, support cases and append-only case-change audits.
+- Versioned checksum-verified SQL migrations use separate administrator credentials; runtime uses a nonowner `NOSUPERUSER NOBYPASSRLS` role with no role memberships or administrative privileges.
+- Forced, default-deny RLS applies to every tenant-bearing table. One checked-out connection and transaction-local tenant context scope each operation; atomic database triggers record case changes.
+- A local CLI supports create/list/read/status-update/audit and stored-case synthetic triage. Server-owned `north`/`south` fixture configuration is the only tenant selector. There are no storage HTTP endpoints; arbitrary browser tenant IDs never authorize access.
+- Real PostgreSQL integration tests and an isolated CI service verify cross-tenant reads/writes, missing/malformed context, role privileges, rollback, pool reuse and concurrent transactions. Unit/component coverage measures the non-database workflow separately.
+- Existing browser triage remains stateless and explicitly synthetic. No real AI, production authentication, public write API or cloud deployment is introduced.
+
+See [ADR 002](adr/002-local-multitenant-case-storage.md) and the [README runbook](../README.md). Runtime credentials can choose tenant context and therefore remain a trusted-server credential, not proof of an end user's tenant identity. Production identity is the next authorization boundary.
+
 ## Vertical slice 1 — actual product foundations
 - PostgreSQL tables for tenants, users, documents, audit events; deny cross-tenant queries.
 - Real JWT issuer, audience, JWKS signature, expiry and scope validation (Auth0).
