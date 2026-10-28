@@ -9,11 +9,18 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "db:migrate": "tsx src/storage/migrate-cli.ts",
+    "cases": "tsx src/storage/cli.ts"
   },
-  "dependencies": {"fastify": "^5.0.0"},
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "pg": "^8.23.1"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.0",
     "tsx": "^4.0.0",
     "vitest": "^5.0.0"
