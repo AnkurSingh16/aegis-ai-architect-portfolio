@@ -25,6 +25,14 @@ Every protected operation uses one repeatable-read transaction. It sets transact
 
 Run `npm run lint`, `npm run typecheck`, `npm run test:coverage`, `npm run build`, and `npm run test:integration -w apps/api` against the dedicated local `aegis_test` database. Tests use local generated RSA keys/JWKS and synthetic data; they do not contact Auth0. Runtime failures return stable messages and structured request identifiers without token contents, subjects, connection strings or raw SQL errors. If a test shows cross-tenant access, missing-context access, unexpected membership writes, or a leaked credential, stop the local API, preserve sanitized logs, and investigate the migration, runtime role and RLS before continuing.
 
+## Auth0 Terraform credential and state handling
+
+- Create `.env.auth0` only with `node scripts/setup-auth0-env.mjs` in an interactive terminal. It contains the provisioner Management API client secret, is separate from PostgreSQL root `.env`, ignored by Git, created exclusively with mode `0600`, and must never be printed or pasted into a ticket or chat.
+- The local Terraform wrapper passes only those three Auth0 credential variables to Terraform and strips inherited database and Terraform injection/logging variables. It accepts only `fmt`, `init`, `validate`, and `plan`; plans are not saved. Review provider output before any future apply.
+- The provider configuration manages a narrow set of API resources and does not manage the provisioner app, Auth0 tenant settings, database credentials, or other clients. Singular connection/scope resources are used to avoid taking ownership of complete existing associations or scope sets.
+- Terraform local state and provider cache can contain sensitive data. They are ignored and must remain private. Do not add credentials to CI; pull-request CI only initializes and validates with no authenticated plan or apply.
+- The SPA is public, uses Authorization Code + PKCE, has no client secret, and is restricted to one loopback callback/origin. Access tokens still require the API's issuer/audience/signature checks, scope checks, database membership and RLS. The smoke harness keeps a real access token in memory for one request and does not persist or display it.
+
 ## Known limits
 
 - This is a local foundation, not production authentication operations. Auth0 tenant configuration and secret management are manual; there is no browser login, token refresh flow, rate limiting, cloud deployment or production monitoring.

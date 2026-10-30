@@ -73,7 +73,7 @@ When `AUTH0_ISSUER` and `AUTH0_AUDIENCE` are configured, the API enables protect
 ### Manual Auth0 setup
 
 1. Create an Auth0 API in your own development tenant with a dedicated API identifier (for example `https://aegis-api.example`). The audience is this identifier, not the SPA application client ID.
-2. Enable RBAC for the API and define `read:cases` and `write:cases`. Assign `read:cases` to a `reader` role and both permissions to an `operator` role. Assign a role to a synthetic test user and use an OAuth client that can request the required scopes.
+2. Define `read:cases` and `write:cases` permissions for the API. Request the needed permissions from the local SPA using Authorization Code + PKCE. Auth0 roles are not required for this Free-plan demonstration: `reader` and `operator` are PostgreSQL membership roles, and the API does not trust token role claims for database authorization.
 3. Put the tenant's canonical issuer with trailing slash (for example `https://your-tenant.us.auth0.com/`) in `AUTH0_ISSUER`; set `AUTH0_AUDIENCE` to the API identifier. Copy `.env.api.example` to ignored `.env.api` and configure only `DATABASE_URL`, `AUTH0_ISSUER` and `AUTH0_AUDIENCE` there. This runtime-only file keeps administrator credentials out of the HTTP process. Keep Auth0 values out of both example files except for placeholders. Use the restricted `aegis_app` credentials in `DATABASE_URL`.
 4. Run migrations. To grant a local tenant membership for the exact Auth0 `sub` claim, set `AEGIS_MEMBER_SUBJECT`, `AEGIS_MEMBER_FIXTURE` (`north` or `south`) and `AEGIS_MEMBER_ROLE`, then run `node --env-file=.env --env-file=.env.api --import tsx apps/api/src/auth/membership-cli.ts grant`. To remove access, keep issuer and subject set and run the same command with `revoke`. This local command requires `DATABASE_ADMIN_URL`; the API runtime cannot grant or revoke membership.
 5. Obtain an access token using Authorization Code with PKCE in your local OAuth client. Request the API audience and scopes, then send `Authorization: Bearer <access-token>` to the protected API. Do not paste tokens into logs, tickets or shell history. The browser demo does not perform Auth0 login or store tokens.
@@ -106,6 +106,33 @@ npm run build
 ```
 
 Open `apps/api/coverage/index.html` and `apps/web/coverage/index.html` for HTML coverage reports after running tests. Generated results are deliberately ignored by Git. Run Auth0 and storage PostgreSQL integration tests against the dedicated test DB with `npm run test:integration -w apps/api`; they do not call Auth0.
+
+## Auth0 Terraform foundation (Milestone 2C)
+
+The isolated `infra/terraform/auth0` configuration declares one Case API, its two individual scopes, a public local SPA using Authorization Code + PKCE, and an append-only association with one existing database connection. The config pins the official Auth0 Terraform provider. It does not manage the provisioner M2M app, tenant-wide settings, connection credentials, Auth0 roles, PostgreSQL roles, or cloud infrastructure. `reader` and `operator` remain database membership roles; API access still requires the signed scopes and server-verified database membership from Milestone 2B.
+
+Create the local Management API credential file in an interactive VS Code terminal. Do not paste these values into chat or shell commands:
+
+```bash
+node scripts/setup-auth0-env.mjs
+```
+
+The helper prompts for the tenant domain and provisioner client ID and hides the client-secret input. It exclusively creates ignored `.env.auth0` with file mode `0600`; it refuses to overwrite an existing file. This file is separate from root `.env` and the PostgreSQL administrator credentials. If a command runner has no interactive terminal, run the command above in the normal VS Code Terminal. Check only file presence and permissions; do not print its contents.
+
+Copy `infra/terraform/auth0/terraform.tfvars.example` to `infra/terraform/auth0/terraform.tfvars` and enter the ID of the existing Auth0 database connection. Then run the credential-isolated wrapper:
+
+```bash
+node infra/terraform/auth0/terraform-local.mjs fmt
+node infra/terraform/auth0/terraform-local.mjs init
+node infra/terraform/auth0/terraform-local.mjs validate
+node infra/terraform/auth0/terraform-local.mjs plan
+```
+
+The wrapper reads only `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET` from `.env.auth0`; it does not load root `.env`, inherited database variables, or caller-supplied Terraform arguments. It supports only formatting, backend-disabled initialization, validation, and an unsaved plan. Apply, destroy, import, and state commands are unavailable through this wrapper. The provider requests only the permissions needed for the declared API, scope, client, and one-connection association resources. If the speculative plan reports missing Management API permissions, review the exact missing permission in Auth0 and add it manually only after approval. Do not apply until the plan, import/replacement risks, Auth0 Free-plan compatibility, and state handling have been reviewed.
+
+Terraform validation in GitHub CI downloads the pinned provider and runs format, backend-disabled initialization, and validation without Auth0 credentials; CI never plans or applies live resources. Terraform state can contain sensitive provider-managed attributes, so keep local state and `.terraform` data private and ignored. No remote state backend is configured in this local foundation.
+
+After the SPA and API are provisioned and API configuration is set locally, run `node apps/api/scripts/auth0-pkce-smoke.mjs` in a normal terminal. It performs a loopback Authorization Code + PKCE login and makes one protected case-list request. The bearer token exists only in process memory and is never printed or persisted. A test user must first have a database membership for the exact Auth0 subject; see the membership instructions above. This smoke test does not exercise writes, revocation, wrong issuer/audience, or all authorization cases; the existing integration tests use synthetic local signing keys. See [ADR 004](docs/adr/004-auth0-terraform-foundation.md) and the [security runbook](docs/SECURITY-RUNBOOK.md).
 
 ## What's included
 - `apps/web`: React + Vite portfolio frontend, proxied to local API.

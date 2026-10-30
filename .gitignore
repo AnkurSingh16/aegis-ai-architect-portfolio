@@ -8,6 +8,7 @@ coverage/
 .DS_Store
 .env
 .env.*
+/.env.auth0
 !.env.example
 !.env.*.example
 .vscode/settings.json
