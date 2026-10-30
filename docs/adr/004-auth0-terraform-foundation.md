@@ -24,6 +24,12 @@ The provisioner secret is entered locally through a hidden-input helper into ign
 - Auth0 Free-plan capabilities vary. This configuration does not create Auth0 roles or require Role Management; tenant membership and reader/operator privileges stay in PostgreSQL.
 - A local PKCE smoke harness sends one access token directly to the local protected API, keeping the token in memory and out of files and logs.
 
+## ADR addendum: controlled first deployment gate
+
+The first live resource creation requires a dedicated local entrypoint, `apply-first-deployment.mjs`; the existing `terraform-local.mjs` allowlist remains read-only. The gate creates a short-lived binary plan in a mode-0700 private directory with mode-0600 permissions, checks structured plan JSON in memory, and accepts only the five named Aegis resources with create-only actions. It rechecks HCP ownership and Auth0 uniqueness after confirmation, verifies the plan file has not changed, then applies that exact saved plan. The gate requires a TTY and a fresh typed confirmation naming the exact development workspace and deployment intent. It does not accept command-line or environment-based confirmation and never passes `-auto-approve`. Checks for conventional CI/Codex/test environment markers are defense in depth and are not an unforgeable execution-identity boundary; separate human approval is required before invoking the entrypoint.
+
+Applying a saved plan does not invoke Terraform's interactive approval prompt. The typed gate is therefore the sole approval mechanism and must only be used after separate human approval. Saved plans are sensitive and their private temporary directory is removed on normal exit. A crash or forced termination may leave a plan artifact; the gate fails closed until the operator reviews and removes it. A failed or partial apply is a manual recovery event: no retry, destroy, state restoration, import, marker binding, or HCP mutation occurs automatically. After a successful apply, independently inspect the HCP state inventory for exactly the five expected resources, run the interactive `bind-reviewed-state`, and verify a subsequent read-only plan is a no-op. Tests use mocks only; CI never receives live credentials or runs this entrypoint.
+
 ## Alternatives considered
 
 - Managing complete connection-client or resource-server scope collections was rejected because it could replace unrelated existing associations/scopes.
