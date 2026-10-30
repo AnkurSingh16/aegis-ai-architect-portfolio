@@ -37,10 +37,12 @@ describe('Auth0 local tooling', () => {
       `AUTH0_CLIENT_SECRET=${JSON.stringify(secret)}`,
       '',
     ].join('\n'), { mode: 0o600 });
-    const result = spawnSync(process.execPath, [wrapper, 'plan'], {
+    const preload = await installHcpPreflightFixture(root);
+    const result = spawnSync(process.execPath, ['--import', preload, wrapper, 'plan'], {
       encoding: 'utf8',
       env: {
         ...process.env,
+        HOME: root,
         TMPDIR: root,
         PATH: `${path.join(root, 'bin')}:${process.env.PATH ?? ''}`,
         DATABASE_URL: 'synthetic-database-url',
@@ -51,7 +53,7 @@ describe('Auth0 local tooling', () => {
     });
 
     expect(result.status, [result.error?.message, result.stdout, result.stderr].filter(Boolean).join('\n')).toBe(0);
-    expect(result.stdout.match(/\[REDACTED\]/g)).toHaveLength(2);
+    expect((result.stdout + result.stderr).match(/\[REDACTED\]/g)).toHaveLength(2);
     expect(result.stdout + result.stderr).not.toContain(secret);
     expect(result.stdout + result.stderr).not.toContain('synthetic-database-url');
     expect(result.stdout + result.stderr).not.toContain('synthetic-admin-url');
@@ -64,7 +66,7 @@ describe('Auth0 local tooling', () => {
     const result = spawnSync(process.execPath, [wrapper, action], { encoding: 'utf8', env: { ...process.env, TMPDIR: root } });
 
     expect(result.status).toBe(2);
-    expect(result.stdout + result.stderr).toContain('intentionally unavailable');
+    expect(result.stdout + result.stderr).toContain('unavailable');
     await expect(readFile(path.join(root, 'terraform-invoked'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -74,7 +76,7 @@ describe('Auth0 local tooling', () => {
     const result = spawnSync(process.execPath, [wrapper, 'plan', '-out=unexpected.tfplan'], { encoding: 'utf8' });
 
     expect(result.status).toBe(2);
-    expect(result.stdout + result.stderr).toContain('intentionally unavailable');
+    expect(result.stdout + result.stderr).toContain('unavailable');
   });
 
   it('keeps Auth0 credentials, Terraform variables and state/cache ignored', () => {
@@ -116,4 +118,35 @@ async function installWrapperFixture(root: string): Promise<string> {
   ].join('\n'));
   await chmod(fakeTerraform, 0o700);
   return wrapper;
+}
+
+async function installHcpPreflightFixture(root: string): Promise<string> {
+  const credentialDirectory = path.join(root, '.terraform.d');
+  await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(credentialDirectory, 'credentials.tfrc.json'), JSON.stringify({
+    credentials: { 'app.terraform.io': { token: 'synthetic-hcp-token' } },
+  }), { mode: 0o600 });
+  const preload = path.join(root, 'mock-hcp.mjs');
+  await writeFile(preload, `
+    globalThis.fetch = async (url) => {
+      const organization = { data: { type: 'organizations', id: 'org-1', attributes: {
+        name: 'aegis-ai-portfolio', 'plan-identifier': 'free_standard', 'plan-is-trial': false,
+        'plan-expired': false, 'plan-is-enterprise': false,
+      } } };
+      const subscription = { data: { type: 'subscriptions', id: 'subscription-1', attributes: {
+        'is-active': true, 'is-public-free-tier': true, 'is-self-serve-trial': false,
+      }, relationships: { organization: { data: { id: 'org-1', type: 'organizations' } },
+        'feature-set': { data: { id: 'feature-set-1', type: 'feature-sets' } } } }, included: [{
+        type: 'feature-sets', id: 'feature-set-1', attributes: { identifier: 'free_standard', 'is-current': true, 'is-free-tier': true },
+      }] };
+      const workspace = { data: { type: 'workspaces', id: 'ws-1', attributes: {
+        name: 'aegis-auth0-dev', 'execution-mode': 'local', 'auto-apply': false,
+      }, relationships: { organization: { data: { id: 'org-1' } }, 'current-state-version': { data: null } } } };
+      const path = new URL(url).pathname;
+      const body = path.endsWith('/organizations/aegis-ai-portfolio') ? organization
+        : path.endsWith('/subscription') ? subscription : workspace;
+      return { ok: true, status: 200, json: async () => body };
+    };
+  `);
+  return preload;
 }

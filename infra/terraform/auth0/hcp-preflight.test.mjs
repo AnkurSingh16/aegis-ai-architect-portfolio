@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, it } from 'node:test';
-import { classifyHcpPlan, verifyHcpConfiguration } from './hcp-preflight.mjs';
+import { classifyHcpPlan, createBindingMarker, inspectBackendMetadata, verifyHcpConfiguration } from './hcp-preflight.mjs';
 
 const temporaryDirectories = new Set();
 const syntheticToken = 'synthetic-hcp-test-token-never-real';
@@ -59,36 +60,86 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
+const managedResources = [
+  ['auth0_resource_server', 'cases'],
+  ['auth0_resource_server_scope', 'read_cases'],
+  ['auth0_resource_server_scope', 'write_cases'],
+  ['auth0_client', 'local_spa'],
+  ['auth0_connection_client', 'local_spa_database'],
+].map(([type, name]) => ({ type, name, provider: 'provider["registry.terraform.io/auth0/auth0"]', module: 'root', count: 1 }));
+const normalizedInventory = managedResources.map(({ type, name, provider, module }) => ({
+  address: `${type}.${name}`, module, provider, type,
+})).sort((a, b) => a.address.localeCompare(b.address));
+const managedInventoryHash = createHash('sha256').update(JSON.stringify(normalizedInventory)).digest('hex');
+
+async function prepareManagedState(home, terraformRoot, { workspaceId = 'ws-1', backendWorkspace = 'aegis-auth0-dev', stateVersionId = 'version-1', serial = 1, markerStateVersionId = stateVersionId, markerSerial = serial, resources = managedResources } = {}) {
+  const metadataDirectory = path.join(terraformRoot, '.terraform');
+  await mkdir(metadataDirectory, { recursive: true, mode: 0o700 });
+  await chmod(metadataDirectory, 0o700);
+  await writeFile(path.join(metadataDirectory, 'terraform.tfstate'), JSON.stringify({
+    version: 3, serial: 1, backend: { type: 'cloud', config: {
+      hostname: 'app.terraform.io', organization: 'aegis-ai-portfolio',
+      token: 'synthetic-backend-token-must-not-leak', workspaces: { name: backendWorkspace },
+    } },
+  }), { mode: 0o600 });
+  const backendFingerprint = inspectBackendMetadata({ backend: { type: 'cloud', config: {
+    hostname: 'app.terraform.io', organization: 'aegis-ai-portfolio',
+    token: 'synthetic-backend-token-must-not-leak', workspaces: { name: 'aegis-auth0-dev' },
+  } } });
+  const stateVersion = { data: { type: 'state-versions', id: stateVersionId, attributes: {
+    serial, status: 'finalized', intermediate: false, 'resources-processed': true, resources,
+  } } };
+  const marker = createBindingMarker({
+    workspaceId, backendFingerprint, stateVersionId: markerStateVersionId, serial: markerSerial,
+    inventoryHash: managedInventoryHash,
+  });
+  await writeFile(path.join(metadataDirectory, 'aegis-state-binding.json'), JSON.stringify(marker), { mode: 0o600 });
+  await chmod(path.join(metadataDirectory, 'aegis-state-binding.json'), 0o600);
+  const baseFetch = responses();
+  const fetchImpl = async (url, options) => {
+    if (url.endsWith('/current-state-version')) return jsonResponse(stateVersion);
+    const response = await baseFetch(url, options);
+    if (!url.endsWith('/workspaces/aegis-auth0-dev')) return response;
+    const body = structuredClone(await response.json());
+    body.data.id = workspaceId;
+    body.data.relationships['current-state-version'].data = { type: 'state-versions', id: stateVersionId };
+    return jsonResponse(body);
+  };
+  return { fetchImpl, stateVersion };
+}
+
 describe('HCP Terraform read-only preflight', () => {
   it('confirms the intended Free, Local, auto-apply-off empty workspace without returning credentials', async () => {
     const home = await makeHome();
     const result = await verifyHcpConfiguration({ home, fetchImpl: responses() });
-    assert.deepEqual(result, {
-      organization: 'aegis-ai-portfolio', plan: 'free', workspace: 'aegis-auth0-dev',
-      executionMode: 'local', autoApply: false, stateEmpty: true,
-    });
+    assert.equal(result.organization, 'aegis-ai-portfolio');
+    assert.equal(result.plan, 'free');
+    assert.equal(result.workspace, 'aegis-auth0-dev');
+    assert.equal(result.executionMode, 'local');
+    assert.equal(result.autoApply, false);
+    assert.equal(result.state, 'empty-bootstrap');
     assert.doesNotMatch(JSON.stringify(result), new RegExp(syntheticToken));
   });
 
   it('fails closed when credentials are missing, malformed, empty or too broadly readable', async () => {
     const missingHome = await mkdtemp(path.join(os.tmpdir(), 'aegis-hcp-missing-'));
     temporaryDirectories.add(missingHome);
-    await assert.rejects(verifyHcpConfiguration({ home: missingHome, fetchImpl: responses() }), /credentials are missing/);
+    await assert.rejects(verifyHcpConfiguration({ home: missingHome, fetchImpl: responses() }), /credentials is missing or unreadable/);
 
     const malformedHome = await makeHome({ content: '{invalid json' });
-    await assert.rejects(verifyHcpConfiguration({ home: malformedHome, fetchImpl: responses() }), /credentials are missing/);
+    await assert.rejects(verifyHcpConfiguration({ home: malformedHome, fetchImpl: responses() }), /contains invalid JSON/);
 
     const emptyHome = await makeHome({ content: JSON.stringify({ credentials: { 'app.terraform.io': { token: '' } } }) });
     await assert.rejects(verifyHcpConfiguration({ home: emptyHome, fetchImpl: responses() }), /do not contain.*token/);
 
     const unsafeHome = await makeHome({ permissions: 0o644 });
-    await assert.rejects(verifyHcpConfiguration({ home: unsafeHome, fetchImpl: responses() }), /unsafe permissions/);
+    await assert.rejects(verifyHcpConfiguration({ home: unsafeHome, fetchImpl: responses() }), /mode 0600/);
 
     const directoryHome = await mkdtemp(path.join(os.tmpdir(), 'aegis-hcp-directory-'));
     temporaryDirectories.add(directoryHome);
     const directory = path.join(directoryHome, '.terraform.d');
     await mkdir(path.join(directory, 'credentials.tfrc.json'), { recursive: true });
-    await assert.rejects(verifyHcpConfiguration({ home: directoryHome, fetchImpl: responses() }), /credentials are missing/);
+    await assert.rejects(verifyHcpConfiguration({ home: directoryHome, fetchImpl: responses() }), /mode 0600/);
   });
 
   it('does not disclose the token when HCP requests fail', async () => {
@@ -182,14 +233,61 @@ describe('HCP Terraform read-only preflight', () => {
     await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: base({ 'auto-apply': true }) }) }), /auto-apply must be disabled/);
   });
 
-  it('rejects existing or inconclusive state and trusts only an explicitly-null state relationship', async () => {
+  it('allows only explicitly empty state during bootstrap and rejects inconclusive state relationships', async () => {
     const home = await makeHome();
     const populated = { data: { type: 'workspaces', id: 'ws-1', attributes: { name: 'aegis-auth0-dev', 'execution-mode': 'local', 'auto-apply': false }, relationships: { organization: { data: { id: 'org-1' } }, 'current-state-version': { data: { id: 'state-1' } } } } };
-    await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: populated }) }), /must have no current state/);
+    await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: populated }) }), /exact local backend binding cannot be proven/);
     const omitted = { data: { ...populated.data, relationships: { organization: { data: { id: 'org-1' } } } } };
-    await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: omitted }) }), /must have no current state/);
+    await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: omitted }) }), /relationship is missing or ambiguous/);
     const unavailable = { data: { ...populated.data, relationships: { ...populated.data.relationships, 'current-state-version': null } } };
-    await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: unavailable }) }), /must have no current state/);
+    await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: unavailable }) }), /relationship is missing or ambiguous/);
+  });
+
+  it('accepts reinitialization only when backend, workspace, state version and exact resource inventory match the local ownership marker', async () => {
+    const home = await makeHome();
+    const terraformRoot = await mkdtemp(path.join(os.tmpdir(), 'aegis-managed-state-'));
+    temporaryDirectories.add(terraformRoot);
+    const { fetchImpl } = await prepareManagedState(home, terraformRoot);
+    const result = await verifyHcpConfiguration({ home, terraformRoot, fetchImpl });
+    assert.equal(result.state, 'verified-managed-state');
+    assert.equal(result.stateVersionId, 'version-1');
+    assert.equal(result.serial, 1);
+  });
+
+  it('rejects foreign inventory, workspace mismatch, missing metadata and replaced state versions', async () => {
+    const home = await makeHome();
+    const terraformRoot = await mkdtemp(path.join(os.tmpdir(), 'aegis-managed-state-'));
+    temporaryDirectories.add(terraformRoot);
+    const foreignResources = [...managedResources, { type: 'aws_instance', name: 'unrelated', provider: 'provider["registry.terraform.io/hashicorp/aws"]', module: 'root', count: 1 }];
+    const foreign = await prepareManagedState(home, terraformRoot, { resources: foreignResources });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: foreign.fetchImpl }), /not the exact Aegis Auth0 foundation inventory/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const mismatched = await prepareManagedState(home, terraformRoot, { backendWorkspace: 'other-workspace' });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: mismatched.fetchImpl }), /does not bind exactly/);
+
+    await rm(path.join(terraformRoot, '.terraform', 'terraform.tfstate'));
+    const missingMetadata = await prepareManagedState(home, terraformRoot);
+    await rm(path.join(terraformRoot, '.terraform', 'terraform.tfstate'));
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: missingMetadata.fetchImpl }), /backend binding cannot be proven/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const missingMarker = await prepareManagedState(home, terraformRoot);
+    await rm(path.join(terraformRoot, '.terraform', 'aegis-state-binding.json'));
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: missingMarker.fetchImpl }), /marker is missing/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const unsafeMetadata = await prepareManagedState(home, terraformRoot);
+    await chmod(path.join(terraformRoot, '.terraform', 'terraform.tfstate'), 0o644);
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: unsafeMetadata.fetchImpl }), /mode 0600/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const replaced = await prepareManagedState(home, terraformRoot, { stateVersionId: 'replacement-version', serial: 2, markerStateVersionId: 'version-1', markerSerial: 1 });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: replaced.fetchImpl }), /differs from the previously reviewed local binding marker/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const wrongCount = await prepareManagedState(home, terraformRoot, { resources: managedResources.map((resource) => ({ ...resource, count: resource.name === 'cases' ? 2 : 1 })) });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: wrongCount.fetchImpl }), /incomplete or has an unknown shape/);
   });
 
   it('rejects unreadable API responses without including response contents', async () => {
