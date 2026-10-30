@@ -30,6 +30,15 @@ See [ADR 002](adr/002-local-multitenant-case-storage.md) and the [README runbook
 
 See [ADR 003](adr/003-auth0-tenant-authorization.md), the [security runbook](SECURITY-RUNBOOK.md), and [README setup](../README.md#auth0-protected-case-api-milestone-2b). Membership revocation applies to new transactions after commit; an in-flight repeatable-read request can complete from its snapshot. Existing case-change audit rows lack authenticated actor attribution.
 
+## Milestone 2C — Auth0 Terraform foundation
+
+- A separately scoped Terraform root pins the official Auth0 provider and declares the Aegis API, individual `read:cases` and `write:cases` scopes, a public loopback-only SPA using Authorization Code + PKCE, and association with one explicitly supplied existing database connection.
+- Tenant-wide settings, the provisioner M2M app, existing connection configuration, Auth0 roles, PostgreSQL roles, and cloud resources remain unmanaged. PostgreSQL remains authoritative for `reader` and `operator` memberships; the existing JWT and RLS checks remain required.
+- A hidden-input local setup helper creates a mode-0600 ignored Management API credential file. A restricted local wrapper permits only `fmt`, backend-disabled `init`, `validate`, and unsaved `plan`; no automatic or wrapper-driven apply/destroy exists. GitHub CI validates syntax/provider schema without live credentials.
+- A loopback PKCE smoke harness exercises one real-token case-list request without persisting or displaying a bearer token. It complements, but does not replace, synthetic-key integration tests.
+
+See [ADR 004](adr/004-auth0-terraform-foundation.md) and [the Auth0 security runbook](SECURITY-RUNBOOK.md).
+
 ## Vertical slice 1 — actual product foundations
 - PostgreSQL tables for tenants, users, documents, audit events; deny cross-tenant queries.
 - Measured AI and retrieval, building on the local Auth0/JWT and tenant-membership foundation in Milestone 2B.

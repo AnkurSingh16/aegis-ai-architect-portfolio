@@ -35,6 +35,17 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: Validate Auth0 Terraform (no credentials)
+        working-directory: infra/terraform/auth0
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false -no-color
+          terraform validate -no-color
       - name: Lint
         run: npm run lint
       - name: Typecheck
