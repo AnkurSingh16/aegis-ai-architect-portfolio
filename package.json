@@ -14,6 +14,7 @@
     "build": "npm run build --workspaces",
     "db:migrate": "npm run db:migrate -w apps/api",
     "cases": "npm run cases -w apps/api --",
+    "memberships": "npm run memberships -w apps/api --",
     "test:integration": "npm run test:integration -w apps/api"
   },
   "devDependencies": {

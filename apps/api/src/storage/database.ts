@@ -19,9 +19,11 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND NOT has_schema_privilege(current_user, 'aegis', 'CREATE')
       AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
       AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
-      AND (SELECT count(*) = 3 AND bool_and(c.relrowsecurity AND c.relforcerowsecurity AND c.relowner <> r.oid)
+      AND NOT has_table_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      AND NOT has_any_column_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,REFERENCES')
+      AND (SELECT count(*) = 4 AND bool_and(c.relrowsecurity AND c.relforcerowsecurity AND c.relowner <> r.oid)
         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'aegis' AND c.relname IN ('tenants', 'support_cases', 'audit_events')) AS safe
+        WHERE n.nspname = 'aegis' AND c.relname IN ('tenants', 'support_cases', 'audit_events', 'memberships')) AS safe
     FROM pg_roles r WHERE r.rolname = current_user`);
   if (result.rows[0]?.safe !== true) throw new Error('Unsafe application database role or schema.');
 }
@@ -33,6 +35,7 @@ export async function withTenantTransaction<T>(pool: Pool, fixture: DevelopmentF
   let broken = false;
   try {
     await client.query('BEGIN');
+    await client.query("SELECT set_config('aegis.access_mode', 'fixture', true), set_config('aegis.principal_issuer', '', true), set_config('aegis.principal_subject', '', true)");
     await client.query("SELECT set_config('aegis.tenant_id', $1, true)", [fixture.tenantId]);
     const result = await operation(client);
     await client.query('COMMIT');

@@ -20,9 +20,19 @@ Demonstrate enterprise-ready systems thinking: multi-tenant support copilot, sou
 
 See [ADR 002](adr/002-local-multitenant-case-storage.md) and the [README runbook](../README.md). Runtime credentials can choose tenant context and therefore remain a trusted-server credential, not proof of an end user's tenant identity. Production identity is the next authorization boundary.
 
+## Milestone 2B — local Auth0 identity and tenant authorization
+
+- Optional Auth0 OIDC access-token verification uses a configured HTTPS issuer, issuer-derived JWKS, RS256 only, exact issuer/API audience, required subject and expiry, and standard not-before validation when present. Only signed `scope` values authorize API permissions; role and permissions claims do not replace database authorization.
+- Server-side memberships bind verified issuer/subject to a tenant and `reader`/`operator` role. The required scope and membership role must both permit an operation. A tenant path value selects the membership to check but is not proof of access.
+- Versioned migration 002 adds a forced-RLS membership table, SELECT-only membership access for `aegis_app`, and authenticated-principal checks to tenant/case/audit policies. Each request resolves membership and performs work in one repeatable-read transaction with transaction-local principal and tenant context.
+- A local administrator-only CLI provisions memberships. Existing synthetic triage remains unchanged. Auth0 dashboard setup is manual; there is no browser login, cloud setup, real LLM call or production deployment.
+- Unit tests use generated local signing keys; integration tests verify authentication through PostgreSQL RLS using the isolated local test database.
+
+See [ADR 003](adr/003-auth0-tenant-authorization.md), the [security runbook](SECURITY-RUNBOOK.md), and [README setup](../README.md#auth0-protected-case-api-milestone-2b). Membership revocation applies to new transactions after commit; an in-flight repeatable-read request can complete from its snapshot. Existing case-change audit rows lack authenticated actor attribution.
+
 ## Vertical slice 1 — actual product foundations
 - PostgreSQL tables for tenants, users, documents, audit events; deny cross-tenant queries.
-- Real JWT issuer, audience, JWKS signature, expiry and scope validation (Auth0).
+- Measured AI and retrieval, building on the local Auth0/JWT and tenant-membership foundation in Milestone 2B.
 - Tests for unauthorized access, incorrect audiences, expired tokens and cross-tenant IDs.
 
 ## Vertical slice 2 — measured AI
