@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, it } from 'node:test';
-import { classifyHcpPlan, createBindingMarker, inspectBackendMetadata, verifyHcpConfiguration } from './hcp-preflight.mjs';
+import { bindingMarkerName, classifyHcpPlan, createBindingMarker, inspectBackendMetadata, verifyHcpConfiguration } from './hcp-preflight.mjs';
 
 const temporaryDirectories = new Set();
 const syntheticToken = 'synthetic-hcp-test-token-never-real';
@@ -78,13 +78,13 @@ async function prepareManagedState(home, terraformRoot, { workspaceId = 'ws-1', 
   await chmod(metadataDirectory, 0o700);
   await writeFile(path.join(metadataDirectory, 'terraform.tfstate'), JSON.stringify({
     version: 3, serial: 1, backend: { type: 'cloud', config: {
-      hostname: 'app.terraform.io', organization: 'aegis-ai-portfolio',
-      token: 'synthetic-backend-token-must-not-leak', workspaces: { name: backendWorkspace },
+      hostname: null, organization: 'aegis-ai-portfolio', token: null,
+      workspaces: { name: backendWorkspace, project: null, tags: [] },
     } },
   }), { mode: 0o600 });
   const backendFingerprint = inspectBackendMetadata({ backend: { type: 'cloud', config: {
-    hostname: 'app.terraform.io', organization: 'aegis-ai-portfolio',
-    token: 'synthetic-backend-token-must-not-leak', workspaces: { name: 'aegis-auth0-dev' },
+    hostname: null, organization: 'aegis-ai-portfolio', token: null,
+    workspaces: { name: 'aegis-auth0-dev', project: null, tags: [] },
   } } });
   const stateVersion = { data: { type: 'state-versions', id: stateVersionId, attributes: {
     serial, status: 'finalized', intermediate: false, 'resources-processed': true, resources,
@@ -106,6 +106,31 @@ async function prepareManagedState(home, terraformRoot, { workspaceId = 'ws-1', 
     return jsonResponse(body);
   };
   return { fetchImpl, stateVersion };
+}
+
+async function prepareBootstrapRepair(home, terraformRoot, { backendOrganization = 'aegis-ai-portfolio', backendWorkspace = 'aegis-auth0-dev', markerFingerprint = null, markerWorkspaceId = 'ws-1', marker = undefined } = {}) {
+  const metadataDirectory = path.join(terraformRoot, '.terraform');
+  await mkdir(metadataDirectory, { recursive: true, mode: 0o700 });
+  await chmod(metadataDirectory, 0o700);
+  const backend = { backend: { type: 'cloud', config: {
+    hostname: null, organization: backendOrganization, token: null,
+    workspaces: { name: backendWorkspace, project: null, tags: [] },
+  } } };
+  await writeFile(path.join(metadataDirectory, 'terraform.tfstate'), JSON.stringify(backend), { mode: 0o600 });
+  const effectiveMarker = marker ?? createBindingMarker({
+    workspaceId: markerWorkspaceId,
+    backendFingerprint: markerFingerprint,
+    stateVersionId: null,
+    serial: 0,
+    inventoryHash: null,
+  });
+  const markerPath = path.join(metadataDirectory, bindingMarkerName);
+  await writeFile(markerPath, JSON.stringify(effectiveMarker), { mode: 0o600 });
+  await chmod(markerPath, 0o600);
+  const backendFingerprint = backendOrganization === 'aegis-ai-portfolio' && backendWorkspace === 'aegis-auth0-dev'
+    ? inspectBackendMetadata(backend)
+    : null;
+  return { backend, backendFingerprint, markerPath, markerContents: JSON.stringify(effectiveMarker), fetchImpl: responses() };
 }
 
 describe('HCP Terraform read-only preflight', () => {
@@ -243,6 +268,32 @@ describe('HCP Terraform read-only preflight', () => {
     await assert.rejects(verifyHcpConfiguration({ home, fetchImpl: responses({ workspace: unavailable }) }), /relationship is missing or ambiguous/);
   });
 
+  it('normalizes Terraform CLI cloud metadata defaults and rejects nondefault host, project, or tags', () => {
+    const actualMetadata = { backend: { type: 'cloud', config: {
+      hostname: null,
+      organization: 'aegis-ai-portfolio',
+      token: null,
+      workspaces: { name: 'aegis-auth0-dev', project: null, tags: [] },
+    } } };
+    const fingerprint = inspectBackendMetadata(actualMetadata);
+    assert.match(fingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(inspectBackendMetadata({ backend: { type: 'cloud', config: {
+      ...actualMetadata.backend.config, token: 'synthetic-token-must-not-affect-fingerprint',
+    } } }), fingerprint);
+
+    const nondefaultHost = structuredClone(actualMetadata);
+    nondefaultHost.backend.config.hostname = 'other.example.com';
+    assert.throws(() => inspectBackendMetadata(nondefaultHost), /does not bind exactly/);
+
+    const namedProject = structuredClone(actualMetadata);
+    namedProject.backend.config.workspaces.project = 'another-project';
+    assert.throws(() => inspectBackendMetadata(namedProject), /does not bind exactly/);
+
+    const taggedWorkspace = structuredClone(actualMetadata);
+    taggedWorkspace.backend.config.workspaces.tags = ['another-workspace'];
+    assert.throws(() => inspectBackendMetadata(taggedWorkspace), /does not bind exactly/);
+  });
+
   it('accepts reinitialization only when backend, workspace, state version and exact resource inventory match the local ownership marker', async () => {
     const home = await makeHome();
     const terraformRoot = await mkdtemp(path.join(os.tmpdir(), 'aegis-managed-state-'));
@@ -252,6 +303,66 @@ describe('HCP Terraform read-only preflight', () => {
     assert.equal(result.state, 'verified-managed-state');
     assert.equal(result.stateVersionId, 'version-1');
     assert.equal(result.serial, 1);
+  });
+
+  it('permits bootstrap-marker repair only for an intact empty bootstrap marker and exact module backend, without writing it', async () => {
+    const home = await makeHome();
+    const terraformRoot = await mkdtemp(path.join(os.tmpdir(), 'aegis-bootstrap-repair-'));
+    temporaryDirectories.add(terraformRoot);
+    const fixture = await prepareBootstrapRepair(home, terraformRoot);
+    const result = await verifyHcpConfiguration({ home, terraformRoot, fetchImpl: fixture.fetchImpl, mode: 'repair-bootstrap' });
+    assert.equal(result.state, 'repairable-empty-bootstrap');
+    assert.equal(result.backendFingerprint, fixture.backendFingerprint);
+    assert.match(result.backendFingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(await readFile(fixture.markerPath, 'utf8'), fixture.markerContents);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const staleFingerprint = '0'.repeat(64);
+    const stale = await prepareBootstrapRepair(home, terraformRoot, { markerFingerprint: staleFingerprint });
+    const staleResult = await verifyHcpConfiguration({ home, terraformRoot, fetchImpl: stale.fetchImpl, mode: 'repair-bootstrap' });
+    assert.equal(staleResult.state, 'repairable-empty-bootstrap');
+    assert.equal(staleResult.backendFingerprint, stale.backendFingerprint);
+    assert.notEqual(staleResult.backendFingerprint, staleFingerprint);
+    assert.equal(await readFile(stale.markerPath, 'utf8'), stale.markerContents);
+  });
+
+  it('rejects bootstrap-marker repair for populated state, missing or malformed markers, foreign workspace/backend, and an already-correct marker', async () => {
+    const home = await makeHome();
+    const terraformRoot = await mkdtemp(path.join(os.tmpdir(), 'aegis-bootstrap-repair-'));
+    temporaryDirectories.add(terraformRoot);
+
+    const populated = { data: { type: 'workspaces', id: 'ws-1', attributes: {
+      name: 'aegis-auth0-dev', 'execution-mode': 'local', 'auto-apply': false,
+    }, relationships: { organization: { data: { id: 'org-1' } }, 'current-state-version': { data: { id: 'state-1', type: 'state-versions' } } } } };
+    await prepareBootstrapRepair(home, terraformRoot);
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: responses({ workspace: populated }), mode: 'repair-bootstrap' }), /allowed only when HCP explicitly reports no current state/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const withoutMarker = await prepareBootstrapRepair(home, terraformRoot);
+    await rm(withoutMarker.markerPath);
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: withoutMarker.fetchImpl, mode: 'repair-bootstrap' }), /intact empty-bootstrap marker/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const malformed = await prepareBootstrapRepair(home, terraformRoot, { marker: { schemaVersion: 1, serial: 0 } });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: malformed.fetchImpl, mode: 'repair-bootstrap' }), /not an intact empty-bootstrap marker/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const foreignWorkspace = await prepareBootstrapRepair(home, terraformRoot, { markerWorkspaceId: 'foreign-workspace-id' });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: foreignWorkspace.fetchImpl, mode: 'repair-bootstrap' }), /not an intact empty-bootstrap marker/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const foreignBackend = await prepareBootstrapRepair(home, terraformRoot, { backendOrganization: 'another-org' });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: foreignBackend.fetchImpl, mode: 'repair-bootstrap' }), /does not bind exactly/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const matchingBackend = { backend: { type: 'cloud', config: {
+      hostname: null, organization: 'aegis-ai-portfolio', token: null,
+      workspaces: { name: 'aegis-auth0-dev', project: null, tags: [] },
+    } } };
+    const fingerprint = inspectBackendMetadata(matchingBackend);
+    const alreadyCorrect = await prepareBootstrapRepair(home, terraformRoot, { markerFingerprint: fingerprint });
+    await assert.rejects(verifyHcpConfiguration({ home, terraformRoot, fetchImpl: alreadyCorrect.fetchImpl, mode: 'repair-bootstrap' }), /already matches the verified backend/);
+    assert.equal(await readFile(alreadyCorrect.markerPath, 'utf8'), alreadyCorrect.markerContents);
   });
 
   it('rejects foreign inventory, workspace mismatch, missing metadata and replaced state versions', async () => {
@@ -316,7 +427,10 @@ const args = process.argv.slice(2);
 if (args[0] === 'init') {
   const metadataDirectory = path.join(process.cwd(), '.terraform');
   mkdirSync(metadataDirectory, { recursive: true });
-  writeFileSync(path.join(metadataDirectory, 'terraform.tfstate'), JSON.stringify({ backend: { type: 'cloud' } }), { mode: 0o666 });
+  writeFileSync(path.join(metadataDirectory, 'terraform.tfstate'), JSON.stringify({ backend: { type: 'cloud', config: {
+    hostname: null, organization: 'aegis-ai-portfolio', token: null,
+    workspaces: { name: 'aegis-auth0-dev', project: null, tags: [] },
+  } } }), { mode: 0o666 });
 }
 writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ args, umask: process.umask() & 0o077 }));
 `);
@@ -327,7 +441,8 @@ writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ args, umask: process
     await writeFile(path.join(credentialDirectory, 'credentials.tfrc.json'), JSON.stringify({ credentials: { 'app.terraform.io': { token: syntheticToken } } }), { mode: 0o600 });
     const preload = path.join(temp, 'mock-hcp.mjs');
     await writeFile(preload, `
-      globalThis.fetch = async (url) => {
+      globalThis.fetch = async (url, options) => {
+        if (options.headers.Authorization !== 'Bearer synthetic-hcp-test-token-never-real') throw new Error('unexpected HCP credential source');
         if (process.env.MOCK_HCP_MODE === 'failure') return { ok: false, status: 403, json: async () => ({ errors: [{ detail: 'private response content' }] }) };
         const organization = { data: { type: 'organizations', id: 'org-1', attributes: { name: 'aegis-ai-portfolio', 'plan-identifier': 'free_standard', 'plan-is-trial': false, 'plan-expired': false, 'plan-is-enterprise': false } } };
         const subscription = { data: { type: 'subscriptions', id: 'subscription-1', attributes: { 'is-active': true, 'is-public-free-tier': true, 'is-self-serve-trial': false }, relationships: { organization: { data: { id: 'org-1' } }, 'feature-set': { data: { id: 'feature-set-1' } } } }, included: [{ type: 'feature-sets', id: 'feature-set-1', attributes: { identifier: 'free_standard', 'is-current': true, 'is-free-tier': true } }] };
@@ -339,12 +454,21 @@ writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ args, umask: process
     const wrapper = wrapperPath;
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: temp, MOCK_HCP_MODE: 'success' };
     const projectMetadata = path.join(wrapperDirectory, '.terraform', 'terraform.tfstate');
+    const projectMarker = path.join(wrapperDirectory, '.terraform', bindingMarkerName);
     const init = spawnSync(process.execPath, ['--import', preload, wrapper, 'init'], { encoding: 'utf8', env });
     assert.equal(init.status, 0, init.stderr);
     const terraformInvocation = JSON.parse(await readFile(captured, 'utf8'));
     assert.deepEqual(terraformInvocation.args, ['init', '-input=false', '-no-color']);
     assert.equal(terraformInvocation.umask, 0o077);
     assert.equal((await stat(projectMetadata)).mode & 0o777, 0o600);
+    assert.equal((await stat(path.join(wrapperDirectory, '.terraform'))).mode & 0o777, 0o700);
+    const backendMetadata = JSON.parse(await readFile(projectMetadata, 'utf8'));
+    const marker = JSON.parse(await readFile(projectMarker, 'utf8'));
+    assert.equal(marker.backendFingerprint, inspectBackendMetadata(backendMetadata));
+    assert.equal(marker.organization, 'aegis-ai-portfolio');
+    assert.equal(marker.workspace, 'aegis-auth0-dev');
+    assert.notEqual(marker.backendFingerprint, null);
+    assert.equal((await stat(projectMarker)).mode & 0o777, 0o600);
     assert.match(init.stdout, /HCP preflight passed/);
     assert.doesNotMatch(`${init.stdout}${init.stderr}`, new RegExp(syntheticToken));
 
@@ -361,5 +485,54 @@ writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ args, umask: process
       const result = spawnSync(process.execPath, [wrapper, ...denied.split(' ')], { encoding: 'utf8', env });
       assert.notEqual(result.status, 0, `${denied} should be denied`);
     }
+  });
+
+  it('standalone preflight resolves Terraform metadata beside its module while reading CLI credentials from HOME', async () => {
+    const temp = await mkdtemp(path.join(os.tmpdir(), 'aegis-hcp-standalone-'));
+    temporaryDirectories.add(temp);
+    const moduleDirectory = path.join(temp, 'infra', 'terraform', 'auth0');
+    const home = temp;
+    await mkdir(moduleDirectory, { recursive: true });
+    const script = path.join(moduleDirectory, 'hcp-preflight.mjs');
+    await copyFile(new URL('./hcp-preflight.mjs', import.meta.url), script);
+
+    const credentialDirectory = path.join(home, '.terraform.d');
+    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(credentialDirectory, 'credentials.tfrc.json'), JSON.stringify({
+      credentials: { 'app.terraform.io': { token: syntheticToken } },
+    }), { mode: 0o600 });
+
+    const moduleMetadataDirectory = path.join(moduleDirectory, '.terraform');
+    await mkdir(moduleMetadataDirectory, { mode: 0o700 });
+    const moduleBackend = { backend: { type: 'cloud', config: {
+      hostname: null, organization: 'aegis-ai-portfolio', token: null,
+      workspaces: { name: 'aegis-auth0-dev', project: null, tags: [] },
+    } } };
+    await writeFile(path.join(moduleMetadataDirectory, 'terraform.tfstate'), JSON.stringify(moduleBackend), { mode: 0o600 });
+
+    // Put a conflicting binding at repository root so a regression to repo-root resolution fails closed.
+    const wrongMetadataDirectory = path.join(temp, '.terraform');
+    await mkdir(wrongMetadataDirectory, { mode: 0o700 });
+    await writeFile(path.join(wrongMetadataDirectory, 'terraform.tfstate'), JSON.stringify({ backend: { type: 'cloud', config: {
+      hostname: null, organization: 'another-org', token: null,
+      workspaces: { name: 'another-workspace', project: null, tags: [] },
+    } } }), { mode: 0o600 });
+
+    const preload = path.join(temp, 'mock-standalone.mjs');
+    await writeFile(preload, `
+      globalThis.fetch = async (url, options) => {
+        if (options.headers.Authorization !== 'Bearer ${syntheticToken}') throw new Error('unexpected HCP credential source');
+        const organization = { data: { type: 'organizations', id: 'org-1', attributes: { name: 'aegis-ai-portfolio', 'plan-identifier': 'free_standard', 'plan-is-trial': false, 'plan-expired': false, 'plan-is-enterprise': false } } };
+        const subscription = { data: { type: 'subscriptions', id: 'subscription-1', attributes: { 'is-active': true, 'is-public-free-tier': true, 'is-self-serve-trial': false }, relationships: { organization: { data: { id: 'org-1' } }, 'feature-set': { data: { id: 'feature-set-1' } } } }, included: [{ type: 'feature-sets', id: 'feature-set-1', attributes: { identifier: 'free_standard', 'is-current': true, 'is-free-tier': true } }] };
+        const workspace = { data: { type: 'workspaces', id: 'ws-1', attributes: { name: 'aegis-auth0-dev', 'execution-mode': 'local', 'auto-apply': false }, relationships: { organization: { data: { id: 'org-1' } }, 'current-state-version': { data: null } } } };
+        return { ok: true, status: 200, json: async () => url.endsWith('/organizations/aegis-ai-portfolio') ? organization : url.endsWith('/subscription') ? subscription : workspace };
+      };
+    `);
+    const result = spawnSync(process.execPath, [script], { encoding: 'utf8', env: { ...process.env, HOME: home, NODE_OPTIONS: `--import=${preload}` }, cwd: temp });
+    assert.equal(result.status, 0, `stdout=${result.stdout}\nstderr=${result.stderr}`);
+    assert.match(result.stdout, /"state": "empty-bootstrap"/, `stdout=${result.stdout}\nstderr=${result.stderr}`);
+    assert.match(result.stdout, /Preflight passed/);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(syntheticToken));
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /another-org|another-workspace/);
   });
 });

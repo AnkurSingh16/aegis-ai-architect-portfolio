@@ -25,6 +25,9 @@ const action = process.argv[2];
 if (action === 'bind-reviewed-state') {
   if (process.argv.length !== 3) usage();
   await bindReviewedState();
+} else if (action === 'repair-empty-bootstrap-marker') {
+  if (process.argv.length !== 3) usage();
+  await repairEmptyBootstrapMarker();
 } else if (!Object.hasOwn(operations, action) || process.argv.length !== 3) {
   usage();
 } else {
@@ -34,7 +37,7 @@ if (action === 'bind-reviewed-state') {
 async function runTerraform(operation) {
   if (operation === 'init' || operation === 'plan') {
     try {
-      const metadata = await verifyHcpConfiguration({ terraformRoot: root });
+      const metadata = await verifyHcpConfiguration({ terraformRoot: directory });
       console.log(`HCP preflight passed: ${JSON.stringify({ organization: metadata.organization, workspace: metadata.workspace, state: metadata.state })}`);
     } catch (error) {
       console.error(error instanceof Error ? error.message : 'HCP Terraform preflight failed.');
@@ -68,8 +71,11 @@ async function runTerraform(operation) {
   let resultCode = result.code;
   if (operation === 'init' && resultCode === 0) {
     try {
-      await secureBackendMetadata();
-      const metadata = await verifyHcpConfiguration({ terraformRoot: root });
+      await secureTerraformMetadata();
+      const metadata = await verifyHcpConfiguration({ terraformRoot: directory });
+      if (typeof metadata.backendFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(metadata.backendFingerprint)) {
+        throw new Error('Initialized HCP backend fingerprint could not be verified.');
+      }
       if (metadata.state === 'empty-bootstrap') await writeBootstrapMarker(metadata);
     } catch (error) {
       resultCode = 1;
@@ -93,7 +99,11 @@ async function executeTerraform(command, args, env, secret) {
   }).then((result) => ({ ...result, stdout: redact(result.stdout, secret), stderr: redact(result.stderr, secret) }));
 }
 
-async function secureBackendMetadata() {
+async function secureTerraformMetadata() {
+  const directoryInfo = await lstat(terraformDirectory);
+  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('Terraform metadata path is not a regular directory.');
+  await chmod(terraformDirectory, 0o700);
+  if ((await stat(terraformDirectory)).mode & 0o077) throw new Error('Terraform metadata directory permissions remain too broad.');
   const info = await lstat(backendMetadataPath);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error('Terraform backend metadata is not a regular file.');
   await chmod(backendMetadataPath, 0o600);
@@ -129,7 +139,8 @@ async function bindReviewedState() {
   }
   let metadata;
   try {
-    metadata = await verifyHcpConfiguration({ terraformRoot: root, mode: 'bind' });
+    await secureTerraformMetadata();
+    metadata = await verifyHcpConfiguration({ terraformRoot: directory, mode: 'bind' });
     if (metadata.state !== 'reviewable-managed-state') throw new Error('The HCP workspace does not contain a reviewable managed state version.');
   } catch (error) {
     console.error(error instanceof Error ? error.message : 'HCP state could not be reviewed.');
@@ -159,7 +170,55 @@ async function bindReviewedState() {
   }
 }
 
-async function atomicWriteMarker(marker, { allowUpdate = false } = {}) {
+async function repairEmptyBootstrapMarker() {
+  if (!stdin.isTTY || !stdout.isTTY) {
+    console.error('repair-empty-bootstrap-marker requires an interactive terminal. Run it in the normal VS Code Terminal after reviewing the local module metadata.');
+    process.exitCode = 2;
+    return;
+  }
+  let metadata;
+  try {
+    await secureTerraformMetadata();
+    metadata = await verifyHcpConfiguration({ terraformRoot: directory, mode: 'repair-bootstrap' });
+    if (metadata.state !== 'repairable-empty-bootstrap' || typeof metadata.backendFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(metadata.backendFingerprint)) {
+      throw new Error('The local empty-bootstrap marker cannot be safely repaired.');
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Bootstrap marker repair preflight failed.');
+    process.exitCode = 2;
+    return;
+  }
+  console.log(`Verified empty HCP workspace: ${metadata.workspace}`);
+  console.log('Module-local backend metadata matches the expected HCP organization and workspace.');
+  console.log('Only the local mode-0600 bootstrap marker fingerprint will be repaired; no Terraform or HCP write will occur.');
+  const expected = `repair empty bootstrap ${metadata.workspace} ${metadata.workspaceId}`;
+  const readline = createInterface({ input: stdin, output: stdout });
+  let answer;
+  try { answer = await readline.question(`Type exactly "${expected}" to continue: `); }
+  finally { readline.close(); }
+  if (answer !== expected) {
+    console.error('Confirmation did not match; the marker was not changed.');
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    const rechecked = await verifyHcpConfiguration({ terraformRoot: directory, mode: 'repair-bootstrap' });
+    if (rechecked.state !== 'repairable-empty-bootstrap' || rechecked.workspaceId !== metadata.workspaceId ||
+        rechecked.backendFingerprint !== metadata.backendFingerprint ||
+        rechecked.observedMarkerFingerprint !== metadata.observedMarkerFingerprint) {
+      throw new Error('HCP state or the local marker changed during confirmation; no repair was made.');
+    }
+    await atomicWriteMarker(createBindingMarker({
+      ...metadata, stateVersionId: null, serial: 0, inventoryHash: null,
+    }), { repairEmptyBootstrap: true });
+    console.log('The protected local bootstrap marker now records the verified backend fingerprint.');
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Could not repair the local bootstrap marker.');
+    process.exitCode = 1;
+  }
+}
+
+async function atomicWriteMarker(marker, { allowUpdate = false, repairEmptyBootstrap = false } = {}) {
   await mkdir(terraformDirectory, { recursive: true, mode: 0o700 });
   const tempPath = path.join(terraformDirectory, `.aegis-state-binding-${process.pid}-${Date.now()}.tmp`);
   let handle;
@@ -171,15 +230,22 @@ async function atomicWriteMarker(marker, { allowUpdate = false } = {}) {
     handle = undefined;
     try {
       const existing = await lstat(markerPath);
-      if (!allowUpdate) throw new Error('Local ownership marker already exists; refusing to overwrite it.');
       if (!existing.isFile() || existing.isSymbolicLink() || (existing.mode & 0o077) !== 0) throw new Error('Existing local ownership marker is unsafe.');
       const parsed = JSON.parse(await readFile(markerPath, 'utf8'));
-      if (parsed?.schemaVersion !== 1 || parsed?.rootIdentity !== marker.rootIdentity || parsed?.organization !== marker.organization ||
-          parsed?.workspace !== marker.workspace || parsed?.workspaceId !== marker.workspaceId || parsed?.backendFingerprint !== marker.backendFingerprint) {
+      const sameWorkspace = parsed?.schemaVersion === 1 && parsed?.rootIdentity === marker.rootIdentity &&
+        parsed?.organization === marker.organization && parsed?.workspace === marker.workspace && parsed?.workspaceId === marker.workspaceId;
+      const validBootstrap = sameWorkspace && parsed?.stateVersionId === null && parsed?.serial === 0 && parsed?.inventoryHash === null &&
+        (parsed?.backendFingerprint === null || (typeof parsed?.backendFingerprint === 'string' && /^[a-f0-9]{64}$/.test(parsed.backendFingerprint)));
+      if ((repairEmptyBootstrap && !validBootstrap) ||
+          (!repairEmptyBootstrap && !allowUpdate) ||
+          (!repairEmptyBootstrap && allowUpdate && (!sameWorkspace || parsed?.backendFingerprint !== marker.backendFingerprint))) {
         throw new Error('Existing ownership marker is bound to another root or workspace; manual review is required.');
       }
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+      if (error?.code !== 'ENOENT' || repairEmptyBootstrap) {
+        if (error?.code === 'ENOENT' && repairEmptyBootstrap) throw new Error('The bootstrap marker disappeared during repair; manual review is required.');
+        throw error;
+      }
     }
     await rename(tempPath, markerPath);
     await chmod(markerPath, 0o600);
@@ -208,7 +274,7 @@ function parseCredentials(contents) {
 
 function redact(value, secret) { return secret ? value.split(secret).join('[REDACTED]') : value; }
 function usage() {
-  console.error('Usage: node infra/terraform/auth0/terraform-local.mjs <fmt|init|validate|plan|bind-reviewed-state>');
+  console.error('Usage: node infra/terraform/auth0/terraform-local.mjs <fmt|init|validate|plan|bind-reviewed-state|repair-empty-bootstrap-marker>');
   console.error('Apply, destroy, import, state commands, and arbitrary Terraform arguments are unavailable.');
   process.exit(2);
 }

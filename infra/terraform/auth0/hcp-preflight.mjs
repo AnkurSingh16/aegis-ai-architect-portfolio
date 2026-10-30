@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { lstat, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,14 +100,20 @@ export function inspectBackendMetadata(metadata) {
   }
   const config = metadata.backend.config;
   const allowedConfigKeys = new Set(['hostname', 'organization', 'token', 'workspaces']);
+  const workspaceConfig = config.workspaces;
+  const allowedWorkspaceKeys = new Set(['name', 'project', 'tags']);
+  const emptyTags = workspaceConfig?.tags === undefined || workspaceConfig.tags === null ||
+    (Array.isArray(workspaceConfig.tags) && workspaceConfig.tags.length === 0);
+  const hostname = config.hostname ?? 'app.terraform.io';
   if (Object.keys(config).some((key) => !allowedConfigKeys.has(key)) ||
-      config.hostname !== 'app.terraform.io' || config.organization !== organizationName ||
-      !config.workspaces || Object.keys(config.workspaces).length !== 1 || config.workspaces.name !== workspaceName ||
-      (config.token !== undefined && typeof config.token !== 'string')) {
+      hostname !== 'app.terraform.io' || config.organization !== organizationName ||
+      !workspaceConfig || Object.keys(workspaceConfig).some((key) => !allowedWorkspaceKeys.has(key)) ||
+      workspaceConfig.name !== workspaceName || (workspaceConfig.project !== undefined && workspaceConfig.project !== null) || !emptyTags ||
+      (config.token !== undefined && config.token !== null && typeof config.token !== 'string')) {
     failClosed('Local Terraform backend metadata does not bind exactly to the expected HCP organization and workspace.');
   }
   // Do not return or hash backend config wholesale: it can contain an HCP token.
-  return digest({ hostname: config.hostname, organization: config.organization, workspace: config.workspaces.name });
+  return digest({ hostname, organization: config.organization, workspace: config.workspaces.name });
 }
 
 function normalizeInventory(stateVersion) {
@@ -156,7 +163,7 @@ function validateMarker(marker, expected) {
 
 /** Read-only verification of HCP plan, workspace, backend binding and managed-state identity. */
 export async function verifyHcpConfiguration({ home = os.homedir(), terraformRoot = process.cwd(), fetchImpl = fetch, mode = 'reinit' } = {}) {
-  if (!['reinit', 'bind'].includes(mode)) throw new Error('Unsupported HCP preflight mode.');
+  if (!['reinit', 'bind', 'repair-bootstrap'].includes(mode)) throw new Error('Unsupported HCP preflight mode.');
   const tokenPath = path.join(home, '.terraform.d', 'credentials.tfrc.json');
   const credentials = await readProtectedJson(tokenPath, 'Terraform CLI credentials');
   const token = credentials?.credentials?.['app.terraform.io']?.token;
@@ -203,6 +210,14 @@ export async function verifyHcpConfiguration({ home = os.homedir(), terraformRoo
   const markerData = await readProtectedJson(markerPath, 'Local state ownership marker', { missing: true });
 
   if (relation.data === null) {
+    if (mode === 'repair-bootstrap') {
+      if (!backendMetadata || !backendFingerprint) failClosed('Empty bootstrap marker repair requires verified module-local backend metadata.');
+      validateBootstrapMarkerForRepair(markerData, { workspaceId: workspace.id });
+      if (markerData.backendFingerprint === backendFingerprint) failClosed('The empty bootstrap marker already matches the verified backend; no repair is needed.');
+      return { organization: organizationName, plan, workspace: workspaceName, workspaceId: workspace.id,
+        executionMode: 'local', autoApply: false, state: 'repairable-empty-bootstrap', backendFingerprint,
+        observedMarkerFingerprint: markerData.backendFingerprint };
+    }
     if (markerData !== undefined) {
       const marker = validateMarker(markerData, { workspaceId: workspace.id, backendFingerprint });
       if (marker.stateVersionId !== null || marker.serial !== 0 || marker.inventoryHash !== null) {
@@ -212,6 +227,8 @@ export async function verifyHcpConfiguration({ home = os.homedir(), terraformRoo
     return { organization: organizationName, plan, workspace: workspaceName, workspaceId: workspace.id,
       executionMode: 'local', autoApply: false, state: 'empty-bootstrap', backendFingerprint };
   }
+
+  if (mode === 'repair-bootstrap') failClosed('Bootstrap marker repair is allowed only when HCP explicitly reports no current state.');
 
   const versionId = relation.data?.id;
   if (relation.data?.type !== 'state-versions' || typeof versionId !== 'string' || !versionId || !backendMetadata || !backendFingerprint) {
@@ -231,6 +248,18 @@ export async function verifyHcpConfiguration({ home = os.homedir(), terraformRoo
   return { organization: organizationName, plan, workspace: workspaceName, workspaceId: workspace.id,
     executionMode: 'local', autoApply: false, state: mode === 'bind' ? 'reviewable-managed-state' : 'verified-managed-state',
     backendFingerprint, ...identity };
+}
+
+function validateBootstrapMarkerForRepair(marker, { workspaceId }) {
+  const keys = ['schemaVersion', 'rootIdentity', 'organization', 'workspace', 'workspaceId', 'backendFingerprint', 'stateVersionId', 'serial', 'inventoryHash'];
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker) ||
+      Object.keys(marker).length !== keys.length || Object.keys(marker).some((key) => !keys.includes(key)) ||
+      marker.schemaVersion !== 1 || marker.rootIdentity !== rootIdentity || marker.organization !== organizationName ||
+      marker.workspace !== workspaceName || marker.workspaceId !== workspaceId ||
+      (marker.backendFingerprint !== null && (typeof marker.backendFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(marker.backendFingerprint))) ||
+      marker.stateVersionId !== null || marker.serial !== 0 || marker.inventoryHash !== null) {
+    failClosed('Existing local marker is not an intact empty-bootstrap marker; manual review is required.');
+  }
 }
 
 async function verifyTerraformMetadataDirectory(directoryPath) {
@@ -267,7 +296,7 @@ async function main() {
   }
   try {
     const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-    const metadata = await verifyHcpConfiguration({ terraformRoot: path.resolve(moduleDirectory, '../../..') });
+    const metadata = await verifyHcpConfiguration({ terraformRoot: moduleDirectory });
     console.log(JSON.stringify({
       organization: metadata.organization,
       plan: metadata.plan,
@@ -283,4 +312,10 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();
+if (isMainModule(process.argv[1], import.meta.url)) await main();
+
+function isMainModule(argvPath, moduleUrl) {
+  if (!argvPath) return false;
+  try { return moduleUrl === pathToFileURL(realpathSync(path.resolve(argvPath))).href; }
+  catch { return false; }
+}

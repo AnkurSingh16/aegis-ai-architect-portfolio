@@ -58,6 +58,8 @@ describe('Auth0 local tooling', () => {
     expect(result.stdout + result.stderr).not.toContain('synthetic-database-url');
     expect(result.stdout + result.stderr).not.toContain('synthetic-admin-url');
     expect(result.stdout + result.stderr).not.toContain('unexpected.tfplan');
+    const terraformCredentials = await readFile(path.join(root, 'terraform-credentials-used'), 'utf8');
+    expect(terraformCredentials).toBe('example.us.auth0.com\nsynthetic-client-id\n');
   });
 
   it.each(['apply', 'destroy', 'state', 'import'])('denies the %s command before invoking Terraform', async (action) => {
@@ -115,6 +117,7 @@ async function installWrapperFixture(root: string): Promise<string> {
     'printf "%s\\n" "$AUTH0_CLIENT_SECRET" >&2',
     'printf "%s\\n" "$DATABASE_URL" "$DATABASE_ADMIN_URL" "$TF_CLI_ARGS_plan" "$TF_LOG"',
     'printf "%s\\n" "$1 $2 $3" > "$TMPDIR/terraform-invoked"',
+    'printf "%s\\n%s\\n" "$AUTH0_DOMAIN" "$AUTH0_CLIENT_ID" > "$TMPDIR/terraform-credentials-used"',
   ].join('\n'));
   await chmod(fakeTerraform, 0o700);
   return wrapper;
