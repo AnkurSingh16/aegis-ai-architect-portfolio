@@ -18,6 +18,12 @@ const temporaryDirectories = new Set();
 const fakeAuth0Secret = 'synthetic-auth0-client-secret-for-test';
 const fakeHcpToken = 'synthetic-hcp-token-for-first-apply-tests';
 const testModuleDirectory = path.dirname(new URL(import.meta.url).pathname);
+const planInputs = Object.freeze({
+  connectionId: 'con_synthetic_test',
+  apiIdentifier: 'https://aegis-ai.local/api',
+  spaName: 'Aegis AI Local SPA',
+  auth0Domain: 'example.us.auth0.com',
+});
 
 afterEach(async () => {
   await Promise.all([...temporaryDirectories].map((directory) => rm(directory, { recursive: true, force: true })));
@@ -25,26 +31,108 @@ afterEach(async () => {
 });
 
 function validPlanDocument(overrides = {}) {
-  const resources = expectedResourceAddresses.map((address) => {
+  const resources = [
+    {
+      address: 'auth0_resource_server.cases', mode: 'managed', type: 'auth0_resource_server', name: 'cases',
+      provider_name: 'registry.terraform.io/auth0/auth0',
+      change: {
+        actions: ['create'], before: null,
+        after: { name: 'Aegis Case API', identifier: planInputs.apiIdentifier, signing_alg: 'RS256', enforce_policies: false },
+        after_unknown: { id: true, client_id: true, signing_secret: true },
+        before_sensitive: false, after_sensitive: { signing_secret: true }, replace_paths: [],
+      },
+    },
+    ...[
+      { address: 'auth0_resource_server_scope.read_cases', type: 'auth0_resource_server_scope', name: 'read_cases', scope: 'read:cases', description: 'Read cases for an authorized tenant membership.' },
+      { address: 'auth0_resource_server_scope.write_cases', type: 'auth0_resource_server_scope', name: 'write_cases', scope: 'write:cases', description: 'Create and update cases for an authorized tenant membership.' },
+    ].map((resource) => ({
+      address: resource.address, mode: 'managed', type: resource.type, name: resource.name,
+      provider_name: 'registry.terraform.io/auth0/auth0',
+      change: {
+        actions: ['create'], before: null,
+        after: { scope: resource.scope, description: resource.description, resource_server_identifier: planInputs.apiIdentifier },
+        after_unknown: { id: true }, before_sensitive: false, after_sensitive: {}, replace_paths: [],
+      },
+    })),
+    {
+      address: 'auth0_client.local_spa', mode: 'managed', type: 'auth0_client', name: 'local_spa',
+      provider_name: 'registry.terraform.io/auth0/auth0',
+      change: {
+        actions: ['create'], before: null,
+        after: {
+          name: planInputs.spaName, app_type: 'spa', oidc_conformant: true, is_first_party: true,
+          grant_types: ['authorization_code'], callbacks: ['http://127.0.0.1:49321/auth/callback'],
+          allowed_origins: ['http://127.0.0.1:49321'], web_origins: ['http://127.0.0.1:49321'],
+          allowed_logout_urls: ['http://127.0.0.1:49321'],
+        },
+        after_unknown: { id: true, client_id: true, signing_keys: true },
+        before_sensitive: false, after_sensitive: { signing_keys: true }, replace_paths: [],
+      },
+    },
+    {
+      address: 'auth0_connection_client.local_spa_database', mode: 'managed', type: 'auth0_connection_client', name: 'local_spa_database',
+      provider_name: 'registry.terraform.io/auth0/auth0',
+      change: {
+        actions: ['create'], before: null,
+        after: { connection_id: planInputs.connectionId, client_id: null },
+        after_unknown: { client_id: true, id: true }, before_sensitive: false, after_sensitive: {}, replace_paths: [],
+      },
+    },
+  ];
+  const configurationExpressionKeys = {
+    'auth0_resource_server.cases': ['enforce_policies', 'identifier', 'name', 'signing_alg'],
+    'auth0_resource_server_scope.read_cases': ['description', 'resource_server_identifier', 'scope'],
+    'auth0_resource_server_scope.write_cases': ['description', 'resource_server_identifier', 'scope'],
+    'auth0_client.local_spa': ['allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'grant_types', 'is_first_party', 'name', 'oidc_conformant', 'web_origins'],
+    'auth0_connection_client.local_spa_database': ['client_id', 'connection_id'],
+  };
+  const configuredResources = expectedResourceAddresses.map((address) => {
     const [type, name] = address.split('.');
+    const expressions = Object.fromEntries(configurationExpressionKeys[address].map((key) => [key, {}]));
+    if (address === 'auth0_connection_client.local_spa_database') {
+      expressions.connection_id = { references: ['var.database_connection_id'] };
+      expressions.client_id = { references: ['auth0_client.local_spa.id', 'auth0_client.local_spa'] };
+    }
     return {
-      address, mode: 'managed', type, name, provider_name: 'registry.terraform.io/auth0/auth0',
-      change: { actions: ['create'], before: null, after: {}, after_unknown: {}, before_sensitive: {}, after_sensitive: {}, replace_paths: [] },
+      address, mode: 'managed', type, name, provider_config_key: 'auth0', expressions,
     };
   });
   return {
     format_version: '1.2', terraform_version: '1.9.8', errored: false, complete: true, applyable: true,
     variables: {
-      database_connection_id: { value: 'con_synthetic_test' },
-      auth0_domain: { value: 'example.us.auth0.com' },
-      api_identifier: { value: 'https://aegis-ai.local/api' },
-      spa_name: { value: 'Aegis AI Local SPA' },
+      database_connection_id: { value: planInputs.connectionId },
+      auth0_domain: { value: planInputs.auth0Domain },
+      api_identifier: { value: planInputs.apiIdentifier },
+      spa_name: { value: planInputs.spaName },
     },
-    resource_changes: resources, resource_drift: [], output_changes: {
-      audience: { actions: ['create'], before: null }, issuer: { actions: ['create'], before: null }, spa_client_id: { actions: ['create'], before: null },
+    resource_changes: resources, output_changes: {
+      audience: { actions: ['create'], before: null, after: planInputs.apiIdentifier, after_unknown: false },
+      issuer: { actions: ['create'], before: null, after: `https://${planInputs.auth0Domain}/`, after_unknown: false },
+      spa_client_id: { actions: ['create'], before: null, after: null, after_unknown: true },
+    },
+    configuration: {
+      provider_config: {
+        auth0: {
+          name: 'auth0', full_name: 'registry.terraform.io/auth0/auth0',
+          expressions: { domain: { references: ['var.auth0_domain'] } },
+        },
+      },
+      root_module: { resources: configuredResources },
     },
     ...overrides,
   };
+}
+
+function validate(document = validPlanDocument(), inputs = planInputs) {
+  return validatePlanDocument(document, inputs);
+}
+
+function replaceResource(document, address, update) {
+  const copy = structuredClone(document);
+  const resource = copy.resource_changes.find((item) => item.address === address);
+  assert.ok(resource, `fixture includes ${address}`);
+  update(resource);
+  return copy;
 }
 
 function makeOutput() {
@@ -148,46 +236,173 @@ async function makeFixture({ preflightStates, applyCode = 0, planDocument = vali
 
 describe('first Auth0 deployment plan validation', () => {
   it('accepts only the five expected root Auth0 resources with create-only actions', () => {
-    assert.deepEqual(validatePlanDocument(validPlanDocument()), {
+    assert.deepEqual(validate(), {
       creates: 5, updates: 0, deletes: 0, addresses: expectedResourceAddresses,
     });
   });
 
-  it('rejects unexpected resources, duplicate addresses, update/delete/replace/import actions, drift, and unknown fields', () => {
+  it('accepts Terraform 1.2 timestamp and absent or empty optional drift fields', () => {
+    const timestamped = validPlanDocument({
+      timestamp: '2026-10-31T01:23:45Z', action_invocations: [], deferred_changes: [],
+      relevant_attributes: [], future_optional_metadata: { origin: 'terraform-1.x' },
+    });
+    assert.deepEqual(validate(timestamped).creates, 5);
+    assert.deepEqual(validate(validPlanDocument({ resource_drift: [] })).creates, 5);
+    assert.throws(() => validate(validPlanDocument({ timestamp: 'not-a-timestamp' })), /timestamp|format|unsupported/i);
+    assert.throws(() => validate(validPlanDocument({ timestamp: '2026-02-30T01:23:45Z' })), /timestamp|format|unsupported/i);
+    assert.throws(() => validate(validPlanDocument({ resource_drift: null })), /drift|structure|unsupported/i);
+    assert.throws(() => validate(validPlanDocument({ resource_drift: 'none' })), /drift|structure|unsupported/i);
+    assert.throws(() => validate(validPlanDocument({ resource_drift: [{ address: 'auth0_client.foreign' }] })), /drift/i);
+  });
+
+  it('validates the exact planned API, scopes, SPA configuration, and database connection association', () => {
+    const mutations = [
+      ['auth0_resource_server.cases', (resource) => { resource.change.after.identifier = 'https://foreign.example/api'; }],
+      ['auth0_resource_server.cases', (resource) => { resource.change.after.signing_alg = 'HS256'; }],
+      ['auth0_resource_server.cases', (resource) => { resource.change.after.name = 'Foreign API'; }],
+      ['auth0_resource_server_scope.read_cases', (resource) => { resource.change.after.scope = 'admin:cases'; }],
+      ['auth0_resource_server_scope.write_cases', (resource) => { resource.change.after.scope = 'delete:cases'; }],
+      ['auth0_resource_server_scope.read_cases', (resource) => { resource.change.after.resource_server_identifier = 'https://foreign.example/api'; }],
+      ['auth0_resource_server_scope.write_cases', (resource) => { resource.change.after.description = 'Unexpected permission'; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.name = 'Foreign SPA'; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.app_type = 'native'; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.grant_types = ['implicit']; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.callbacks = ['https://remote.example/callback']; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.allowed_origins = ['https://remote.example']; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.web_origins = ['https://remote.example']; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.allowed_logout_urls = ['https://remote.example']; }],
+      ['auth0_client.local_spa', (resource) => { resource.change.after.oidc_conformant = false; }],
+      ['auth0_connection_client.local_spa_database', (resource) => { resource.change.after.connection_id = 'con_foreign'; }],
+    ];
+    for (const [address, update] of mutations) {
+      assert.throws(() => validate(replaceResource(validPlanDocument(), address, update)), `${address} mutation must fail validation`);
+    }
+    assert.doesNotThrow(() => validate(), 'the representative pinned-version plan with computed values is valid');
+  });
+
+  it('requires computed dependency fields to be marked unknown and rejects malformed change shapes', () => {
+    const missingUnknownMarker = replaceResource(validPlanDocument(), 'auth0_connection_client.local_spa_database', (resource) => {
+      delete resource.change.after_unknown.client_id;
+    });
+    assert.throws(() => validate(missingUnknownMarker));
+
+    const falselyKnownClient = replaceResource(validPlanDocument(), 'auth0_connection_client.local_spa_database', (resource) => {
+      resource.change.after.client_id = 'client-foreign';
+      resource.change.after_unknown.client_id = false;
+    });
+    assert.throws(() => validate(falselyKnownClient));
+
+    for (const malformed of [
+      replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => { resource.change = null; }),
+      replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => { resource.change.after = null; }),
+      replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => { resource.change.after = []; }),
+      replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => { resource.change.after_unknown = []; }),
+      replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => { resource.change.replace_paths = [['identifier']]; }),
+      replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => { resource.change.importing = { id: 'foreign' }; }),
+    ]) assert.throws(() => validate(malformed));
+  });
+
+  it('verifies that the configured connection association references only the intended SPA and database input', () => {
+    const noConfiguration = validPlanDocument();
+    delete noConfiguration.configuration;
+    assert.throws(() => validate(noConfiguration), /configuration|root resources/i);
+
+    const wrongConnectionInput = validPlanDocument();
+    wrongConnectionInput.configuration.root_module.resources.at(-1).expressions.connection_id.references = ['var.foreign_connection_id'];
+    assert.throws(() => validate(wrongConnectionInput), /associate|connection/i);
+
+    const wrongClientReference = validPlanDocument();
+    wrongClientReference.configuration.root_module.resources.at(-1).expressions.client_id.references = ['auth0_client.foreign_spa.id', 'auth0_client.foreign_spa'];
+    assert.throws(() => validate(wrongClientReference), /associate|connection/i);
+
+    const extraConfiguredResource = validPlanDocument();
+    extraConfiguredResource.configuration.root_module.resources.push({
+      address: 'auth0_action.unrelated', mode: 'managed', type: 'auth0_action', name: 'unrelated', expressions: {},
+    });
+    assert.throws(() => validate(extraConfiguredResource), /root resources/i);
+
+    const provisioner = validPlanDocument();
+    provisioner.configuration.root_module.resources.find((resource) => resource.address === 'auth0_client.local_spa')
+      .provisioners = [{ type: 'local-exec', expressions: { command: {} } }];
+    assert.throws(() => validate(provisioner), /provisioner|configuration/i);
+
+    const extraExpression = validPlanDocument();
+    extraExpression.configuration.root_module.resources.find((resource) => resource.address === 'auth0_resource_server.cases')
+      .expressions.unrelated = {};
+    assert.throws(() => validate(extraExpression), /arguments|configuration/i);
+
+    const aliasedProvider = validPlanDocument();
+    aliasedProvider.configuration.provider_config.auth0.alias = 'unapproved';
+    assert.throws(() => validate(aliasedProvider), /provider|configuration/i);
+
+    const extraProvider = validPlanDocument();
+    extraProvider.configuration.provider_config.foreign = {
+      name: 'auth0', full_name: 'registry.terraform.io/auth0/auth0', alias: 'foreign',
+      expressions: { domain: { references: ['var.auth0_domain'] } },
+    };
+    assert.throws(() => validate(extraProvider), /provider|configuration/i);
+
+    const wrongProviderName = validPlanDocument();
+    wrongProviderName.configuration.provider_config.auth0.name = 'aws';
+    assert.throws(() => validate(wrongProviderName), /provider|configuration/i);
+
+    const wrongProviderType = validPlanDocument();
+    wrongProviderType.configuration.provider_config.auth0.full_name = 'registry.terraform.io/hashicorp/aws';
+    assert.throws(() => validate(wrongProviderType), /provider|configuration/i);
+
+    const wrongDomainReference = validPlanDocument();
+    wrongDomainReference.configuration.provider_config.auth0.expressions.domain.references = ['var.foreign_domain'];
+    assert.throws(() => validate(wrongDomainReference), /provider|domain|configuration/i);
+
+    const mixedProviderKeys = validPlanDocument();
+    mixedProviderKeys.configuration.root_module.resources[0].provider_config_key = 'auth0.foreign';
+    assert.throws(() => validate(mixedProviderKeys), /provider|configuration/i);
+  });
+
+  it('rejects unexpected resources, duplicate addresses, update/delete/replace/import actions, and drift', () => {
     const base = validPlanDocument();
-    assert.throws(() => validatePlanDocument(validPlanDocument({
+    assert.throws(() => validate(validPlanDocument({
       resource_changes: [...base.resource_changes, { ...base.resource_changes[0], address: 'auth0_action.unrelated', type: 'auth0_action', name: 'unrelated' }],
     })), /exactly the five/);
-    assert.throws(() => validatePlanDocument(validPlanDocument({
+    assert.throws(() => validate(validPlanDocument({
       resource_changes: [...base.resource_changes.slice(0, 4), base.resource_changes[0]],
     })), /resource addresses/);
     for (const actions of [['update'], ['delete'], ['delete', 'create'], ['create', 'delete']]) {
       const resources = base.resource_changes.map((resource, index) => index === 0
         ? { ...resource, change: { ...resource.change, actions } } : resource);
-      assert.throws(() => validatePlanDocument(validPlanDocument({ resource_changes: resources })), /unexpected resource action/);
+      assert.throws(() => validate(validPlanDocument({ resource_changes: resources })), /unexpected resource action/);
     }
     const imported = base.resource_changes.map((resource, index) => index === 0
       ? { ...resource, change: { ...resource.change, importing: { id: 'foreign-id' } } } : resource);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ resource_changes: imported })), /unexpected resource action/);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ resource_drift: [{ address: 'auth0_client.foreign' }] })), /contains drift/);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ unexpected: true })), /unsupported/);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ format_version: '2.0' })), /unsupported/);
+    assert.throws(() => validate(validPlanDocument({ resource_changes: imported })), /unexpected resource action/);
+    const withNewMinorMetadata = replaceResource(validPlanDocument(), 'auth0_resource_server.cases', (resource) => {
+      resource.change.future_optional_metadata = { observed: true };
+    });
+    assert.doesNotThrow(() => validate(withNewMinorMetadata));
+    assert.throws(() => validate(validPlanDocument({ resource_drift: [{ address: 'auth0_client.foreign' }] })), /contains drift/);
+    assert.throws(() => validate(validPlanDocument({ format_version: '2.0' })), /unsupported/);
   });
 
   it('rejects stale, incomplete, unknown-provider, nested-module, and output-mutation plans', () => {
     const base = validPlanDocument();
-    assert.throws(() => validatePlanDocument(validPlanDocument({ complete: false })), /incomplete/);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ applyable: false })), /incomplete/);
+    assert.throws(() => validate(validPlanDocument({ complete: false })), /incomplete/);
+    assert.throws(() => validate(validPlanDocument({ applyable: false })), /incomplete/);
     const badProvider = base.resource_changes.map((resource, index) => index === 1
       ? { ...resource, provider_name: 'registry.terraform.io/hashicorp/aws' } : resource);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ resource_changes: badProvider })), /unexpected resource action/);
+    assert.throws(() => validate(validPlanDocument({ resource_changes: badProvider })), /unexpected resource action/);
     const nested = base.resource_changes.map((resource, index) => index === 1
       ? { ...resource, module_address: 'module.foreign' } : resource);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ resource_changes: nested })), /unexpected resource action/);
-    assert.throws(() => validatePlanDocument(validPlanDocument({ output_changes: { other_output: { actions: ['create'] } } })), /unexpected output/);
-    assert.doesNotThrow(() => validatePlanDocument(validPlanDocument({ output_changes: {
-      audience: { actions: ['create'], before: null }, issuer: { actions: ['create'], before: null }, spa_client_id: { actions: ['create'], before: null },
-    } })));
+    assert.throws(() => validate(validPlanDocument({ resource_changes: nested })), /unexpected resource action/);
+    const unexpectedOutput = validPlanDocument();
+    unexpectedOutput.output_changes = { other_output: { actions: ['create'] } };
+    assert.throws(() => validate(unexpectedOutput), /unexpected output/);
+    const wrongAudience = validPlanDocument();
+    wrongAudience.output_changes.audience.after = 'https://foreign.example/api';
+    assert.throws(() => validate(wrongAudience), /output|value/i);
+
+    const malformedOutputUnknown = validPlanDocument();
+    malformedOutputUnknown.output_changes.audience.after_unknown = { identifier: false };
+    assert.throws(() => validate(malformedOutputUnknown), /output|value/i);
   });
 });
 

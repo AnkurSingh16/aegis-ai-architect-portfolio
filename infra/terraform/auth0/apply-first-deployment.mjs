@@ -26,36 +26,164 @@ const terraformMetadataDirectory = path.join(moduleDirectory, '.terraform');
 const environmentFile = path.join(repositoryRoot, '.env.auth0');
 const terraformVariablesFile = path.join(moduleDirectory, 'terraform.tfvars');
 const secretPattern = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\b/;
-const knownTopLevelPlanFields = new Set([
-  'format_version', 'terraform_version', 'variables', 'planned_values', 'proposed_unknown',
-  'resource_changes', 'resource_drift', 'output_changes', 'prior_state', 'configuration',
-  'relevant_attributes', 'checks', 'errored', 'complete', 'applyable', 'deferred_changes',
-  'action_invocations',
-]);
-const knownChangeFields = new Set([
-  'address', 'module_address', 'mode', 'type', 'name', 'index', 'provider_name', 'change',
-  'action_reason', 'previous_address', 'deposed', 'generated_config',
-]);
-const knownChangeBodyFields = new Set(['actions', 'before', 'after', 'after_unknown', 'before_sensitive', 'after_sensitive', 'replace_paths', 'importing']);
-
 export function isAutomatedContext(env = process.env) {
   return Boolean(env.CI || env.GITHUB_ACTIONS || env.NODE_ENV === 'test' || env.VITEST || env.JEST_WORKER_ID ||
     Object.keys(env).some((key) => key.startsWith('CODEX_') || key.startsWith('OPENAI_CODEX')));
 }
 
-/** Strictly inspect the machine-readable plan without emitting any of its contents. */
-export function validatePlanDocument(document) {
-  if (!document || typeof document !== 'object' || Array.isArray(document) ||
-      Object.keys(document).some((key) => !knownTopLevelPlanFields.has(key)) ||
-      !['1.0', '1.1', '1.2'].includes(document.format_version) ||
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isRfc3339Timestamp(value) {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match || !Number.isFinite(Date.parse(value))) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth &&
+    hour <= 23 && minute <= 59 && second <= 59 && offsetHour <= 23 && offsetMinute <= 59;
+}
+
+function hasUnknownPath(value, pathParts) {
+  let current = value;
+  for (const part of pathParts) {
+    if (!isRecord(current) || !Object.hasOwn(current, part)) return false;
+    current = current[part];
+  }
+  return current === true;
+}
+
+function hasUnknownMarker(value) {
+  if (value === true) return true;
+  if (Array.isArray(value)) return value.some(hasUnknownMarker);
+  if (isRecord(value)) return Object.values(value).some(hasUnknownMarker);
+  return false;
+}
+
+function isUnknownMarkerTree(value) {
+  if (typeof value === 'boolean') return true;
+  if (Array.isArray(value)) return value.every(isUnknownMarkerTree);
+  if (isRecord(value)) return Object.values(value).every(isUnknownMarkerTree);
+  return false;
+}
+
+function assertKnownAttribute(change, name, expected, address) {
+  const marker = change.after_unknown[name];
+  if (!Object.hasOwn(change.after, name) || JSON.stringify(change.after[name]) !== JSON.stringify(expected) ||
+      (marker !== undefined && !isUnknownMarkerTree(marker)) || hasUnknownMarker(marker)) {
+    throw new Error(`Terraform planned an unexpected value for ${address}.${name}.`);
+  }
+}
+
+function assertComputedAttribute(change, name, address) {
+  if (!hasUnknownPath(change.after_unknown, [name]) ||
+      (Object.hasOwn(change.after, name) && change.after[name] !== null)) {
+    throw new Error(`Terraform did not identify ${address}.${name} as a computed unknown value.`);
+  }
+}
+
+function assertOutputChange(change, name, expected, { computed = false } = {}) {
+  if (!isRecord(change) || JSON.stringify(change.actions) !== '["create"]' || change.before !== null) {
+    throw new Error(`Terraform planned an unexpected output change for ${name}.`);
+  }
+  if (computed) {
+    if ((change.after !== null && change.after !== undefined) || change.after_unknown !== true) {
+      throw new Error(`Terraform did not identify output ${name} as computed.`);
+    }
+  } else if (change.after !== expected ||
+      (change.after_unknown !== undefined && change.after_unknown !== false)) {
+    throw new Error(`Terraform planned an unexpected value for output ${name}.`);
+  }
+}
+
+function validateConfigurationReferences(configuration) {
+  const providerConfigs = configuration?.provider_config;
+  const rootModule = configuration?.root_module;
+  if (!isRecord(providerConfigs) || Object.keys(providerConfigs).length !== 1 ||
+      !isRecord(rootModule) || !Array.isArray(rootModule.resources) ||
+      rootModule.resources.length !== expectedResourceAddresses.length ||
+      (rootModule.module_calls !== undefined && (!isRecord(rootModule.module_calls) || Object.keys(rootModule.module_calls).length !== 0))) {
+    throw new Error('Terraform configuration does not contain exactly one provider and the five approved root resources.');
+  }
+
+  const [providerConfigKey] = Object.keys(providerConfigs);
+  const providerConfig = providerConfigs[providerConfigKey];
+  if (!providerConfigKey || !isRecord(providerConfig) || providerConfig.name !== 'auth0' ||
+      providerConfig.full_name !== 'registry.terraform.io/auth0/auth0' || providerConfig.alias !== undefined ||
+      providerConfig.module_address !== undefined || !isRecord(providerConfig.expressions) ||
+      JSON.stringify(Object.keys(providerConfig.expressions).sort()) !== '["domain"]' ||
+      !Array.isArray(providerConfig.expressions.domain?.references) ||
+      providerConfig.expressions.domain.references.length !== 1 ||
+      providerConfig.expressions.domain.references[0] !== 'var.auth0_domain') {
+    throw new Error('Terraform provider configuration must be the single Auth0 provider using only the approved domain input.');
+  }
+
+  const resources = new Map();
+  for (const resource of rootModule.resources) {
+    if (!isRecord(resource) || typeof resource.address !== 'string' || resource.mode !== 'managed' ||
+        typeof resource.type !== 'string' || typeof resource.name !== 'string' ||
+        resource.address !== `${resource.type}.${resource.name}` || resource.count_expression !== undefined ||
+        resource.for_each_expression !== undefined || resource.provider_config_key !== providerConfigKey ||
+        !isRecord(resource.expressions) || resources.has(resource.address)) {
+      throw new Error('Terraform configuration has an unexpected resource or dynamic instance expression.');
+    }
+    resources.set(resource.address, resource);
+  }
+  if (expectedResourceAddresses.some((address) => !resources.has(address))) {
+    throw new Error('Terraform configuration resource addresses do not exactly match the approved Aegis resources.');
+  }
+
+  const expectedExpressionKeys = new Map([
+    ['auth0_resource_server.cases', ['enforce_policies', 'identifier', 'name', 'signing_alg']],
+    ['auth0_resource_server_scope.read_cases', ['description', 'resource_server_identifier', 'scope']],
+    ['auth0_resource_server_scope.write_cases', ['description', 'resource_server_identifier', 'scope']],
+    ['auth0_client.local_spa', ['allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'grant_types', 'is_first_party', 'name', 'oidc_conformant', 'web_origins']],
+    ['auth0_connection_client.local_spa_database', ['client_id', 'connection_id']],
+  ]);
+  for (const [address, expectedKeys] of expectedExpressionKeys) {
+    const resource = resources.get(address);
+    if (JSON.stringify(Object.keys(resource.expressions).sort()) !== JSON.stringify(expectedKeys) ||
+        (resource.provisioners !== undefined && (!Array.isArray(resource.provisioners) || resource.provisioners.length !== 0))) {
+      throw new Error(`Terraform configuration contains unapproved arguments or provisioners for ${address}.`);
+    }
+  }
+
+  const association = resources.get('auth0_connection_client.local_spa_database').expressions;
+  const connectionExpression = association.connection_id;
+  const clientExpression = association.client_id;
+  const exactReferences = (expression, expected) => isRecord(expression) && Array.isArray(expression.references) &&
+    expression.references.length === expected.length && expected.every((reference) => expression.references.includes(reference));
+  if (!exactReferences(connectionExpression, ['var.database_connection_id']) ||
+      !exactReferences(clientExpression, ['auth0_client.local_spa.id', 'auth0_client.local_spa'])) {
+    throw new Error('Terraform configuration does not associate the approved database connection with the approved SPA.');
+  }
+}
+
+/** Inspect Terraform plan JSON in memory without emitting its contents. */
+export function validatePlanDocument(document, expectedInputs) {
+  const version = typeof document?.format_version === 'string' ? /^(\d+)\.(\d+)$/.exec(document.format_version) : null;
+  const drift = document?.resource_drift;
+  if (!isRecord(document) || !version || Number(version[1]) !== 1 ||
       typeof document.terraform_version !== 'string' ||
+      (document.timestamp !== undefined && !isRfc3339Timestamp(document.timestamp)) ||
       document.errored !== false || document.complete !== true || document.applyable !== true ||
-      !Array.isArray(document.resource_changes) || !Array.isArray(document.resource_drift) ||
-      document.resource_drift.length !== 0 ||
+      !Array.isArray(document.resource_changes) ||
+      (drift !== undefined && (!Array.isArray(drift) || drift.length !== 0)) ||
       (document.deferred_changes !== undefined && (!Array.isArray(document.deferred_changes) || document.deferred_changes.length !== 0)) ||
       (document.action_invocations !== undefined && (!Array.isArray(document.action_invocations) || document.action_invocations.length !== 0))) {
     throw new Error('Terraform plan structure is unsupported, incomplete, or contains drift. Stop for manual review.');
   }
+  validateConfigurationReferences(document.configuration);
 
   const changes = document.resource_changes;
   if (changes.length !== expectedResourceAddresses.length) {
@@ -63,36 +191,71 @@ export function validatePlanDocument(document) {
   }
   const byAddress = new Map();
   for (const item of changes) {
-    if (!item || typeof item !== 'object' || Array.isArray(item) ||
-        Object.keys(item).some((key) => !knownChangeFields.has(key)) ||
+    if (!isRecord(item) ||
         typeof item.address !== 'string' || item.mode !== 'managed' ||
         typeof item.type !== 'string' || typeof item.name !== 'string' || item.address !== `${item.type}.${item.name}` ||
         item.module_address !== undefined || item.index !== undefined || item.previous_address !== undefined ||
-        item.deposed !== undefined || item.action_reason !== undefined || item.generated_config !== undefined ||
+        item.deposed !== undefined || item.generated_config !== undefined ||
+        (item.action_reason !== undefined && typeof item.action_reason !== 'string') ||
         item.provider_name !== 'registry.terraform.io/auth0/auth0' ||
-        !item.change || typeof item.change !== 'object' || Array.isArray(item.change) ||
-        Object.keys(item.change).some((key) => !knownChangeBodyFields.has(key)) ||
+        !isRecord(item.change) ||
         JSON.stringify(item.change.actions) !== '["create"]' || item.change.before !== null ||
-        !item.change.after || typeof item.change.after !== 'object' || Array.isArray(item.change.after) ||
+        !isRecord(item.change.after) || !isRecord(item.change.after_unknown) ||
+        !isUnknownMarkerTree(item.change.after_unknown) ||
         item.change.importing !== undefined ||
         (item.change.replace_paths !== undefined && (!Array.isArray(item.change.replace_paths) || item.change.replace_paths.length !== 0))) {
       throw new Error('Terraform plan contains an unexpected resource action or unsupported field.');
     }
+    if (byAddress.has(item.address)) throw new Error('Terraform plan contains duplicate resource addresses.');
     byAddress.set(item.address, item);
   }
-  if (byAddress.size !== expectedResourceAddresses.length ||
-      expectedResourceAddresses.some((address) => !byAddress.has(address))) {
+  if (expectedResourceAddresses.some((address) => !byAddress.has(address))) {
     throw new Error('Terraform plan resource addresses do not exactly match the approved Aegis Auth0 foundation.');
   }
-  const outputChanges = document.output_changes ?? {};
-  if (!outputChanges || typeof outputChanges !== 'object' || Array.isArray(outputChanges) ||
+
+  if (!isRecord(expectedInputs) || [expectedInputs.connectionId, expectedInputs.apiIdentifier, expectedInputs.spaName, expectedInputs.auth0Domain]
+    .some((value) => typeof value !== 'string' || !value)) {
+    throw new Error('Approved Terraform target inputs are incomplete.');
+  }
+  const { connectionId, apiIdentifier, spaName, auth0Domain } = expectedInputs;
+  const expectedAttributes = new Map([
+    ['auth0_resource_server.cases', {
+      name: 'Aegis Case API', identifier: apiIdentifier, signing_alg: 'RS256', enforce_policies: false,
+    }],
+    ['auth0_resource_server_scope.read_cases', {
+      scope: 'read:cases', resource_server_identifier: apiIdentifier,
+      description: 'Read cases for an authorized tenant membership.',
+    }],
+    ['auth0_resource_server_scope.write_cases', {
+      scope: 'write:cases', resource_server_identifier: apiIdentifier,
+      description: 'Create and update cases for an authorized tenant membership.',
+    }],
+    ['auth0_client.local_spa', {
+      name: spaName, app_type: 'spa', oidc_conformant: true, is_first_party: true,
+      grant_types: ['authorization_code'],
+      callbacks: ['http://127.0.0.1:49321/auth/callback'],
+      allowed_origins: ['http://127.0.0.1:49321'],
+      web_origins: ['http://127.0.0.1:49321'],
+      allowed_logout_urls: ['http://127.0.0.1:49321'],
+    }],
+    ['auth0_connection_client.local_spa_database', { connection_id: connectionId }],
+  ]);
+  for (const [address, attributes] of expectedAttributes) {
+    const change = byAddress.get(address).change;
+    for (const [name, value] of Object.entries(attributes)) assertKnownAttribute(change, name, value, address);
+  }
+  assertComputedAttribute(byAddress.get('auth0_client.local_spa').change, 'id', 'auth0_client.local_spa');
+  assertComputedAttribute(byAddress.get('auth0_connection_client.local_spa_database').change, 'client_id', 'auth0_connection_client.local_spa_database');
+
+  const outputChanges = document.output_changes;
+  if (!isRecord(outputChanges) ||
       Object.keys(outputChanges).length !== 3 ||
-      Object.keys(outputChanges).some((name) => !['audience', 'issuer', 'spa_client_id'].includes(name)) ||
-      Object.values(outputChanges).some((change) => !change || typeof change !== 'object' ||
-        Object.keys(change).some((field) => !['actions', 'before', 'after', 'after_unknown', 'before_sensitive', 'after_sensitive'].includes(field)) ||
-        JSON.stringify(change.actions) !== '["create"]' || change.before !== null)) {
+      Object.keys(outputChanges).some((name) => !['audience', 'issuer', 'spa_client_id'].includes(name))) {
     throw new Error('Terraform plan contains unexpected output changes.');
   }
+  assertOutputChange(outputChanges.audience, 'audience', apiIdentifier);
+  assertOutputChange(outputChanges.issuer, 'issuer', `https://${auth0Domain}/`);
+  assertOutputChange(outputChanges.spa_client_id, 'spa_client_id', undefined, { computed: true });
   return Object.freeze({ creates: expectedResourceAddresses.length, updates: 0, deletes: 0, addresses: expectedResourceAddresses });
 }
 
@@ -389,7 +552,7 @@ export async function runFirstDeploymentGate({
     requireSuccess(jsonResult, 'plan inspection');
     let planDocument;
     try { planDocument = JSON.parse(jsonResult.stdout); } catch { throw new Error('Terraform returned malformed plan JSON; stop for manual review.'); }
-    validatePlanDocument(planDocument);
+    validatePlanDocument(planDocument, { connectionId, apiIdentifier, spaName, auth0Domain: credentials.AUTH0_DOMAIN });
     if (planDocument.variables?.database_connection_id?.value !== connectionId ||
         planDocument.variables?.auth0_domain?.value !== credentials.AUTH0_DOMAIN ||
         planDocument.variables?.api_identifier?.value !== apiIdentifier ||
@@ -420,7 +583,7 @@ export async function runFirstDeploymentGate({
     requireSuccess(finalJson, 'final saved plan inspection');
     let finalDocument;
     try { finalDocument = JSON.parse(finalJson.stdout); } catch { throw new Error('Final saved plan JSON is malformed; no apply was started.'); }
-    validatePlanDocument(finalDocument);
+    validatePlanDocument(finalDocument, { connectionId, apiIdentifier, spaName, auth0Domain: credentials.AUTH0_DOMAIN });
     if (JSON.stringify(finalDocument) !== JSON.stringify(planDocument)) {
       throw new Error('The saved plan inspection changed after human review; no apply was started.');
     }
