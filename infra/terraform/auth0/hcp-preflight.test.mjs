@@ -72,7 +72,12 @@ const normalizedInventory = managedResources.map(({ type, name, provider, module
 })).sort((a, b) => a.address.localeCompare(b.address));
 const managedInventoryHash = createHash('sha256').update(JSON.stringify(normalizedInventory)).digest('hex');
 
-async function prepareManagedState(home, terraformRoot, { workspaceId = 'ws-1', backendWorkspace = 'aegis-auth0-dev', stateVersionId = 'version-1', serial = 1, markerStateVersionId = stateVersionId, markerSerial = serial, resources = managedResources } = {}) {
+async function prepareManagedState(home, terraformRoot, {
+  workspaceId = 'ws-1', backendWorkspace = 'aegis-auth0-dev', stateVersionId = 'version-1',
+  responseStateVersionId = stateVersionId, workspaceStateVersionId = stateVersionId,
+  serial = 1, markerStateVersionId = stateVersionId, markerSerial = serial, resources = managedResources,
+  intermediate = false, includeIntermediate = true, status = 'finalized', resourcesProcessed = true,
+} = {}) {
   const metadataDirectory = path.join(terraformRoot, '.terraform');
   await mkdir(metadataDirectory, { recursive: true, mode: 0o700 });
   await chmod(metadataDirectory, 0o700);
@@ -86,8 +91,8 @@ async function prepareManagedState(home, terraformRoot, { workspaceId = 'ws-1', 
     hostname: null, organization: 'aegis-ai-portfolio', token: null,
     workspaces: { name: 'aegis-auth0-dev', project: null, tags: [] },
   } } });
-  const stateVersion = { data: { type: 'state-versions', id: stateVersionId, attributes: {
-    serial, status: 'finalized', intermediate: false, 'resources-processed': true, resources,
+  const stateVersion = { data: { type: 'state-versions', id: responseStateVersionId, attributes: {
+    serial, status, ...(includeIntermediate ? { intermediate } : {}), 'resources-processed': resourcesProcessed, resources,
   } } };
   const marker = createBindingMarker({
     workspaceId, backendFingerprint, stateVersionId: markerStateVersionId, serial: markerSerial,
@@ -102,7 +107,7 @@ async function prepareManagedState(home, terraformRoot, { workspaceId = 'ws-1', 
     if (!url.endsWith('/workspaces/aegis-auth0-dev')) return response;
     const body = structuredClone(await response.json());
     body.data.id = workspaceId;
-    body.data.relationships['current-state-version'].data = { type: 'state-versions', id: stateVersionId };
+    body.data.relationships['current-state-version'].data = { type: 'state-versions', id: workspaceStateVersionId };
     return jsonResponse(body);
   };
   return { fetchImpl, stateVersion };
@@ -303,6 +308,63 @@ describe('HCP Terraform read-only preflight', () => {
     assert.equal(result.state, 'verified-managed-state');
     assert.equal(result.stateVersionId, 'version-1');
     assert.equal(result.serial, 1);
+  });
+
+  it('accepts an omitted intermediate flag only for the exact current finalized version and rejects explicit or contradictory values', async () => {
+    const home = await makeHome();
+    const terraformRoot = await mkdtemp(path.join(os.tmpdir(), 'aegis-managed-state-'));
+    temporaryDirectories.add(terraformRoot);
+    const absent = await prepareManagedState(home, terraformRoot, { includeIntermediate: false });
+    const accepted = await verifyHcpConfiguration({ home, terraformRoot, fetchImpl: absent.fetchImpl, mode: 'bind' });
+    assert.equal(accepted.state, 'reviewable-managed-state');
+    assert.equal(accepted.stateVersionId, 'version-1');
+    assert.match(accepted.inventoryHash, /^[a-f0-9]{64}$/);
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const reinitWithoutIntermediate = await prepareManagedState(home, terraformRoot, { includeIntermediate: false });
+    const reinitResult = await verifyHcpConfiguration({ home, terraformRoot, fetchImpl: reinitWithoutIntermediate.fetchImpl, mode: 'reinit' });
+    assert.equal(reinitResult.state, 'verified-managed-state');
+
+    for (const intermediate of [true, null, 'false', {}]) {
+      await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+      const invalid = await prepareManagedState(home, terraformRoot, { intermediate });
+      await assert.rejects(
+        verifyHcpConfiguration({ home, terraformRoot, fetchImpl: invalid.fetchImpl, mode: 'bind' }),
+        /not finalized, fully processed, or has an unknown state shape/,
+      );
+    }
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const mismatchedVersion = await prepareManagedState(home, terraformRoot, {
+      includeIntermediate: false, responseStateVersionId: 'different-version', workspaceStateVersionId: 'version-1',
+    });
+    await assert.rejects(
+      verifyHcpConfiguration({ home, terraformRoot, fetchImpl: mismatchedVersion.fetchImpl, mode: 'bind' }),
+      /current state version no longer matches the workspace relationship/,
+    );
+
+    for (const invalidVersion of [
+      { status: 'pending' },
+      { resourcesProcessed: false },
+      { resources: null },
+    ]) {
+      await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+      const invalid = await prepareManagedState(home, terraformRoot, { includeIntermediate: false, ...invalidVersion });
+      await assert.rejects(
+        verifyHcpConfiguration({ home, terraformRoot, fetchImpl: invalid.fetchImpl, mode: 'bind' }),
+        /not finalized, fully processed, or has an unknown state shape/,
+      );
+    }
+
+    await rm(path.join(terraformRoot, '.terraform'), { recursive: true, force: true });
+    const unexpectedInventory = await prepareManagedState(home, terraformRoot, {
+      includeIntermediate: false,
+      resources: [...managedResources, { type: 'aws_instance', name: 'foreign', provider: 'provider["registry.terraform.io/hashicorp/aws"]', module: 'root', count: 1 }],
+    });
+    await assert.rejects(
+      verifyHcpConfiguration({ home, terraformRoot, fetchImpl: unexpectedInventory.fetchImpl, mode: 'bind' }),
+      /not the exact Aegis Auth0 foundation inventory/,
+    );
   });
 
   it('permits bootstrap-marker repair only for an intact empty bootstrap marker and exact module backend, without writing it', async () => {

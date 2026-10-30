@@ -116,10 +116,13 @@ export function inspectBackendMetadata(metadata) {
   return digest({ hostname, organization: config.organization, workspace: config.workspaces.name });
 }
 
-function normalizeInventory(stateVersion) {
+function normalizeInventory(stateVersion, currentStateVersionId) {
   const attributes = stateVersion?.attributes;
   if (!attributes || attributes.status !== 'finalized' || attributes['resources-processed'] !== true ||
-      attributes.intermediate !== false || !Array.isArray(attributes.resources)) {
+      (Object.hasOwn(attributes, 'intermediate')
+        ? attributes.intermediate !== false
+        : typeof currentStateVersionId !== 'string' || currentStateVersionId !== stateVersion.id) ||
+      !Array.isArray(attributes.resources)) {
     failClosed('Current HCP state version is not finalized, fully processed, or has an unknown state shape.');
   }
   const actual = attributes.resources.map((resource) => {
@@ -137,13 +140,13 @@ function normalizeInventory(stateVersion) {
   return digest(actual);
 }
 
-function stateIdentity(stateVersion) {
+function stateIdentity(stateVersion, currentStateVersionId) {
   const serial = stateVersion?.attributes?.serial;
   if (stateVersion?.type !== 'state-versions' || typeof stateVersion.id !== 'string' || !stateVersion.id ||
       !Number.isSafeInteger(serial) || serial < 1) {
     failClosed('Current HCP state version identity is missing or malformed.');
   }
-  return { stateVersionId: stateVersion.id, serial, inventoryHash: normalizeInventory(stateVersion) };
+  return { stateVersionId: stateVersion.id, serial, inventoryHash: normalizeInventory(stateVersion, currentStateVersionId) };
 }
 
 function validateMarker(marker, expected) {
@@ -237,7 +240,7 @@ export async function verifyHcpConfiguration({ home = os.homedir(), terraformRoo
   const versionResponse = await get(`/workspaces/${encodeURIComponent(workspace.id)}/current-state-version`);
   const version = versionResponse?.data;
   if (version?.id !== versionId || version?.type !== 'state-versions') failClosed('The current state version no longer matches the workspace relationship.');
-  const identity = stateIdentity(version);
+  const identity = stateIdentity(version, versionId);
   const expected = { workspaceId: workspace.id, backendFingerprint };
   const marker = validateMarker(markerData, expected);
   if (mode === 'reinit') {
