@@ -27,7 +27,7 @@ jobs:
       DATABASE_APP_PASSWORD: ci_isolated_runtime_only
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Node LTS
         uses: actions/setup-node@v4
         with:
