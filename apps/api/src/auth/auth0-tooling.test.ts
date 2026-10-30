@@ -41,6 +41,7 @@ describe('Auth0 local tooling', () => {
       encoding: 'utf8',
       env: {
         ...process.env,
+        TMPDIR: root,
         PATH: `${path.join(root, 'bin')}:${process.env.PATH ?? ''}`,
         DATABASE_URL: 'synthetic-database-url',
         DATABASE_ADMIN_URL: 'synthetic-admin-url',
@@ -49,7 +50,7 @@ describe('Auth0 local tooling', () => {
       },
     });
 
-    expect(result.status).toBe(0);
+    expect(result.status, [result.error?.message, result.stdout, result.stderr].filter(Boolean).join('\n')).toBe(0);
     expect(result.stdout.match(/\[REDACTED\]/g)).toHaveLength(2);
     expect(result.stdout + result.stderr).not.toContain(secret);
     expect(result.stdout + result.stderr).not.toContain('synthetic-database-url');
@@ -110,7 +111,7 @@ async function installWrapperFixture(root: string): Promise<string> {
     'printf "%s\\n" "$AUTH0_CLIENT_SECRET"',
     'printf "%s\\n" "$AUTH0_CLIENT_SECRET" >&2',
     'printf "%s\\n" "$DATABASE_URL" "$DATABASE_ADMIN_URL" "$TF_CLI_ARGS_plan" "$TF_LOG"',
-      'printf "%s\\n" "$1 $2 $3" > "$TMPDIR/terraform-invoked"',
+    'printf "%s\\n" "$1 $2 $3" > "$TMPDIR/terraform-invoked"',
   ].join('\n'));
   await chmod(fakeTerraform, 0o700);
   return wrapper;
