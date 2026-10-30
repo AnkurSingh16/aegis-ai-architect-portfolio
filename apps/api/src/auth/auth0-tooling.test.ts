@@ -105,6 +105,7 @@ async function installWrapperFixture(root: string): Promise<string> {
   await mkdir(path.dirname(wrapper), { recursive: true });
   await mkdir(bin, { recursive: true });
   await copyFile(path.join(repository, 'infra/terraform/auth0/terraform-local.mjs'), wrapper);
+  await copyFile(path.join(repository, 'infra/terraform/auth0/hcp-preflight.mjs'), path.join(path.dirname(wrapper), 'hcp-preflight.mjs'));
   const fakeTerraform = path.join(bin, 'terraform');
   await writeFile(fakeTerraform, [
     '#!/bin/sh',
