@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -41,6 +41,9 @@ describe('real PostgreSQL persistence and role boundary', () => {
     expect(await migrateDatabase(adminUrl, password)).toBe(0);
     const directory = await mkdtemp(join(tmpdir(), 'aegis-migrations-'));
     try {
+      for (const file of await readdir(migrationsDirectory)) {
+        await writeFile(join(directory, file), await readFile(new URL(file, migrationsDirectory), 'utf8'));
+      }
       const sql = await readFile(new URL('001_multitenant.sql', migrationsDirectory), 'utf8');
       await writeFile(join(directory, '001_multitenant.sql'), `${sql}\n-- modified migration\n`);
       await expect(migrateDatabase(adminUrl, password, pathToFileURL(`${directory}/`))).rejects.toThrow('modified');
@@ -60,6 +63,8 @@ describe('real PostgreSQL persistence and role boundary', () => {
       await writeFile(join(directory, '001_duplicate.sql'), 'SELECT 1;');
       await expect(migrateDatabase(adminUrl, password, url)).rejects.toThrow('present and unique');
       await rm(join(directory, '001_duplicate.sql'));
+      await rm(join(directory, '002_placeholder.sql'));
+      await writeFile(join(directory, '002_authenticated_memberships.sql'), await readFile(new URL('002_authenticated_memberships.sql', migrationsDirectory), 'utf8'));
       await writeFile(join(directory, '000_earlier.sql'), 'SELECT 1;');
       await expect(migrateDatabase(adminUrl, password, url)).rejects.toThrow('Out-of-order');
     } finally { await rm(directory, { recursive: true, force: true }); }
@@ -76,7 +81,7 @@ describe('real PostgreSQL persistence and role boundary', () => {
       pg_get_userbyid(c.relowner) = current_user AS owned
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'aegis' AND c.relkind = 'r' ORDER BY c.relname`);
-    expect(tables.rows).toHaveLength(3);
+    expect(tables.rows).toHaveLength(4);
     for (const table of tables.rows) expect(table).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true, owned: false });
     expect((await pool.query(`SELECT count(*)::int AS count FROM pg_auth_members
       WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)`)).rows[0].count).toBe(0);

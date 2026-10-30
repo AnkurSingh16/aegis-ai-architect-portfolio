@@ -12,11 +12,13 @@
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "db:migrate": "tsx src/storage/migrate-cli.ts",
-    "cases": "tsx src/storage/cli.ts"
+    "cases": "tsx src/storage/cli.ts",
+    "memberships": "tsx src/auth/membership-cli.ts"
   },
   "dependencies": {
     "fastify": "^5.0.0",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "jose": "^6.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

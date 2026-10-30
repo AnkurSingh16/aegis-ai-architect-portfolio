@@ -89,7 +89,8 @@ describe('transaction and failure handling', () => {
   it('sets a parameterized transaction-local tenant and releases after commit', async () => {
     const { pool, query, release } = fakePool();
     expect(await withTenantTransaction(pool, north, async () => 'result')).toBe('result');
-    expect(query.mock.calls).toEqual([['BEGIN'], ["SELECT set_config('aegis.tenant_id', $1, true)", [north.tenantId]], ['COMMIT']]);
+    expect(query.mock.calls).toEqual([['BEGIN'], [expect.stringContaining("'aegis.access_mode', 'fixture'")],
+      ["SELECT set_config('aegis.tenant_id', $1, true)", [north.tenantId]], ['COMMIT']]);
     expect(release).toHaveBeenCalledWith(false);
   });
   it('rolls back on operation failure and destroys a connection when rollback fails', async () => {

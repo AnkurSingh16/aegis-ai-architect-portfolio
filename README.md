@@ -2,7 +2,7 @@
 
 An educational, production-minded portfolio foundation built with Node.js, TypeScript, React, Codex subagents, tests, CI and infrastructure-as-code planning.
 
-> **Status:** Milestone 2A adds local PostgreSQL case storage with database-enforced tenant isolation. This remains a local synthetic demonstration, **not** a production-ready authenticated AI service. Browser triage returns fixed mock responses; no OpenAI API, RAG, Auth0 or production infrastructure is implemented.
+> **Status:** Milestones 2A and 2B provide local PostgreSQL case storage, database-enforced tenant isolation, and an optional Auth0 access-token boundary for protected case APIs. This remains a synthetic demonstration, **not** a production-ready AI service. Browser triage returns fixed mock responses; no OpenAI API, RAG, cloud deployment or production identity operations are included.
 
 ## Start on an Apple Silicon Mac
 
@@ -39,7 +39,7 @@ The response contract contains `mode: "synthetic-mock"`, the same `caseId`, `cat
 
 ## Persistent multi-tenant cases (Milestone 2A)
 
-Storage uses the existing PostgreSQL 17 Compose service and persistent named volume. A local CLI creates cases from the three synthetic fixtures, lists/reads them, updates status, reads audit history and applies the existing mock triage lookup to a stored case. There are no storage HTTP endpoints. Tenant selection comes only from an allowlisted server configuration (`AEGIS_DEV_FIXTURE=north` or `south`); browser tenant IDs are never used as authorization.
+Storage uses the existing PostgreSQL 17 Compose service and persistent named volume. A local CLI creates cases from the three synthetic fixtures, lists/reads them, updates status, reads audit history and applies the existing mock triage lookup to a stored case. Milestone 2A has no storage HTTP endpoints; Milestone 2B adds the optional protected Auth0 routes described below. Tenant selection for the 2A CLI comes only from an allowlisted server configuration (`AEGIS_DEV_FIXTURE=north` or `south`); browser tenant IDs are never used as authorization.
 
 1. Install/start Docker with Compose, then copy `.env.example` to ignored `.env`. Replace password placeholders and use matching, URL-encoded passwords in connection URLs. Keep administrator and runtime passwords separate. For an existing Compose volume, use its existing administrator password: changing environment variables does not rotate an initialized database's password. Never delete the volume to resolve a credential mismatch.
 2. Start PostgreSQL and load configuration into each command with Node's environment-file support:
@@ -66,6 +66,22 @@ Migrations run transactionally under an advisory lock and record SHA-256 checksu
 
 RLS protects against omitted tenant filters in trusted server code. The runtime credential can choose the transaction's tenant setting, so possession of that credential is **not** tenant authentication. Keep it private. Database administrators remain trusted and can bypass RLS; administrator-enabled SQL bind-parameter logging may capture bootstrap credentials, so do not enable it for credential setup. Production identity, authorization and deployment are deferred. See [ADR 002](docs/adr/002-local-multitenant-case-storage.md) for the boundary and trade-offs.
 
+## Auth0 protected case API (Milestone 2B)
+
+When `AUTH0_ISSUER` and `AUTH0_AUDIENCE` are configured, the API enables protected `/api/tenants/:tenantId/cases` list, create, read and status-update endpoints. It verifies access-token JWT signatures using issuer-derived JWKS and RS256, exact issuer and API audience, expiry and not-before when present. Requests require the signed `read:cases` or `write:cases` scope. PostgreSQL separately checks that the verified issuer and subject have a membership for the selected tenant and a role that permits the operation. A tenant UUID in the URL only selects which membership to verify. The existing synthetic triage workflow remains unchanged.
+
+### Manual Auth0 setup
+
+1. Create an Auth0 API in your own development tenant with a dedicated API identifier (for example `https://aegis-api.example`). The audience is this identifier, not the SPA application client ID.
+2. Enable RBAC for the API and define `read:cases` and `write:cases`. Assign `read:cases` to a `reader` role and both permissions to an `operator` role. Assign a role to a synthetic test user and use an OAuth client that can request the required scopes.
+3. Put the tenant's canonical issuer with trailing slash (for example `https://your-tenant.us.auth0.com/`) in `AUTH0_ISSUER`; set `AUTH0_AUDIENCE` to the API identifier. Copy `.env.api.example` to ignored `.env.api` and configure only `DATABASE_URL`, `AUTH0_ISSUER` and `AUTH0_AUDIENCE` there. This runtime-only file keeps administrator credentials out of the HTTP process. Keep Auth0 values out of both example files except for placeholders. Use the restricted `aegis_app` credentials in `DATABASE_URL`.
+4. Run migrations. To grant a local tenant membership for the exact Auth0 `sub` claim, set `AEGIS_MEMBER_SUBJECT`, `AEGIS_MEMBER_FIXTURE` (`north` or `south`) and `AEGIS_MEMBER_ROLE`, then run `node --env-file=.env --env-file=.env.api --import tsx apps/api/src/auth/membership-cli.ts grant`. To remove access, keep issuer and subject set and run the same command with `revoke`. This local command requires `DATABASE_ADMIN_URL`; the API runtime cannot grant or revoke membership.
+5. Obtain an access token using Authorization Code with PKCE in your local OAuth client. Request the API audience and scopes, then send `Authorization: Bearer <access-token>` to the protected API. Do not paste tokens into logs, tickets or shell history. The browser demo does not perform Auth0 login or store tokens.
+
+Run the API with `node --env-file=.env.api --import tsx apps/api/src/server.ts`. Do not launch it with the full `.env`, which contains administrator credentials for local migrations and membership provisioning. With both Auth0 settings absent, protected case routes are not registered; a partial or malformed configuration fails startup. Tests use generated local keys and do not call Auth0. This repository does not provision an Auth0 tenant; dashboard setup and local configuration are manual. See [ADR 003](docs/adr/003-auth0-tenant-authorization.md) and the [security runbook](docs/SECURITY-RUNBOOK.md).
+
+Membership changes take effect for new transactions after commit. An in-flight repeatable-read request can finish using its transaction snapshot. Case-change audit rows record changes but do not attribute them to a verified Auth0 subject. Production deployment, rate limiting, actor-attributed audit events and production identity operations remain future work.
+
 ### Real PostgreSQL integration tests
 
 Create the dedicated test database once without resetting the persistent demonstration database:
@@ -89,7 +105,7 @@ npm run test:coverage
 npm run build
 ```
 
-Open `apps/api/coverage/index.html` and `apps/web/coverage/index.html` for HTML coverage reports after running tests. Generated results are deliberately ignored by Git.
+Open `apps/api/coverage/index.html` and `apps/web/coverage/index.html` for HTML coverage reports after running tests. Generated results are deliberately ignored by Git. Run Auth0 and storage PostgreSQL integration tests against the dedicated test DB with `npm run test:integration -w apps/api`; they do not call Auth0.
 
 ## What's included
 - `apps/web`: React + Vite portfolio frontend, proxied to local API.
