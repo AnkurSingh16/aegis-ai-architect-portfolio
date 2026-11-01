@@ -4,6 +4,7 @@ import { chmod, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { stdin, stdout } from 'node:process';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyHcpConfiguration } from './hcp-preflight.mjs';
 import { createLocalConfigurationLoader, isAutomatedContext } from './apply-browser-origin-update.mjs';
@@ -14,8 +15,168 @@ const artifactPrefix = '.aegis-browser-origin-diagnostic-';
 const maxCapturedBytes = 32 * 1024 * 1024;
 const requiredFields = ['format_version', 'terraform_version', 'errored', 'complete', 'applyable', 'resource_changes'];
 const optionalFields = ['resource_drift', 'deferred_changes', 'action_invocations', 'output_changes'];
+const expectedResourceAddresses = Object.freeze([
+  'auth0_resource_server.cases',
+  'auth0_resource_server_scope.read_cases',
+  'auth0_resource_server_scope.write_cases',
+  'auth0_client.local_spa',
+  'auth0_connection_client.local_spa_database',
+]);
+const declaredOutputNames = Object.freeze(['issuer', 'audience', 'spa_client_id']);
+const resourceAttributeCategories = Object.freeze({
+  'auth0_resource_server.cases': {
+    identity: ['id', 'identifier'],
+    permissions: ['signing_alg', 'scopes', 'enforce_policies', 'allow_offline_access', 'token_lifetime',
+      'token_lifetime_for_web', 'skip_consent_for_verifiable_first_party_clients', 'token_dialect'],
+    clientConfiguration: [],
+    other: ['name'],
+  },
+  'auth0_resource_server_scope.read_cases': {
+    identity: ['id', 'resource_server_identifier'], permissions: [], clientConfiguration: [], other: ['scope', 'description'],
+  },
+  'auth0_resource_server_scope.write_cases': {
+    identity: ['id', 'resource_server_identifier'], permissions: [], clientConfiguration: [], other: ['scope', 'description'],
+  },
+  'auth0_client.local_spa': {
+    identity: ['id', 'client_id'],
+    permissions: ['grant_types', 'token_endpoint_auth_method', 'client_authentication_methods'],
+    clientConfiguration: ['name', 'app_type', 'callbacks', 'allowed_logout_urls', 'web_origins', 'allowed_origins',
+      'oidc_conformant', 'is_first_party', 'initiate_login_uri', 'jwt_configuration', 'refresh_token', 'mobile', 'native_social_login'],
+    other: ['client_metadata', 'cross_origin_auth', 'cross_origin_loc', 'custom_login_page', 'custom_login_page_on',
+      'sso', 'sso_disabled', 'organization_usage', 'organization_require_behavior', 'require_pushed_authorization_requests'],
+  },
+  'auth0_connection_client.local_spa_database': {
+    identity: ['id', 'connection_id', 'client_id'], permissions: [], clientConfiguration: [], other: [],
+  },
+});
+const safeTerraformActions = new Set(['no-op', 'create', 'read', 'update', 'delete', 'forget', 'open', 'close']);
 
 function record(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+function containsTrue(value) {
+  if (value === true) return true;
+  if (Array.isArray(value)) return value.some(containsTrue);
+  if (record(value)) return Object.values(value).some(containsTrue);
+  return false;
+}
+
+function safeActions(actions) {
+  if (!Array.isArray(actions) || actions.some((action) => typeof action !== 'string' || !safeTerraformActions.has(action))) return ['unknown'];
+  return [...actions];
+}
+
+function booleanTreeIsValid(value) {
+  if (typeof value === 'boolean') return true;
+  if (Array.isArray(value)) return value.every(booleanTreeIsValid);
+  if (record(value)) return Object.values(value).every(booleanTreeIsValid);
+  return false;
+}
+
+function markerStatus(container, key) {
+  if (!record(container) || !Object.hasOwn(container, key)) return null;
+  const marker = container[key];
+  if (!booleanTreeIsValid(marker)) return null;
+  return containsTrue(marker);
+}
+
+function markerAppliesToAttribute(marker, key) {
+  if (marker === true) return true;
+  if (record(marker) || Array.isArray(marker)) return containsTrue(marker[key]);
+  return false;
+}
+
+function changedAttributeSummary(address, change) {
+  const categories = { identity: 0, permissions: 0, clientConfiguration: 0, other: 0 };
+  const expectedCategories = resourceAttributeCategories[address];
+  const before = record(change?.before) ? change.before : {};
+  const after = record(change?.after) ? change.after : {};
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const field of ['before_sensitive', 'after_sensitive', 'after_unknown']) {
+    if (record(change?.[field])) for (const key of Object.keys(change[field])) keys.add(key);
+  }
+  let unknownAttributeCount = 0;
+  let sensitiveAttributeCount = 0;
+  for (const key of keys) {
+    const markerFields = ['before_sensitive', 'after_sensitive', 'after_unknown'];
+    if (markerFields.some((field) => Object.hasOwn(change, field) && !booleanTreeIsValid(change[field]))) {
+      unknownAttributeCount += 1;
+      continue;
+    }
+    const sensitive = markerAppliesToAttribute(change.before_sensitive, key) || markerAppliesToAttribute(change.after_sensitive, key);
+    const unknown = markerAppliesToAttribute(change.after_unknown, key);
+    if (sensitive || unknown) {
+      if (sensitive) sensitiveAttributeCount += 1;
+      if (unknown) unknownAttributeCount += 1;
+      continue;
+    }
+    const hasBefore = Object.hasOwn(before, key);
+    const hasAfter = Object.hasOwn(after, key);
+    if (hasBefore && hasAfter && isDeepStrictEqual(before[key], after[key])) continue;
+    const category = expectedCategories && Object.entries(expectedCategories).find(([, allowed]) => allowed.includes(key))?.[0];
+    if (category) categories[category] += 1;
+    else unknownAttributeCount += 1;
+  }
+  return {
+    changedAttributeCategories: categories,
+    affectsIdentity: categories.identity > 0,
+    affectsPermissions: categories.permissions > 0,
+    affectsClientConfiguration: categories.clientConfiguration > 0,
+    affectsOther: categories.other > 0,
+    unknownAttributeCount,
+    sensitiveAttributeCount,
+  };
+}
+
+function summarizeResourceDrift(drift) {
+  if (!Array.isArray(drift)) return { entries: [], unexpectedResourceCount: null, malformedEntryCount: null };
+  let unexpectedResourceCount = 0;
+  let malformedEntryCount = 0;
+  const entries = drift.map((item) => {
+    const isEntry = record(item);
+    const corroboratedAddress = isEntry && typeof item.address === 'string' && expectedResourceAddresses.includes(item.address) &&
+      item.mode === 'managed' && item.address === `${item.type}.${item.name}` &&
+      item.provider_name === 'registry.terraform.io/auth0/auth0' && item.module_address === undefined &&
+      item.index === undefined && item.deposed === undefined && record(item.change);
+    const address = corroboratedAddress ? item.address : 'unexpected';
+    if (address === 'unexpected') unexpectedResourceCount += 1;
+    if (!isEntry || !record(item.change)) malformedEntryCount += 1;
+    const change = isEntry && record(item.change) ? item.change : {};
+    return {
+      resource: address,
+      actions: safeActions(change.actions),
+      ...changedAttributeSummary(address, change),
+    };
+  });
+  return { entries, unexpectedResourceCount, malformedEntryCount };
+}
+
+function summarizeOutputChanges(outputChanges) {
+  if (!record(outputChanges)) {
+    return { declaredKeysMatch: outputChanges === undefined ? null : false, unexpectedOutputCount: null,
+      outputs: declaredOutputNames.map((name) => ({ name, actions: null, beforeAfterEqual: null,
+        afterUnknown: null, beforeSensitive: null, afterSensitive: null })) };
+  }
+  const actualNames = Object.keys(outputChanges);
+  const declaredKeysMatch = actualNames.length === declaredOutputNames.length && declaredOutputNames.every((name) => Object.hasOwn(outputChanges, name));
+  const outputs = declaredOutputNames.map((name) => {
+    const change = outputChanges[name];
+    const valid = record(change);
+    const afterUnknown = valid ? markerStatus(change, 'after_unknown') : null;
+    const beforeSensitive = valid ? markerStatus(change, 'before_sensitive') : null;
+    const afterSensitive = valid ? markerStatus(change, 'after_sensitive') : null;
+    const valuesPresent = valid && Object.hasOwn(change, 'before') && Object.hasOwn(change, 'after');
+    return {
+      name,
+      actions: valid ? safeActions(change.actions) : null,
+      beforeAfterEqual: valuesPresent && afterUnknown === false &&
+        beforeSensitive !== null && afterSensitive !== null
+        ? isDeepStrictEqual(change.before, change.after) : null,
+      afterUnknown,
+      beforeSensitive,
+      afterSensitive,
+    };
+  });
+  return { declaredKeysMatch, unexpectedOutputCount: actualNames.filter((name) => !declaredOutputNames.includes(name)).length, outputs };
+}
 
 function safeVersion(value) {
   return typeof value === 'string' && /^\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.]+)?(?:\+[A-Za-z0-9.]+)?$/.test(value) &&
@@ -105,6 +266,8 @@ export function diagnosePlanDocument(document) {
       outputChanges: countField(document, 'output_changes'),
     },
     actionCounts: actions,
+    resourceDriftSummary: summarizeResourceDrift(document?.resource_drift),
+    outputChangeSummary: summarizeOutputChanges(document?.output_changes),
     failedValidationRuleIds: Object.freeze(errors),
   });
 }
@@ -121,6 +284,8 @@ export function diagnosePlanJson(jsonText) {
         expected: { errored: false, complete: true, applyable: true } },
       counts: { resourceChanges: null, resourceDrift: null, deferredChanges: null, actionInvocations: null, outputChanges: null },
       actionCounts: { add: null, update: null, destroy: null, unclassified: null, matchesExpected: null },
+      resourceDriftSummary: { entries: [], unexpectedResourceCount: null, malformedEntryCount: null },
+      outputChangeSummary: summarizeOutputChanges(undefined),
       failedValidationRuleIds: Object.freeze(['plan.json.parse']),
     });
   }
