@@ -39,7 +39,7 @@ test('reports only allowlisted versions, field flags, counts, rule IDs, and expe
   assert.deepEqual(report.failedValidationRuleIds, []);
   assert.equal(JSON.stringify(report).includes(secretSentinel), false);
   assert.deepEqual(Object.keys(report).sort(), ['actionCounts', 'booleans', 'counts', 'failedValidationRuleIds',
-    'formatVersion', 'optionalFields', 'requiredFields', 'terraformVersion'].sort());
+    'formatVersion', 'optionalFields', 'outputChangeSummary', 'requiredFields', 'resourceDriftSummary', 'terraformVersion'].sort());
 });
 
 const rejected = [
@@ -112,6 +112,202 @@ test('marks unsupported resource actions unclassified and rejects the expected a
   assert.equal(report.actionCounts.unclassified, 1);
   assert.equal(report.actionCounts.matchesExpected, false);
   assert.ok(report.failedValidationRuleIds.includes('plan.actions.expected_0_add_1_update_0_destroy'));
+});
+
+function outputChange(before, after, actions = ['no-op'], flags = {}) {
+  return { actions, before, after, after_unknown: false,
+    before_sensitive: false, after_sensitive: false, ...flags };
+}
+
+function driftEntry(address, before, after, actions = ['update'], flags = {}) {
+  const [type, name] = address.split('.');
+  return { address, mode: 'managed', type, name, provider_name: 'registry.terraform.io/auth0/auth0',
+    change: { actions, before, after, before_sensitive: {}, after_sensitive: {}, after_unknown: {}, ...flags } };
+}
+
+test('classifies the three declared no-op outputs without exposing their values', () => {
+  const document = clone(baseline);
+  document.output_changes = {
+    issuer: outputChange(secretSentinel, secretSentinel),
+    audience: outputChange(secretSentinel, secretSentinel),
+    spa_client_id: outputChange(secretSentinel, secretSentinel),
+  };
+  const summary = diagnosePlanDocument(document).outputChangeSummary;
+  assert.equal(summary.declaredKeysMatch, true);
+  assert.equal(summary.unexpectedOutputCount, 0);
+  assert.deepEqual(summary.outputs.map(({ name, actions, beforeAfterEqual, afterUnknown, afterSensitive }) =>
+    ({ name, actions, beforeAfterEqual, afterUnknown, afterSensitive })), [
+    { name: 'issuer', actions: ['no-op'], beforeAfterEqual: true, afterUnknown: false, afterSensitive: false },
+    { name: 'audience', actions: ['no-op'], beforeAfterEqual: true, afterUnknown: false, afterSensitive: false },
+    { name: 'spa_client_id', actions: ['no-op'], beforeAfterEqual: true, afterUnknown: false, afterSensitive: false },
+  ]);
+  assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+});
+
+test('classifies changes to all three declared outputs while suppressing output values', () => {
+  const document = clone(baseline);
+  document.output_changes = {
+    issuer: outputChange(secretSentinel, `${secretSentinel}-new`, ['update']),
+    audience: outputChange(secretSentinel, `${secretSentinel}-new`, ['update']),
+    spa_client_id: outputChange(secretSentinel, `${secretSentinel}-new`, ['update']),
+  };
+  const summary = diagnosePlanDocument(document).outputChangeSummary;
+  assert.equal(summary.declaredKeysMatch, true);
+  assert.equal(summary.outputs.every((entry) => entry.actions[0] === 'update' && entry.beforeAfterEqual === false), true);
+  assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+});
+
+test('reports declared output unknown and sensitive flags without output values', () => {
+  const document = clone(baseline);
+  document.output_changes = {
+    issuer: outputChange(secretSentinel, secretSentinel, ['update'], { after_unknown: true, after_sensitive: true }),
+    audience: outputChange(secretSentinel, `${secretSentinel}-new`, ['update'], { after_sensitive: true }),
+    spa_client_id: outputChange(secretSentinel, secretSentinel, ['no-op']),
+  };
+  const outputs = diagnosePlanDocument(document).outputChangeSummary.outputs;
+  assert.equal(outputs[0].beforeAfterEqual, null);
+  assert.equal(outputs[0].afterUnknown, true);
+  assert.equal(outputs[0].afterSensitive, true);
+  assert.equal(outputs[1].beforeAfterEqual, false);
+  assert.equal(outputs[1].afterUnknown, false);
+  assert.equal(outputs[1].afterSensitive, true);
+  assert.equal(JSON.stringify(outputs).includes(secretSentinel), false);
+});
+
+test('does not report output equality when after-unknown or sensitivity markers are missing or malformed', () => {
+  const document = clone(baseline);
+  const missing = outputChange('synthetic-before', 'synthetic-after', ['update']);
+  delete missing.before_sensitive;
+  const malformed = outputChange('synthetic-before', 'synthetic-after', ['update'], { after_sensitive: 'invalid' });
+  const missingUnknown = outputChange('synthetic-before', 'synthetic-after', ['update']);
+  delete missingUnknown.after_unknown;
+  document.output_changes = {
+    issuer: missing,
+    audience: malformed,
+    spa_client_id: missingUnknown,
+  };
+  const outputs = diagnosePlanDocument(document).outputChangeSummary.outputs;
+  assert.equal(outputs[0].beforeSensitive, null);
+  assert.equal(outputs[0].beforeAfterEqual, null);
+  assert.equal(outputs[1].afterSensitive, null);
+  assert.equal(outputs[1].beforeAfterEqual, null);
+  assert.equal(outputs[2].afterUnknown, null);
+  assert.equal(outputs[2].beforeAfterEqual, null);
+});
+
+test('classifies drift on the managed SPA with only allowlisted categories', () => {
+  const document = clone(baseline);
+  document.resource_drift = [driftEntry('auth0_client.local_spa',
+    { client_id: secretSentinel, callbacks: ['http://127.0.0.1:49321/auth/callback'] },
+    { client_id: `${secretSentinel}-changed`, callbacks: ['http://127.0.0.1:49321/auth/callback', `${secretSentinel}-url`] })];
+  const summary = diagnosePlanDocument(document).resourceDriftSummary;
+  assert.equal(summary.unexpectedResourceCount, 0);
+  assert.equal(summary.entries[0].resource, 'auth0_client.local_spa');
+  assert.deepEqual(summary.entries[0].actions, ['update']);
+  assert.deepEqual(summary.entries[0].changedAttributeCategories,
+    { identity: 1, permissions: 0, clientConfiguration: 1, other: 0 });
+  assert.equal(summary.entries[0].affectsIdentity, true);
+  assert.equal(summary.entries[0].affectsClientConfiguration, true);
+  assert.equal(Object.keys(summary.entries[0]).some((key) => key === 'client_id' || key === 'callbacks'), false);
+  assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+});
+
+test('classifies drift on another expected managed resource', () => {
+  const document = clone(baseline);
+  document.resource_drift = [driftEntry('auth0_resource_server.cases',
+    { identifier: 'synthetic-before', signing_alg: 'RS256' }, { identifier: 'synthetic-after', signing_alg: 'HS256' })];
+  const entry = diagnosePlanDocument(document).resourceDriftSummary.entries[0];
+  assert.equal(entry.resource, 'auth0_resource_server.cases');
+  assert.deepEqual(entry.changedAttributeCategories, { identity: 1, permissions: 1, clientConfiguration: 0, other: 0 });
+  assert.equal(entry.affectsPermissions, true);
+});
+
+test('reports unexpected drift addresses only as unexpected', () => {
+  const document = clone(baseline);
+  document.resource_drift = [driftEntry(`unapproved.${secretSentinel}`, { extra_secret_key: secretSentinel }, { extra_secret_key: 'changed' })];
+  const summary = diagnosePlanDocument(document).resourceDriftSummary;
+  assert.equal(summary.unexpectedResourceCount, 1);
+  assert.equal(summary.entries[0].resource, 'unexpected');
+  assert.equal(summary.entries[0].unknownAttributeCount, 1);
+  assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+});
+
+test('requires drift address, managed mode, provider, and resource fields to agree', () => {
+  for (const mutate of [
+    (entry) => { entry.mode = 'data'; },
+    (entry) => { entry.provider_name = `unapproved.${secretSentinel}`; },
+    (entry) => { entry.type = 'unexpected'; },
+    (entry) => { entry.index = 0; },
+    (entry) => { entry.module_address = 'module.foreign'; },
+    (entry) => { entry.deposed = 'old'; },
+  ]) {
+    const document = clone(baseline);
+    const entry = driftEntry('auth0_client.local_spa', { name: 'before' }, { name: 'after' });
+    mutate(entry);
+    document.resource_drift = [entry];
+    const summary = diagnosePlanDocument(document).resourceDriftSummary;
+    assert.equal(summary.entries[0].resource, 'unexpected');
+    assert.equal(summary.unexpectedResourceCount, 1);
+    assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+  }
+});
+
+test('counts sensitive and unknown drift attributes without exposing names or values', () => {
+  const document = clone(baseline);
+  document.resource_drift = [driftEntry('auth0_client.local_spa',
+    { client_id: secretSentinel }, { client_id: `${secretSentinel}-changed` }, ['update'], {
+      after_unknown: { client_id: true }, before_sensitive: { client_id: true }, after_sensitive: { client_id: true },
+    })];
+  const entry = diagnosePlanDocument(document).resourceDriftSummary.entries[0];
+  assert.equal(entry.sensitiveAttributeCount, 1);
+  assert.equal(entry.unknownAttributeCount, 1);
+  assert.deepEqual(entry.changedAttributeCategories, { identity: 0, permissions: 0, clientConfiguration: 0, other: 0 });
+  assert.equal(JSON.stringify(entry).includes(secretSentinel), false);
+});
+
+test('counts equal placeholders marked sensitive or unknown instead of treating them as unchanged', () => {
+  const document = clone(baseline);
+  document.resource_drift = [driftEntry('auth0_client.local_spa',
+    { client_id: null }, { client_id: null }, ['update'], {
+      after_unknown: { client_id: true }, before_sensitive: { client_id: true }, after_sensitive: { client_id: true },
+    })];
+  const entry = diagnosePlanDocument(document).resourceDriftSummary.entries[0];
+  assert.equal(entry.unknownAttributeCount, 1);
+  assert.equal(entry.sensitiveAttributeCount, 1);
+  assert.deepEqual(entry.changedAttributeCategories, { identity: 0, permissions: 0, clientConfiguration: 0, other: 0 });
+});
+
+test('treats root-level sensitive and unknown markers as applying to changed attributes', () => {
+  const document = clone(baseline);
+  document.resource_drift = [driftEntry('auth0_client.local_spa',
+    { client_id: 'synthetic-before' }, { client_id: 'synthetic-after' }, ['update'], {
+      after_unknown: true, before_sensitive: true, after_sensitive: true,
+    })];
+  const entry = diagnosePlanDocument(document).resourceDriftSummary.entries[0];
+  assert.equal(entry.unknownAttributeCount, 1);
+  assert.equal(entry.sensitiveAttributeCount, 1);
+  assert.deepEqual(entry.changedAttributeCategories, { identity: 0, permissions: 0, clientConfiguration: 0, other: 0 });
+});
+
+test('counts unexpected output keys without revealing their names and reports malformed output actions safely', () => {
+  const document = clone(baseline);
+  document.output_changes = {
+    issuer: outputChange('before', 'after', ['update']),
+    audience: outputChange('same', 'same'),
+    spa_client_id: outputChange('before', 'after', [secretSentinel]),
+    [secretSentinel]: { value: secretSentinel },
+  };
+  const summary = diagnosePlanDocument(document).outputChangeSummary;
+  assert.equal(summary.declaredKeysMatch, false);
+  assert.equal(summary.unexpectedOutputCount, 1);
+  assert.deepEqual(summary.outputs[2].actions, ['unknown']);
+  assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+});
+
+test('reports the unexpected output count as unavailable when output_changes is malformed', () => {
+  const summary = diagnosePlanDocument({ ...clone(baseline), output_changes: [] }).outputChangeSummary;
+  assert.equal(summary.declaredKeysMatch, false);
+  assert.equal(summary.unexpectedOutputCount, null);
 });
 
 function hcpState(overrides = {}) {
