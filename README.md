@@ -13,7 +13,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser. API health is at http://localhost:4000/api/health.
+Open http://127.0.0.1:5173 in your browser. API health is at http://localhost:4000/api/health.
 
 ## Synthetic support triage
 
