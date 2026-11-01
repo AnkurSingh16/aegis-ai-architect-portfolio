@@ -156,32 +156,37 @@ export function parseSpaName(content) {
   return match[1];
 }
 
-async function loadLocalConfiguration({ readFileImpl = readFile, statImpl = lstat }) {
-  const [secretStat, runtimeStat, variableStat] = await Promise.all([
-    statImpl(secretFile), statImpl(runtimeConfigFile), statImpl(variablesFile),
-  ]);
-  if ([secretStat, runtimeStat, variableStat].some((file) => (file.mode & 0o077) !== 0 || !file.isFile() || file.isSymbolicLink())) {
-    throw new Error('Local Auth0 credentials, runtime identity and Terraform inputs must be regular files with mode 0600.');
-  }
-  const [secrets, runtimeConfig] = await Promise.all([
-    readFileImpl(secretFile, 'utf8').then(parseEnv), readFileImpl(runtimeConfigFile, 'utf8').then(parseEnv),
-  ]);
-  const varsText = await readFileImpl(variablesFile, 'utf8');
-  const auth0Domain = secrets.AUTH0_DOMAIN;
-  const runtimeIssuer = runtimeConfig.AUTH0_ISSUER;
-  const spaClientId = runtimeConfig.AUTH0_SPA_CLIENT_ID;
-  if (typeof auth0Domain !== 'string' || !/^[A-Za-z0-9.-]+\.auth0\.com$/.test(auth0Domain) ||
-      !secrets.AUTH0_CLIENT_ID || !secrets.AUTH0_CLIENT_SECRET ||
-      typeof spaClientId !== 'string' || spaClientId.length === 0 ||
-      runtimeIssuer !== `https://${auth0Domain}/` ||
-      parseQuotedTfvars(varsText, 'auth0_domain') !== auth0Domain ||
-      !parseQuotedTfvars(varsText, 'database_connection_id')) {
-    throw new Error('Local Auth0 configuration does not match the reviewed development tenant inputs.');
-  }
-  const spaName = parseSpaName(varsText);
-  return Object.freeze({ auth0Domain, auth0ClientId: secrets.AUTH0_CLIENT_ID,
-    auth0ClientSecret: secrets.AUTH0_CLIENT_SECRET, spaName, spaClientId });
+export function createLocalConfigurationLoader({ readFileImpl = readFile, statImpl = lstat } = {}) {
+  return async function loadLocalConfiguration({ readFileImpl: readFileAdapter = readFileImpl,
+    statImpl: statAdapter = statImpl } = {}) {
+    const [secretStat, runtimeStat, variableStat] = await Promise.all([
+      statAdapter(secretFile), statAdapter(runtimeConfigFile), statAdapter(variablesFile),
+    ]);
+    if ([secretStat, runtimeStat, variableStat].some((file) => (file.mode & 0o077) !== 0 || !file.isFile() || file.isSymbolicLink())) {
+      throw new Error('Local Auth0 credentials, runtime identity and Terraform inputs must be regular files with mode 0600.');
+    }
+    const [secrets, runtimeConfig] = await Promise.all([
+      readFileAdapter(secretFile, 'utf8').then(parseEnv), readFileAdapter(runtimeConfigFile, 'utf8').then(parseEnv),
+    ]);
+    const varsText = await readFileAdapter(variablesFile, 'utf8');
+    const auth0Domain = secrets.AUTH0_DOMAIN;
+    const runtimeIssuer = runtimeConfig.AUTH0_ISSUER;
+    const spaClientId = runtimeConfig.AUTH0_SPA_CLIENT_ID;
+    if (typeof auth0Domain !== 'string' || !/^[A-Za-z0-9.-]+\.auth0\.com$/.test(auth0Domain) ||
+        !secrets.AUTH0_CLIENT_ID || !secrets.AUTH0_CLIENT_SECRET ||
+        typeof spaClientId !== 'string' || spaClientId.length === 0 ||
+        runtimeIssuer !== `https://${auth0Domain}/` ||
+        parseQuotedTfvars(varsText, 'auth0_domain') !== auth0Domain ||
+        !parseQuotedTfvars(varsText, 'database_connection_id')) {
+      throw new Error('Local Auth0 configuration does not match the reviewed development tenant inputs.');
+    }
+    const spaName = parseSpaName(varsText);
+    return Object.freeze({ auth0Domain, auth0ClientId: secrets.AUTH0_CLIENT_ID,
+      auth0ClientSecret: secrets.AUTH0_CLIENT_SECRET, spaName, spaClientId });
+  };
 }
+
+const loadLocalConfiguration = createLocalConfigurationLoader();
 
 function sameStateIdentity(actual) {
   const expected = ['organization', 'plan', 'workspace', 'workspaceId', 'executionMode', 'autoApply', 'state',
