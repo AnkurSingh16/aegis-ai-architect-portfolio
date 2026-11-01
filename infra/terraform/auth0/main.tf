@@ -23,10 +23,10 @@ resource "auth0_client" "local_spa" {
   oidc_conformant     = true
   is_first_party      = true
   grant_types         = ["authorization_code"]
-  callbacks           = ["http://127.0.0.1:49321/auth/callback"]
+  callbacks           = ["http://127.0.0.1:49321/auth/callback", "http://127.0.0.1:5173/"]
   allowed_origins     = ["http://127.0.0.1:49321"]
-  web_origins         = ["http://127.0.0.1:49321"]
-  allowed_logout_urls = ["http://127.0.0.1:49321"]
+  web_origins         = ["http://127.0.0.1:49321", "http://127.0.0.1:5173"]
+  allowed_logout_urls = ["http://127.0.0.1:49321", "http://127.0.0.1:5173"]
 }
 
 # Singular resource appends this SPA to the selected connection without owning
