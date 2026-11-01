@@ -28,7 +28,13 @@ const baseline = {
 const auth0ProviderAddress = 'registry.terraform.io/auth0/auth0';
 
 function schemaAttribute({ required = false, optional = false, computed = false, sensitive = false } = {}) {
-  return { required, optional, computed, sensitive, type: 'string' };
+  return {
+    ...(required ? { required: true } : {}),
+    ...(optional ? { optional: true } : {}),
+    ...(computed ? { computed: true } : {}),
+    ...(sensitive ? { sensitive: true } : {}),
+    type: 'string',
+  };
 }
 
 function providerSchemaFixture(attributes, formatVersion = '1.0', additionalResources = {}) {
@@ -75,7 +81,8 @@ test('classifies drift attributes with the pinned provider schema without exposi
   const entry = result.entries[0];
   assert.equal(result.provider, auth0ProviderAddress);
   assert.equal(result.pinnedVersion, '1.59.0');
-  assert.equal(result.status, 'verified');
+  assert.equal(result.schemaAvailability, 'available');
+  assert.equal(result.driftClassification, 'partial');
   assert.deepEqual(entry.classifications, {
     computedOnly: 1, optionalComputed: 1, configurable: 1, sensitive: 1, unknownUnrecognized: 1,
   });
@@ -95,6 +102,58 @@ test('classifies computed-only SPA drift as nonconfigurable when the schema says
   assert.deepEqual(entry.safeNonSensitiveAttributeNames, ['name']);
 });
 
+test('accepts realistic omitted false schema flags and rejects malformed or impossible attribute modes', () => {
+  const schema = providerSchemaFixture({
+    id: schemaAttribute({ computed: true }),
+    callbacks: schemaAttribute({ optional: true }),
+    identifier: schemaAttribute({ required: true }),
+    web_origins: schemaAttribute({ optional: true, computed: true }),
+    client_secret: schemaAttribute({ optional: true, sensitive: true }),
+    malformed_flag: { optional: 'yes', type: 'string' },
+    impossible_mode: { required: true, optional: true, type: 'string' },
+    sensitive_without_mode: { sensitive: true, type: 'string' },
+    no_mode: { type: 'string' },
+  });
+  const before = Object.fromEntries(['id', 'callbacks', 'identifier', 'web_origins', 'client_secret', 'malformed_flag',
+    'impossible_mode', 'sensitive_without_mode', 'no_mode'].map((key) => [key, `synthetic-${key}-before`]));
+  const after = Object.fromEntries(Object.keys(before).map((key) => [key, `synthetic-${key}-after`]));
+  const result = summarizeDriftAgainstProviderSchema(schemaDrift(before, after, {}, {}, {}), schema, '1.59.0');
+  const entry = result.entries[0];
+  assert.deepEqual(entry.classifications, {
+    computedOnly: 1, optionalComputed: 1, configurable: 2, sensitive: 1, unknownUnrecognized: 4,
+  });
+  assert.equal(result.schemaAvailability, 'available');
+  assert.equal(result.driftClassification, 'partial');
+  assert.equal(entry.configurableSettingAffected, true);
+  assert.deepEqual(entry.safeNonSensitiveAttributeNames, ['callbacks', 'web_origins']);
+  assert.equal(JSON.stringify(result).includes('synthetic-'), false);
+  assert.equal(JSON.stringify(result).includes('client_secret'), false);
+});
+
+test('distinguishes an available provider schema from missing resource or attribute schema coverage', () => {
+  const schema = providerSchemaFixture({});
+  const drift = schemaDrift({ provider_added_attribute: 'before' }, { provider_added_attribute: 'after' });
+  const result = summarizeDriftAgainstProviderSchema(drift, schema, '1.59.0');
+  assert.equal(result.schemaAvailability, 'available');
+  assert.equal(result.driftClassification, 'partial');
+  assert.equal(result.entries[0].classificationStatus, 'partial');
+  assert.equal(result.entries[0].classifications.unknownUnrecognized, 1);
+  const missingResourceSchema = providerSchemaFixture({}, '1.0', {});
+  const otherTypeDrift = [{ ...drift[0], type: 'auth0_connection_client', name: 'local_spa_database',
+    address: 'auth0_connection_client.local_spa_database' }];
+  const missing = summarizeDriftAgainstProviderSchema(otherTypeDrift, missingResourceSchema, '1.59.0');
+  assert.equal(missing.schemaAvailability, 'available');
+  assert.equal(missing.driftClassification, 'partial');
+  assert.equal(missing.entries[0].classificationStatus, 'unavailable');
+  assert.equal(missing.configurableSettingAffected, null);
+  assert.equal(missing.securityRelevantSettingAffected, null);
+  const noAttributesDrift = [{ ...otherTypeDrift[0], change: { actions: ['update'], before: {}, after: {} } }];
+  const missingNoAttributes = summarizeDriftAgainstProviderSchema(noAttributesDrift, missingResourceSchema, '1.59.0');
+  assert.equal(missingNoAttributes.driftClassification, 'partial');
+  assert.equal(missingNoAttributes.configurableSettingAffected, null);
+  assert.equal(missingNoAttributes.securityRelevantSettingAffected, null);
+});
+
 test('uses the matching pinned provider schema for each expected Auth0 resource type', () => {
   const schema = providerSchemaFixture({}, '1.0', {
     auth0_resource_server: { version: 2, block: { attributes: { identifier: schemaAttribute({ required: true }) } } },
@@ -108,7 +167,8 @@ test('uses the matching pinned provider schema for each expected Auth0 resource 
   ].map(([address, type, name, attribute]) => ({ address, mode: 'managed', type, name,
     provider_name: auth0ProviderAddress, change: { actions: ['update'], before: { [attribute]: 'before' }, after: { [attribute]: 'after' } } }));
   const result = summarizeDriftAgainstProviderSchema(entries, schema, '1.59.0');
-  assert.equal(result.status, 'verified');
+  assert.equal(result.schemaAvailability, 'available');
+  assert.equal(result.driftClassification, 'complete');
   for (const entry of result.entries) {
     assert.equal(entry.classifications.configurable, 1);
     assert.equal(entry.classifications.unknownUnrecognized, 0);
@@ -119,10 +179,11 @@ test('uses the matching pinned provider schema for each expected Auth0 resource 
 test('fails closed when provider schema, pinned version, or drift identity is malformed', () => {
   const schema = providerSchemaFixture({ app_type: schemaAttribute({ optional: true }) });
   const malformed = summarizeDriftAgainstProviderSchema(schemaDrift({ app_type: 'spa' }, { app_type: 'native' }), '{bad-json', '1.59.0');
-  assert.equal(malformed.status, 'unavailable');
+  assert.equal(malformed.schemaAvailability, 'unavailable');
+  assert.equal(malformed.driftClassification, 'unavailable');
   assert.equal(malformed.configurableSettingAffected, null);
   const wrongVersion = summarizeDriftAgainstProviderSchema(schemaDrift({ app_type: 'spa' }, { app_type: 'native' }), schema, '1.60.0');
-  assert.equal(wrongVersion.status, 'unavailable');
+  assert.equal(wrongVersion.schemaAvailability, 'unavailable');
   const foreignDrift = schemaDrift({ app_type: 'spa' }, { app_type: 'native' });
   foreignDrift[0].provider_name = 'unapproved.provider';
   assert.equal(summarizeDriftAgainstProviderSchema(foreignDrift, schema, '1.59.0').entries[0].resource, 'unexpected');
@@ -135,6 +196,21 @@ test('treats malformed drift sensitivity and unknown masks as unclassified', () 
   const entry = summarizeDriftAgainstProviderSchema(drift, schema, '1.59.0').entries[0];
   assert.equal(entry.classifications.unknownUnrecognized, 1);
   assert.equal(entry.configurableAttributeCount, 0);
+  assert.equal(entry.configurableSettingAffected, null);
+  assert.equal(entry.securityRelevantSettingAffected, null);
+  assert.deepEqual(entry.safeNonSensitiveAttributeNames, []);
+});
+
+test('reports malformed root mask metadata even when no attribute keys are discoverable', () => {
+  const schema = providerSchemaFixture({ callbacks: schemaAttribute({ optional: true }) });
+  const drift = schemaDrift({}, {});
+  drift[0].change.after_unknown = 'malformed-mask';
+  const result = summarizeDriftAgainstProviderSchema(drift, schema, '1.59.0');
+  const entry = result.entries[0];
+  assert.equal(result.schemaAvailability, 'available');
+  assert.equal(result.driftClassification, 'partial');
+  assert.equal(entry.classifications.unknownUnrecognized, 1);
+  assert.equal(entry.classificationStatus, 'partial');
   assert.equal(entry.configurableSettingAffected, null);
   assert.equal(entry.securityRelevantSettingAffected, null);
   assert.deepEqual(entry.safeNonSensitiveAttributeNames, []);
@@ -241,7 +317,7 @@ test('does not compare provider-sensitive values even when the plan omits sensit
 });
 
 test('does not compare attributes with unknown or incomplete provider schema metadata', () => {
-  const schema = providerSchemaFixture({ unknown_property: schemaAttribute(), incomplete_property: { optional: true } });
+  const schema = providerSchemaFixture({ unknown_property: schemaAttribute(), incomplete_property: { optional: true, sensitive: null } });
   const planned = plannedBrowserChanges();
   const target = planned.find((item) => item.address === 'auth0_client.local_spa');
   for (const name of ['unknown_property', 'incomplete_property']) {
@@ -637,7 +713,8 @@ test('rechecks HCP identity after provider schema inspection and cleans on chang
 test('reports provider schema as unavailable and cleans the plan after schema command failure', async () => {
   const { deps, calls } = makeDiagnostic({ schemaFailure: true });
   const result = await runPlanDiagnostic(deps);
-  assert.equal(result.providerSchemaSummary.status, 'unavailable');
+  assert.equal(result.providerSchemaSummary.schemaAvailability, 'unavailable');
+  assert.equal(result.providerSchemaSummary.driftClassification, 'unavailable');
   assert.equal(result.providerSchemaSummary.configurableSettingAffected, null);
   assert.equal(calls.preflights, 4);
   assert.equal(calls.removed.length, 1);

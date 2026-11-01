@@ -181,6 +181,7 @@ function changedDriftKeys(change) {
   }
   const malformedMarker = ['before_sensitive', 'after_sensitive', 'after_unknown']
     .some((field) => Object.hasOwn(change ?? {}, field) && !booleanTreeIsValid(change[field]));
+  if (malformedMarker && keys.size === 0) keys.add(Symbol('malformed-marker-metadata'));
   return [...keys].filter((key) => {
     const masked = markerAppliesToAttribute(change?.before_sensitive, key) ||
       markerAppliesToAttribute(change?.after_sensitive, key) || markerAppliesToAttribute(change?.after_unknown, key);
@@ -191,6 +192,7 @@ function changedDriftKeys(change) {
 function unavailableProviderEntry(resource, unknownUnrecognizedCount) {
   return {
     resource,
+    classificationStatus: 'unavailable',
     classifications: { computedOnly: 0, optionalComputed: 0, configurable: 0, sensitive: 0, unknownUnrecognized: unknownUnrecognizedCount },
     planUnknownValueCount: null,
     planSensitiveValueCount: null,
@@ -206,11 +208,11 @@ function unavailableProviderEntry(resource, unknownUnrecognizedCount) {
 function schemaAttributeMode(attribute) {
   if (!record(attribute)) return null;
   const flagNames = ['required', 'optional', 'computed', 'sensitive'];
-  if (flagNames.some((name) => typeof attribute[name] !== 'boolean')) return null;
-  const required = attribute.required === true;
-  const optional = attribute.optional === true;
-  const computed = attribute.computed === true;
-  const sensitive = attribute.sensitive === true;
+  if (flagNames.some((name) => Object.hasOwn(attribute, name) && typeof attribute[name] !== 'boolean')) return null;
+  const required = attribute.required ?? false;
+  const optional = attribute.optional ?? false;
+  const computed = attribute.computed ?? false;
+  const sensitive = attribute.sensitive ?? false;
   if (required && (optional || computed)) return null;
   if (!required && !optional && !computed) return null;
   return { required, optional, computed, sensitive };
@@ -292,6 +294,7 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
     const unknownCount = counts.unknownUnrecognized;
     return {
       resource,
+      classificationStatus: counts.unknownUnrecognized === 0 ? 'complete' : 'partial',
       classifications: counts,
       planUnknownValueCount,
       planSensitiveValueCount,
@@ -321,14 +324,15 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
     if (entry.securityRelevantAttributeCount === null) securityRelevantAttributeCount = null;
     else if (securityRelevantAttributeCount !== null) securityRelevantAttributeCount += entry.securityRelevantAttributeCount;
     for (const key of Object.keys(plannedValueComparison)) plannedValueComparison[key] += entry.plannedValueComparison?.[key] ?? 0;
-    if (entry.resource === 'unexpected') classificationUnavailable = true;
+    if (entry.classificationStatus !== 'complete' || entry.resource === 'unexpected') classificationUnavailable = true;
   }
   const knownUnknowns = aggregate.unknownUnrecognized > 0;
   return {
     provider: expectedProviderAddress,
     pinnedVersion: pinnedVersion === expectedProviderVersion ? expectedProviderVersion : null,
     formatVersion: parsed ? safeVersion(parsed.schema.format_version) : null,
-    status: parsed ? 'verified' : 'unavailable',
+    schemaAvailability: parsed ? 'available' : 'unavailable',
+    driftClassification: !parsed ? 'unavailable' : entries.some((entry) => entry.classificationStatus !== 'complete') ? 'partial' : 'complete',
     classifications: aggregate,
     planUnknownValueCount,
     planSensitiveValueCount,
