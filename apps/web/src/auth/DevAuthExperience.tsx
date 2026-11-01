@@ -28,7 +28,7 @@ function isStoredCase(value: unknown, tenantId: string): value is StoredCase {
 }
 
 function CaseAccessPanel() {
-  const { isAuthenticated, isLoading, error, loginWithRedirect, logout, getAccessTokenSilently } = useAuth0();
+  const { isAuthenticated, isLoading, user, error, loginWithRedirect, logout, getAccessTokenSilently } = useAuth0();
   const [tenantId, setTenantId] = useState<string>(tenants[0].id);
   const [view, setView] = useState<ViewState>({ kind: 'idle', cases: [] });
   const requestGeneration = useRef(0);
@@ -68,6 +68,7 @@ function CaseAccessPanel() {
         if (response.status === 403) return setView({ kind: 'forbidden', cases: [] });
         if (!response.ok) return setView({ kind: 'unavailable', cases: [] });
         const body: unknown = await response.json();
+        if (!active || generation !== requestGeneration.current) return;
         if (!Array.isArray(body) || body.length > 100 || !body.every((item) => isStoredCase(item, tenantId))) {
           return setView({ kind: 'unavailable', cases: [] });
         }
@@ -78,7 +79,7 @@ function CaseAccessPanel() {
     })();
 
     return () => { active = false; controller.abort(); };
-  }, [getAccessTokenSilently, isAuthenticated, tenantId]);
+  }, [getAccessTokenSilently, isAuthenticated, tenantId, user?.sub]);
 
   function changeTenant(nextTenant: string) {
     requestGeneration.current += 1;

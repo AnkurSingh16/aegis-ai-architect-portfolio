@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import DevAuthExperience from './DevAuthExperience';
 
 const authMocks = vi.hoisted(() => ({
   state: { isAuthenticated: false, isLoading: false, error: undefined as Error | undefined } as {
-    isAuthenticated: boolean; isLoading: boolean; error?: Error;
+    isAuthenticated: boolean; isLoading: boolean; error?: Error; user?: { sub: string };
   },
   loginWithRedirect: vi.fn(),
   logout: vi.fn(),
@@ -115,6 +115,66 @@ describe('development Auth0 case experience', () => {
 
     await screen.findByText(/Access was denied/);
     expect(container.textContent).not.toContain('SYN-NORTH-001');
+  });
+
+  it('does not render North JSON that resolves after the user selects South', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    let resolveNorthBody!: (body: unknown) => void;
+    const northBody = new Promise<unknown>((resolve) => { resolveNorthBody = resolve; });
+    const northJson = vi.fn(() => northBody);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: northJson })
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+    globalThis.fetch = fetchMock;
+    const { container } = render(<DevAuthExperience config={config} />);
+
+    await waitFor(() => expect(northJson).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByLabelText('Requested tenant'), { target: { value: '20000000-0000-4000-8000-000000000002' } });
+    await screen.findByText(/Access was denied/);
+    await act(async () => { resolveNorthBody([northCase]); await northBody; });
+
+    expect(container.textContent).not.toContain('SYN-NORTH-001');
+    expect(container.textContent).toContain('Access was denied');
+  });
+
+  it('invalidates a response when the authenticated identity changes', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-a' } };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    let resolveBody!: (body: unknown) => void;
+    const body = new Promise<unknown>((resolve) => { resolveBody = resolve; });
+    const json = vi.fn(() => body);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json })
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+    globalThis.fetch = fetchMock;
+    const { container, rerender } = render(<DevAuthExperience config={config} />);
+
+    await waitFor(() => expect(json).toHaveBeenCalledOnce());
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-b' } };
+    rerender(<DevAuthExperience config={config} />);
+    await screen.findByText(/Access was denied/);
+    await act(async () => { resolveBody([northCase]); await body; });
+
+    expect(container.textContent).not.toContain('SYN-NORTH-001');
+  });
+
+  it('does not update the view when response parsing finishes after unmount', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    let resolveBody!: (body: unknown) => void;
+    const body = new Promise<unknown>((resolve) => { resolveBody = resolve; });
+    const json = vi.fn(() => body);
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { unmount } = render(<DevAuthExperience config={config} />);
+
+    await waitFor(() => expect(json).toHaveBeenCalledOnce());
+    unmount();
+    await act(async () => { resolveBody([northCase]); await body; });
+
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 
   it('handles 401, 403 and API outage with generic messages and no token disclosure', async () => {

@@ -86,13 +86,13 @@ The Vite development build includes a separate Auth0 sign-in and read-only case 
 
 Copy `apps/web/.env.local.example` to the ignored `apps/web/.env.local` and fill in the public issuer, SPA client ID and audience from the verified development configuration. Do not put `.env.api`, `.env.auth0`, database credentials or Management API credentials in Vite configuration. Run the API with the command above, then start Vite with `npm run dev -w apps/web`; the existing `/api` proxy sends same-origin browser requests to Fastify on `127.0.0.1:4000`, so no API CORS change is needed.
 
-Before using browser sign-in, the Auth0 SPA needs these additive Application URI entries for the fixed Vite origin. Preserve the existing PKCE smoke-harness URLs:
+The SPA URLs are managed by `auth0_client.local_spa`. Browser sign-in requires a separate reviewed Terraform change and operator approval; do not edit these values manually in the Auth0 Dashboard. Preserve the existing PKCE smoke callback `http://127.0.0.1:49321/auth/callback`. The proposed additive browser values are:
 
 - Allowed Callback URLs: `http://127.0.0.1:5173/`
 - Allowed Logout URLs: `http://127.0.0.1:5173`
 - Allowed Web Origins: `http://127.0.0.1:5173`
 
-These Auth0 settings remain a manual change and were not changed by this implementation. Auth0 checks callback URLs by exact match, and Allowed Web Origins supports browser-based silent-auth flows. The case viewer treats a selected tenant as a resource request only; Fastify membership checks and PostgreSQL RLS remain the authorization boundary. A 403 is displayed as access denied and does not trigger a retry under another tenant. See the [security runbook](docs/SECURITY-RUNBOOK.md).
+Add `http://127.0.0.1:5173` to Auth0 CORS Allowed Origins only if a reviewed flow requires it; the Vite `/api` proxy keeps API calls same-origin. No Terraform or Auth0 settings were changed for this feature. Auth0 checks callback URLs by exact match. The case viewer treats a selected tenant as a resource request only; Fastify membership checks and PostgreSQL RLS remain the authorization boundary. A 403 is displayed as access denied and does not trigger a retry under another tenant. See the [security runbook](docs/SECURITY-RUNBOOK.md).
 
 Membership changes take effect for new transactions after commit. An in-flight repeatable-read request can finish using its transaction snapshot. Case-change audit rows record changes but do not attribute them to a verified Auth0 subject. Production deployment, rate limiting, actor-attributed audit events and production identity operations remain future work.
 
