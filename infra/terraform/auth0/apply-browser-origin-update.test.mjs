@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertInteractiveInvocation, isAutomatedContext, parseSpaName, runBrowserOriginUpdateGate, settleApprovalOnAbort, validateBrowserOriginUpdatePlan,
+import { assertInteractiveInvocation, createLocalConfigurationLoader, isAutomatedContext, parseSpaName,
+  runBrowserOriginUpdateGate, settleApprovalOnAbort, validateBrowserOriginUpdatePlan,
   expectedResourceAddresses, organizationName, workspaceName, targetAddress } from './apply-browser-origin-update.mjs';
 
 const previous = {
@@ -38,6 +39,40 @@ test('uses the Terraform SPA-name default and rejects malformed or duplicate ove
   assert.throws(() => parseSpaName('spa_name = var.other\n'), /malformed/);
   assert.throws(() => parseSpaName('spa_name = "One"\nspa_name = "Two"\n'), /duplicate/);
   assert.throws(() => parseSpaName('spa_name = ""\n'), /malformed/);
+});
+
+test('production configuration loader accepts an omitted options object using only synthetic filesystem adapters', async () => {
+  const fixtures = new Map([
+    ['.env.auth0', 'AUTH0_DOMAIN=dev-example.auth0.com\nAUTH0_CLIENT_ID=synthetic-management-id\nAUTH0_CLIENT_SECRET=synthetic-management-secret\n'],
+    ['.env.api', 'AUTH0_ISSUER=https://dev-example.auth0.com/\nAUTH0_SPA_CLIENT_ID=synthetic-spa-client-id\n'],
+    ['terraform.tfvars', 'auth0_domain = "dev-example.auth0.com"\ndatabase_connection_id = "con_synthetic"\n'],
+  ]);
+  const reads = [];
+  const loader = createLocalConfigurationLoader({
+    statImpl: async (file) => ({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      mode: 0o100600,
+      fixtureName: file.split('/').at(-1),
+    }),
+    readFileImpl: async (file) => {
+      const name = file.split('/').at(-1);
+      reads.push(name);
+      if (!fixtures.has(name)) throw new Error('Unexpected synthetic fixture path.');
+      return fixtures.get(name);
+    },
+  });
+
+  const config = await loader();
+
+  assert.deepEqual(reads.sort(), ['.env.api', '.env.auth0', 'terraform.tfvars']);
+  assert.deepEqual(config, {
+    auth0Domain: 'dev-example.auth0.com',
+    auth0ClientId: 'synthetic-management-id',
+    auth0ClientSecret: 'synthetic-management-secret',
+    spaName: 'Aegis AI Local SPA',
+    spaClientId: 'synthetic-spa-client-id',
+  });
 });
 function state(overrides = {}) {
   return { organization: organizationName, plan: 'free', workspace: workspaceName, workspaceId: 'ws-aegis-dev',
@@ -176,6 +211,20 @@ test('does not apply on interrupted operation and always cleans its plan directo
   await assert.rejects(runBrowserOriginUpdateGate(deps), /interrupted/);
   assert.equal(calls.terraform.some(([command]) => command === 'apply'), false);
   assert.equal(calls.removed.length, 1);
+});
+
+test('cleans the private plan directory on startup cancellation or configuration failure', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const cancelled = makeDeps({ deps: { signal: controller.signal } });
+  await assert.rejects(runBrowserOriginUpdateGate(cancelled.deps), /interrupted/);
+  assert.equal(cancelled.calls.terraform.length, 0);
+  assert.equal(cancelled.calls.removed.length, 1);
+
+  const failedConfig = makeDeps({ deps: { loadConfiguration: async () => { throw new Error('synthetic config failure'); } } });
+  await assert.rejects(runBrowserOriginUpdateGate(failedConfig.deps), /synthetic config failure/);
+  assert.equal(failedConfig.calls.terraform.length, 0);
+  assert.equal(failedConfig.calls.removed.length, 1);
 });
 
 test('fails closed on cleanup failure and stale private artifacts', async () => {
