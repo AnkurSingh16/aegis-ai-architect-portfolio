@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { stdin, stdout } from 'node:process';
@@ -22,7 +22,23 @@ const expectedResourceAddresses = Object.freeze([
   'auth0_client.local_spa',
   'auth0_connection_client.local_spa_database',
 ]);
+const expectedProviderAddress = 'registry.terraform.io/auth0/auth0';
+const expectedProviderVersion = '1.59.0';
 const declaredOutputNames = Object.freeze(['issuer', 'audience', 'spa_client_id']);
+const approvedSpaUrls = Object.freeze({
+  callbacks: { before: ['http://127.0.0.1:49321/auth/callback'], after: ['http://127.0.0.1:49321/auth/callback', 'http://127.0.0.1:5173/'] },
+  web_origins: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
+  allowed_logout_urls: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
+});
+const safeProviderAttributeNames = new Set([
+  'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'description',
+  'enforce_policies', 'grant_types', 'is_first_party', 'name', 'oidc_conformant', 'scope', 'signing_alg', 'web_origins',
+]);
+const securityRelevantAttributes = new Set([
+  'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'client_authentication_methods',
+  'connection_id', 'enforce_policies', 'grant_types', 'identifier', 'is_first_party', 'oidc_conformant',
+  'resource_server_identifier', 'scope', 'signing_alg', 'token_endpoint_auth_method', 'web_origins',
+]);
 const resourceAttributeCategories = Object.freeze({
   'auth0_resource_server.cases': {
     identity: ['id', 'identifier'],
@@ -149,6 +165,272 @@ function summarizeResourceDrift(drift) {
   return { entries, unexpectedResourceCount, malformedEntryCount };
 }
 
+function expectedManagedAddress(item) {
+  return record(item) && typeof item.address === 'string' && expectedResourceAddresses.includes(item.address) &&
+    item.mode === 'managed' && item.address === `${item.type}.${item.name}` &&
+    item.provider_name === expectedProviderAddress && item.module_address === undefined &&
+    item.index === undefined && item.deposed === undefined && record(item.change);
+}
+
+function changedDriftKeys(change) {
+  const before = record(change?.before) ? change.before : {};
+  const after = record(change?.after) ? change.after : {};
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const field of ['before_sensitive', 'after_sensitive', 'after_unknown']) {
+    if (record(change?.[field])) for (const key of Object.keys(change[field])) keys.add(key);
+  }
+  const malformedMarker = ['before_sensitive', 'after_sensitive', 'after_unknown']
+    .some((field) => Object.hasOwn(change ?? {}, field) && !booleanTreeIsValid(change[field]));
+  if (malformedMarker && keys.size === 0) keys.add(Symbol('malformed-marker-metadata'));
+  return [...keys].filter((key) => {
+    const masked = markerAppliesToAttribute(change?.before_sensitive, key) ||
+      markerAppliesToAttribute(change?.after_sensitive, key) || markerAppliesToAttribute(change?.after_unknown, key);
+    return malformedMarker || masked || !Object.hasOwn(before, key) || !Object.hasOwn(after, key) || !isDeepStrictEqual(before[key], after[key]);
+  });
+}
+
+function unavailableProviderEntry(resource, unknownUnrecognizedCount) {
+  return {
+    resource,
+    classificationStatus: 'unavailable',
+    classifications: { computedOnly: 0, optionalComputed: 0, configurable: 0, sensitive: 0, unknownUnrecognized: unknownUnrecognizedCount },
+    planUnknownValueCount: null,
+    planSensitiveValueCount: null,
+    configurableAttributeCount: null,
+    securityRelevantAttributeCount: null,
+    configurableSettingAffected: null,
+    securityRelevantSettingAffected: null,
+    plannedValueComparison: { matchesRefreshed: 0, differsFromRefreshed: 0, unavailable: unknownUnrecognizedCount },
+    safeNonSensitiveAttributeNames: [],
+  };
+}
+
+function schemaAttributeMode(attribute) {
+  if (!record(attribute)) return null;
+  const flagNames = ['required', 'optional', 'computed', 'sensitive'];
+  if (flagNames.some((name) => Object.hasOwn(attribute, name) && typeof attribute[name] !== 'boolean')) return null;
+  const required = attribute.required ?? false;
+  const optional = attribute.optional ?? false;
+  const computed = attribute.computed ?? false;
+  const sensitive = attribute.sensitive ?? false;
+  if (required && (optional || computed)) return null;
+  if (!required && !optional && !computed) return null;
+  return { required, optional, computed, sensitive };
+}
+
+function schemaClassification(mode) {
+  if (!mode) return 'unknownUnrecognized';
+  if (mode.sensitive) return 'sensitive';
+  if (mode.optional && mode.computed) return 'optionalComputed';
+  if (mode.computed && !mode.optional && !mode.required) return 'computedOnly';
+  if (mode.required || mode.optional) return 'configurable';
+  return 'unknownUnrecognized';
+}
+
+function providerSchemaRoot(schemaJson, pinnedVersion) {
+  if (pinnedVersion !== expectedProviderVersion) return null;
+  let schema;
+  try { schema = typeof schemaJson === 'string' ? JSON.parse(schemaJson) : schemaJson; }
+  catch { return null; }
+  const providerSchemas = schema?.provider_schemas;
+  if (!record(schema) || typeof schema.format_version !== 'string' || !/^1\.\d+$/.test(schema.format_version) ||
+      !record(providerSchemas) || Object.keys(providerSchemas).length !== 1 ||
+      !Object.hasOwn(providerSchemas, expectedProviderAddress)) return null;
+  const provider = providerSchemas[expectedProviderAddress];
+  if (!record(provider?.resource_schemas)) return null;
+  return { schema, resourceSchemas: provider.resource_schemas };
+}
+
+/** Compare drift field names with the locked Auth0 provider schema without returning arbitrary keys or values. */
+export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVersion, plannedChanges = []) {
+  const parsed = providerSchemaRoot(schemaJson, pinnedVersion);
+  const plannedByAddress = new Map(Array.isArray(plannedChanges)
+    ? plannedChanges.filter(expectedManagedAddress).map((item) => [item.address, item.change]) : []);
+  const entries = (Array.isArray(drift) ? drift : []).map((item) => {
+    const trusted = expectedManagedAddress(item);
+    const resource = trusted ? item.address : 'unexpected';
+    const change = record(item?.change) ? item.change : {};
+    const keys = changedDriftKeys(change);
+    const resourceType = trusted ? item.type : null;
+    const resourceSchema = resourceType ? parsed?.resourceSchemas[resourceType] : null;
+    const attributes = record(resourceSchema) && Number.isSafeInteger(resourceSchema.version) &&
+      record(resourceSchema.block?.attributes) ? resourceSchema.block.attributes : null;
+    if (!parsed || !trusted || !attributes) return unavailableProviderEntry(resource, keys.length);
+    const counts = { computedOnly: 0, optionalComputed: 0, configurable: 0, sensitive: 0, unknownUnrecognized: 0 };
+    const safeNames = new Set();
+    let planUnknownValueCount = 0;
+    let planSensitiveValueCount = 0;
+    let configurableAttributeCount = 0;
+    let securityRelevantAttributeCount = 0;
+    const plannedValueComparison = { matchesRefreshed: 0, differsFromRefreshed: 0, unavailable: 0 };
+    const plannedChange = plannedByAddress.get(resource);
+    const driftMarkersMalformed = ['before_sensitive', 'after_sensitive', 'after_unknown']
+      .some((field) => Object.hasOwn(change, field) && !booleanTreeIsValid(change[field]));
+    for (const key of keys) {
+      const mode = schemaAttributeMode(attributes[key]);
+      const planUnknown = markerAppliesToAttribute(change.after_unknown, key);
+      const planSensitive = markerAppliesToAttribute(change.before_sensitive, key) ||
+        markerAppliesToAttribute(change.after_sensitive, key);
+      const classification = !mode || driftMarkersMalformed ? 'unknownUnrecognized' :
+        (planSensitive || mode.sensitive) ? 'sensitive' : schemaClassification(mode);
+      if (planUnknown || driftMarkersMalformed) planUnknownValueCount += 1;
+      if (planSensitive || mode?.sensitive) planSensitiveValueCount += 1;
+      counts[classification] += 1;
+      if (mode && !driftMarkersMalformed && (mode.required || mode.optional)) configurableAttributeCount += 1;
+      if (!driftMarkersMalformed && securityRelevantAttributes.has(key)) securityRelevantAttributeCount += 1;
+      if (safeProviderAttributeNames.has(key) && mode && !driftMarkersMalformed && !mode.sensitive && !planSensitive && !planUnknown) safeNames.add(key);
+      const plannedMarkersMalformed = record(plannedChange) && ['before_sensitive', 'after_sensitive', 'after_unknown']
+        .some((field) => Object.hasOwn(plannedChange, field) && !booleanTreeIsValid(plannedChange[field]));
+      const refreshedBeforeAction = record(plannedChange?.before) ? plannedChange.before : null;
+      const refreshedRemote = record(change.after) ? change.after : null;
+      if (!refreshedBeforeAction || !refreshedRemote || !Object.hasOwn(refreshedBeforeAction, key) || !Object.hasOwn(refreshedRemote, key) ||
+          plannedMarkersMalformed || driftMarkersMalformed || planUnknown || planSensitive || !mode || mode.sensitive ||
+          markerAppliesToAttribute(plannedChange?.after_unknown, key) || markerAppliesToAttribute(plannedChange?.before_sensitive, key) ||
+          markerAppliesToAttribute(plannedChange?.after_sensitive, key)) {
+        plannedValueComparison.unavailable += 1;
+      } else if (isDeepStrictEqual(refreshedBeforeAction[key], refreshedRemote[key])) plannedValueComparison.matchesRefreshed += 1;
+      else plannedValueComparison.differsFromRefreshed += 1;
+    }
+    const unknownCount = counts.unknownUnrecognized;
+    return {
+      resource,
+      classificationStatus: counts.unknownUnrecognized === 0 ? 'complete' : 'partial',
+      classifications: counts,
+      planUnknownValueCount,
+      planSensitiveValueCount,
+      configurableAttributeCount,
+      securityRelevantAttributeCount,
+      configurableSettingAffected: configurableAttributeCount > 0 ? true : unknownCount > 0 ? null : false,
+      securityRelevantSettingAffected: securityRelevantAttributeCount > 0 ? true : unknownCount > 0 ? null : false,
+      plannedValueComparison,
+      safeNonSensitiveAttributeNames: [...safeNames].sort(),
+    };
+  });
+  const aggregate = { computedOnly: 0, optionalComputed: 0, configurable: 0, sensitive: 0, unknownUnrecognized: 0 };
+  let planUnknownValueCount = 0;
+  let planSensitiveValueCount = 0;
+  let configurableAttributeCount = 0;
+  let securityRelevantAttributeCount = 0;
+  const plannedValueComparison = { matchesRefreshed: 0, differsFromRefreshed: 0, unavailable: 0 };
+  let classificationUnavailable = !parsed;
+  for (const entry of entries) {
+    for (const key of Object.keys(aggregate)) aggregate[key] += entry.classifications[key];
+    if (entry.planUnknownValueCount === null) planUnknownValueCount = null;
+    else if (planUnknownValueCount !== null) planUnknownValueCount += entry.planUnknownValueCount;
+    if (entry.planSensitiveValueCount === null) planSensitiveValueCount = null;
+    else if (planSensitiveValueCount !== null) planSensitiveValueCount += entry.planSensitiveValueCount;
+    if (entry.configurableAttributeCount === null) configurableAttributeCount = null;
+    else if (configurableAttributeCount !== null) configurableAttributeCount += entry.configurableAttributeCount;
+    if (entry.securityRelevantAttributeCount === null) securityRelevantAttributeCount = null;
+    else if (securityRelevantAttributeCount !== null) securityRelevantAttributeCount += entry.securityRelevantAttributeCount;
+    for (const key of Object.keys(plannedValueComparison)) plannedValueComparison[key] += entry.plannedValueComparison?.[key] ?? 0;
+    if (entry.classificationStatus !== 'complete' || entry.resource === 'unexpected') classificationUnavailable = true;
+  }
+  const knownUnknowns = aggregate.unknownUnrecognized > 0;
+  return {
+    provider: expectedProviderAddress,
+    pinnedVersion: pinnedVersion === expectedProviderVersion ? expectedProviderVersion : null,
+    formatVersion: parsed ? safeVersion(parsed.schema.format_version) : null,
+    schemaAvailability: parsed ? 'available' : 'unavailable',
+    driftClassification: !parsed ? 'unavailable' : entries.some((entry) => entry.classificationStatus !== 'complete') ? 'partial' : 'complete',
+    classifications: aggregate,
+    planUnknownValueCount,
+    planSensitiveValueCount,
+    configurableAttributeCount,
+    securityRelevantAttributeCount,
+    plannedValueComparison,
+    configurableSettingAffected: configurableAttributeCount === null ? null : configurableAttributeCount > 0 ? true :
+      classificationUnavailable || knownUnknowns ? null : false,
+    securityRelevantSettingAffected: securityRelevantAttributeCount === null ? null : securityRelevantAttributeCount > 0 ? true :
+      classificationUnavailable || knownUnknowns ? null : false,
+    safeNonSensitiveAttributeNames: [...new Set(entries.flatMap((entry) => entry.safeNonSensitiveAttributeNames))].sort(),
+    entries,
+  };
+}
+
+function summarizePlannedBrowserOriginUpdate(resourceChanges) {
+  if (!Array.isArray(resourceChanges)) return {
+    resourceInventoryMatches: null, targetActions: null, changedApprovedUrlCount: null,
+    unexpectedChangedAttributeCount: null, unknownChangedAttributeCount: null,
+    maskedApprovedUrlCount: null, targetUrlValuesMatch: null, onlyApprovedUrlChanges: null,
+  };
+  const addresses = resourceChanges.map((item) => expectedManagedAddress(item) ? item.address : null);
+  const resourceInventoryMatches = resourceChanges.length === expectedResourceAddresses.length &&
+    addresses.every((address) => address !== null) && new Set(addresses).size === expectedResourceAddresses.length &&
+    expectedResourceAddresses.every((address) => addresses.includes(address));
+  const target = resourceChanges.filter((item) => record(item) && item.address === 'auth0_client.local_spa');
+  if (target.length !== 1 || !record(target[0].change)) return {
+    resourceInventoryMatches, targetActions: null, changedApprovedUrlCount: null,
+    unexpectedChangedAttributeCount: null, unknownChangedAttributeCount: null,
+    maskedApprovedUrlCount: null, targetUrlValuesMatch: null, onlyApprovedUrlChanges: false,
+  };
+  const targetItem = target[0];
+  const change = targetItem.change;
+  const before = record(change.before) ? change.before : {};
+  const after = record(change.after) ? change.after : {};
+  let changedApprovedUrlCount = 0;
+  let unexpectedChangedAttributeCount = 0;
+  let unknownChangedAttributeCount = 0;
+  let maskedApprovedUrlCount = 0;
+  let targetUrlValuesMatch = true;
+  for (const [key, approved] of Object.entries(approvedSpaUrls)) {
+    const markerFields = ['after_unknown', 'before_sensitive', 'after_sensitive'];
+    if (markerFields.some((field) => Object.hasOwn(change, field) && !booleanTreeIsValid(change[field]))) {
+      maskedApprovedUrlCount += 1;
+      targetUrlValuesMatch = false;
+    } else if (markerAppliesToAttribute(change.after_unknown, key) || markerAppliesToAttribute(change.before_sensitive, key) ||
+        markerAppliesToAttribute(change.after_sensitive, key)) {
+      maskedApprovedUrlCount += 1;
+      targetUrlValuesMatch = false;
+    }
+    if (!isDeepStrictEqual(before[key], approved.before) || !isDeepStrictEqual(after[key], approved.after)) targetUrlValuesMatch = false;
+    if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key) || !isDeepStrictEqual(before[key], after[key])) changedApprovedUrlCount += 1;
+  }
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const field of ['after_unknown', 'before_sensitive', 'after_sensitive']) {
+    if (record(change[field])) for (const key of Object.keys(change[field])) keys.add(key);
+  }
+  for (const key of keys) {
+    if (Object.hasOwn(approvedSpaUrls, key)) continue;
+    if (markerAppliesToAttribute(change.after_unknown, key)) {
+      unknownChangedAttributeCount += 1;
+      continue;
+    }
+    if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key) || !isDeepStrictEqual(before[key], after[key])) {
+      unexpectedChangedAttributeCount += 1;
+    }
+  }
+  const otherActionsMatch = resourceChanges.every((item) => {
+    if (!record(item) || !record(item.change)) return false;
+    return item.address === 'auth0_client.local_spa'
+      ? isDeepStrictEqual(item.change.actions, ['update'])
+      : isDeepStrictEqual(item.change.actions, ['no-op']);
+  });
+  const onlyApprovedUrlChanges = unknownChangedAttributeCount > 0 || maskedApprovedUrlCount > 0 ? null :
+    resourceInventoryMatches && otherActionsMatch && changedApprovedUrlCount === 3 && targetUrlValuesMatch &&
+    unexpectedChangedAttributeCount === 0;
+  return {
+    resourceInventoryMatches,
+    targetActions: safeActions(change.actions),
+    changedApprovedUrlCount,
+    unexpectedChangedAttributeCount,
+    unknownChangedAttributeCount,
+    maskedApprovedUrlCount,
+    targetUrlValuesMatch,
+    onlyApprovedUrlChanges,
+  };
+}
+
+export function parsePinnedAuth0ProviderVersion(lockContents) {
+  if (typeof lockContents !== 'string') return null;
+  const blocks = [...lockContents.matchAll(/provider\s+"registry\.terraform\.io\/auth0\/auth0"\s*\{([^}]*)\}/g)];
+  if (blocks.length !== 1) return null;
+  const versions = [...blocks[0][1].matchAll(/^\s*version\s*=\s*"([^"]+)"\s*$/gm)].map((match) => match[1]);
+  const constraints = [...blocks[0][1].matchAll(/^\s*constraints\s*=\s*"([^"]+)"\s*$/gm)].map((match) => match[1]);
+  return versions.length === 1 && constraints.length === 1 && versions[0] === expectedProviderVersion &&
+    ['1.59.0', '= 1.59.0'].includes(constraints[0]) ? expectedProviderVersion : null;
+}
+
 function summarizeOutputChanges(outputChanges) {
   if (!record(outputChanges)) {
     return { declaredKeysMatch: outputChanges === undefined ? null : false, unexpectedOutputCount: null,
@@ -210,7 +492,7 @@ function countField(document, key) {
 }
 
 /** Return only allowlisted plan metadata and rule identifiers; never return plan values. */
-export function diagnosePlanDocument(document) {
+export function diagnosePlanDocument(document, schemaJson, pinnedVersion) {
   const isObject = record(document);
   const requiredPresent = Object.fromEntries(requiredFields.map((key) => [key, isObject && Object.hasOwn(document, key)]));
   const optionalPresent = Object.fromEntries(optionalFields.map((key) => [key, isObject && Object.hasOwn(document, key)]));
@@ -267,12 +549,14 @@ export function diagnosePlanDocument(document) {
     },
     actionCounts: actions,
     resourceDriftSummary: summarizeResourceDrift(document?.resource_drift),
+    providerSchemaSummary: summarizeDriftAgainstProviderSchema(document?.resource_drift, schemaJson, pinnedVersion, document?.resource_changes),
     outputChangeSummary: summarizeOutputChanges(document?.output_changes),
+    plannedBrowserOriginUpdate: summarizePlannedBrowserOriginUpdate(document?.resource_changes),
     failedValidationRuleIds: Object.freeze(errors),
   });
 }
 
-export function diagnosePlanJson(jsonText) {
+export function diagnosePlanJson(jsonText, schemaJson, pinnedVersion) {
   let document;
   try { document = JSON.parse(jsonText); }
   catch {
@@ -285,11 +569,13 @@ export function diagnosePlanJson(jsonText) {
       counts: { resourceChanges: null, resourceDrift: null, deferredChanges: null, actionInvocations: null, outputChanges: null },
       actionCounts: { add: null, update: null, destroy: null, unclassified: null, matchesExpected: null },
       resourceDriftSummary: { entries: [], unexpectedResourceCount: null, malformedEntryCount: null },
+      providerSchemaSummary: summarizeDriftAgainstProviderSchema(undefined, schemaJson, pinnedVersion),
       outputChangeSummary: summarizeOutputChanges(undefined),
+      plannedBrowserOriginUpdate: summarizePlannedBrowserOriginUpdate(undefined),
       failedValidationRuleIds: Object.freeze(['plan.json.parse']),
     });
   }
-  return diagnosePlanDocument(document);
+  return diagnosePlanDocument(document, schemaJson, pinnedVersion);
 }
 
 export function sameHcpIdentity(left, right) {
@@ -375,14 +661,27 @@ function terraformEnvironment(config, env = process.env) {
     TF_IN_AUTOMATION: '1', TF_INPUT: '0', TF_LOG: 'off' };
 }
 
+function providerSchemaEnvironment(env = process.env) {
+  const inherited = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SSL_CERT_FILE', 'SSL_CERT_DIR']
+    .filter((key) => env[key]).map((key) => [key, env[key]]));
+  return { ...inherited, TF_IN_AUTOMATION: '1', TF_INPUT: '0', TF_LOG: 'off' };
+}
+
+async function readPinnedProviderVersion() {
+  const lock = await readFile(path.join(moduleDirectory, '.terraform.lock.hcl'), 'utf8');
+  return parsePinnedAuth0ProviderVersion(lock);
+}
+
 /** Fixed read-only orchestration: this module has no Terraform apply path. */
 export async function runPlanDiagnostic(deps = {}) {
-  const { verifyHcp, loadConfiguration, runPlan, showPlan } = deps;
-  if (![verifyHcp, loadConfiguration, runPlan, showPlan].every((fn) => typeof fn === 'function')) {
+  const { verifyHcp, loadConfiguration, runPlan, showPlan, runProviderSchema, getPinnedProviderVersion } = deps;
+  if (![verifyHcp, loadConfiguration, runPlan, showPlan, runProviderSchema, getPinnedProviderVersion].every((fn) => typeof fn === 'function')) {
     throw new Error('Read-only diagnostic adapters are incomplete.');
   }
   const fs = deps.fs ?? {};
   const signal = deps.signal;
+  const pinnedVersion = await getPinnedProviderVersion();
+  if (pinnedVersion !== expectedProviderVersion) throw new Error('Pinned Auth0 provider version did not verify.');
   const stateBefore = await verifyHcp({ mode: 'reinit', terraformRoot: moduleDirectory });
   if (!sameHcpIdentity(stateBefore, stateBefore)) throw new Error('HCP state ownership did not verify.');
   const config = await loadConfiguration();
@@ -408,7 +707,16 @@ export async function runPlanDiagnostic(deps = {}) {
     const stateAfterShow = await verifyHcp({ mode: 'reinit', terraformRoot: moduleDirectory });
     if (!sameHcpIdentity(stateBefore, stateAfterShow)) throw new Error('HCP state identity changed during diagnostics.');
     if (signal?.aborted) throw new Error('Diagnostic cancelled.');
-    result = diagnosePlanJson(json);
+    let schemaJson = null;
+    try {
+      schemaJson = await runProviderSchema({ cwd: moduleDirectory, env: providerSchemaEnvironment(deps.env), signal });
+    } catch {
+      // Keep the plan summary useful while classifying unavailable schema data as unknown.
+    }
+    const stateAfterSchema = await verifyHcp({ mode: 'reinit', terraformRoot: moduleDirectory });
+    if (!sameHcpIdentity(stateBefore, stateAfterSchema)) throw new Error('HCP state identity changed during diagnostics.');
+    if (signal?.aborted) throw new Error('Diagnostic cancelled.');
+    result = diagnosePlanJson(json, schemaJson, pinnedVersion);
   } catch (error) {
     operationError = error;
   }
@@ -428,6 +736,15 @@ export function createTerraformDiagnosticAdapters({ spawnImpl = spawn, env = pro
     },
     showPlan: async (planPath, context) => {
       const result = await captureTerraform(['show', '-json', planPath], { ...context, env: context.env ?? env, spawnImpl });
+      return result.stdout;
+    },
+    runProviderSchema: async (context = {}) => {
+      const result = await captureTerraform(['providers', 'schema', '-json'], {
+        cwd: context.cwd ?? moduleDirectory,
+        env: providerSchemaEnvironment(context.env ?? env),
+        signal: context.signal,
+        spawnImpl,
+      });
       return result.stdout;
     },
   };
@@ -452,6 +769,7 @@ async function main() {
     const result = await runPlanDiagnostic({
       verifyHcp: (options) => verifyHcpConfiguration({ ...options, home: os.homedir() }),
       loadConfiguration: () => configLoader(),
+      getPinnedProviderVersion: readPinnedProviderVersion,
       ...createTerraformDiagnosticAdapters(),
       signal: controller.signal,
     });
