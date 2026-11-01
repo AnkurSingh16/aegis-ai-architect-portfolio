@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import { portfolioProjects } from './content';
 import Triage from './Triage';
+import DevAuthExperience from './auth/DevAuthExperience';
+import { isApprovedLoopbackOrigin, readAuthConfig } from './auth/config';
+
+const localAuthConfig = import.meta.env.DEV && isApprovedLoopbackOrigin(window.location.origin)
+  ? readAuthConfig(import.meta.env) : null;
 
 type ApiHealth = { ok: boolean; service: string; mode: string };
 
@@ -48,6 +53,11 @@ export default function App() {
           </div>
         </section>
         <Triage />
+        {import.meta.env.DEV && (localAuthConfig
+          ? <DevAuthExperience config={localAuthConfig} />
+          : <section className="auth-cases wrap" id="secure-cases"><p className="eyebrow">DEVELOPMENT AUTHENTICATION</p>
+            <h2>Protected case access</h2><p>Set the public Auth0 development values in <code>apps/web/.env.local</code> to enable sign-in.</p>
+          </section>)}
         <section id="architecture" className="principles wrap">
           <div><p className="eyebrow">ENGINEERING APPROACH</p><h2>Intentional quality.<br />Not just a polished demo.</h2></div>
           <div className="principle-list">

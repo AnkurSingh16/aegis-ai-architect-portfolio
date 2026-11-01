@@ -3,9 +3,10 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5173, proxy: { '/api': 'http://127.0.0.1:4000' } },
+  server: { host: '127.0.0.1', port: 5173, strictPort: true, proxy: { '/api': 'http://127.0.0.1:4000' } },
   test: {
     environment: 'jsdom',
+    environmentOptions: { jsdom: { url: 'http://127.0.0.1:5173/' } },
     include: ['src/**/*.test.{ts,tsx}'],
     coverage: {
       provider: 'v8',
