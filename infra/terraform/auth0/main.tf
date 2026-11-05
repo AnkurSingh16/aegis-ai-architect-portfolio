@@ -27,6 +27,10 @@ resource "auth0_client" "local_spa" {
   allowed_origins     = ["http://127.0.0.1:49321"]
   web_origins         = ["http://127.0.0.1:49321", "http://127.0.0.1:5173"]
   allowed_logout_urls = ["http://127.0.0.1:49321", "http://127.0.0.1:5173"]
+
+  jwt_configuration {
+    alg = "RS256"
+  }
 }
 
 # Singular resource appends this SPA to the selected connection without owning

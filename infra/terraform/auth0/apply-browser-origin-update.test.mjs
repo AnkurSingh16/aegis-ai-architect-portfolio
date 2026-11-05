@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { assertInteractiveInvocation, createLocalConfigurationLoader, isAutomatedContext, parseSpaName,
-  runBrowserOriginUpdateGate, settleApprovalOnAbort, validateBrowserOriginUpdatePlan,
+  createTerraformRunner, runBrowserOriginUpdateGate, settleApprovalOnAbort, validateBrowserOriginUpdatePlan,
   expectedResourceAddresses, organizationName, workspaceName, targetAddress } from './apply-browser-origin-update.mjs';
 
 const previous = {
@@ -10,6 +12,7 @@ const previous = {
   allowed_logout_urls: ['http://127.0.0.1:49321'],
   web_origins: ['http://127.0.0.1:49321'],
   allowed_origins: ['http://127.0.0.1:49321'],
+  jwt_configuration: [{ alg: 'HS256', lifetime_in_seconds: 3600, scopes: {}, secret_encoded: false }],
   client_secret: 'SYNTHETIC_SECRET_MUST_NEVER_BE_LOGGED',
 };
 const desired = {
@@ -17,7 +20,15 @@ const desired = {
   callbacks: [...previous.callbacks, 'http://127.0.0.1:5173/'],
   allowed_logout_urls: [...previous.allowed_logout_urls, 'http://127.0.0.1:5173'],
   web_origins: [...previous.web_origins, 'http://127.0.0.1:5173'],
+  jwt_configuration: [{ ...previous.jwt_configuration[0], alg: 'RS256' }],
 };
+
+const outputChanges = Object.fromEntries([
+  ['issuer', 'https://dev-example.auth0.com/'],
+  ['audience', 'https://aegis-ai.local/api'],
+  ['spa_client_id', 'synthetic-spa-client-id'],
+].map(([name, value]) => [name, { actions: ['no-op'], before: value, after: value,
+  after_unknown: false, before_sensitive: false, after_sensitive: false }]));
 
 function change(address, actions, before, after, extra = {}) {
   const [type, name] = address.split('.');
@@ -26,10 +37,14 @@ function change(address, actions, before, after, extra = {}) {
 }
 function plan() {
   const items = expectedResourceAddresses.map((address) => address === targetAddress
-    ? change(address, ['update'], structuredClone(previous), structuredClone(desired))
+    ? change(address, ['update'], structuredClone(previous), structuredClone(desired), {
+      before_sensitive: { client_secret: true },
+      after_sensitive: { client_secret: true },
+      after_unknown: {},
+    })
     : change(address, ['no-op'], { id: address }, { id: address }));
   return { format_version: '1.2', terraform_version: '1.9.8', errored: false, complete: true, applyable: true,
-    resource_changes: items, resource_drift: [], deferred_changes: [], action_invocations: [], output_changes: {} };
+    resource_changes: items, resource_drift: [], deferred_changes: [], action_invocations: [], output_changes: structuredClone(outputChanges) };
 }
 const expectedSpa = { spaName: 'Aegis AI Local SPA', spaClientId: 'synthetic-spa-client-id' };
 
@@ -122,11 +137,12 @@ function makeDeps(overrides = {}) {
   return { deps, calls };
 }
 
-test('validates the precise SPA URL additions and preserves all other resource attributes', () => {
+test('validates the precise SPA URL and JWT signing updates while preserving all other attributes', () => {
   const result = validateBrowserOriginUpdatePlan(plan(), expectedSpa);
   assert.deepEqual([result.creates, result.updates, result.deletes], [0, 1, 0]);
   assert.deepEqual(result.after.callbacks, desired.callbacks);
   assert.deepEqual(result.after.web_origins, desired.web_origins);
+  assert.deepEqual(result.jwtAlgorithm, { before: 'HS256', after: 'RS256' });
 });
 
 for (const [name, mutate] of [
@@ -139,11 +155,66 @@ for (const [name, mutate] of [
   ['malformed actions', (p) => { p.resource_changes[0].change.actions = 'no-op'; }],
   ['unknown marker', (p) => { p.resource_changes.find((x) => x.address === targetAddress).change.after_unknown.name = true; }],
   ['drift', (p) => { p.resource_drift = [change('auth0_client.foreign', ['update'], {}, {})]; }],
-  ['output change', (p) => { p.output_changes = { audience: { actions: ['update'] } }; }],
+  ['output change', (p) => { p.output_changes.audience.actions = ['update']; }],
   ['deferred change', (p) => { p.deferred_changes = [{}]; }],
   ['unsupported format', (p) => { p.format_version = '2.0'; }],
+  ['malformed unknown metadata', (p) => { p.resource_changes.find((item) => item.address === targetAddress).change.after_unknown.name = 'maybe'; }],
+  ['malformed before-sensitive metadata', (p) => { p.resource_changes.find((item) => item.address === targetAddress).change.before_sensitive.name = null; }],
+  ['malformed after-sensitive metadata', (p) => { p.resource_changes.find((item) => item.address === targetAddress).change.after_sensitive.name = 1; }],
 ]) {
-  test(`rejects ${name}`, () => assert.throws(() => validateBrowserOriginUpdatePlan(mutate(plan()), expectedSpa), /Terraform/));
+  test(`rejects ${name}`, () => {
+    const document = plan();
+    mutate(document);
+    assert.throws(() => validateBrowserOriginUpdatePlan(document, expectedSpa), /Terraform/);
+  });
+}
+
+for (const [name, mutate] of [
+  ['a changed JWT sibling setting', (change) => { change.after.jwt_configuration[0].lifetime_in_seconds = 7200; }],
+  ['a changed JWT scope', (change) => { change.after.jwt_configuration[0].scopes = { openid: 'openid' }; }],
+  ['a missing JWT configuration', (change) => { delete change.before.jwt_configuration; }],
+  ['a non-HS256 before algorithm', (change) => { change.before.jwt_configuration[0].alg = 'RS256'; }],
+  ['an unexpected after algorithm', (change) => { change.after.jwt_configuration[0].alg = 'HS256'; }],
+  ['an unknown JWT algorithm', (change) => { change.after_unknown.jwt_configuration = [{ alg: true }]; }],
+  ['a sensitive JWT algorithm', (change) => { change.before_sensitive.jwt_configuration = [{ alg: true }]; }],
+  ['malformed nested unknown metadata', (change) => { change.after_unknown.jwt_configuration = [{ alg: 'unknown' }]; }],
+  ['malformed nested sensitive metadata', (change) => { change.after_sensitive.jwt_configuration = [{ alg: null }]; }],
+  ['an out-of-shape mask key', (change) => { change.after_unknown.unexpected = false; }],
+  ['a wrong-length list mask', (change) => { change.after_unknown.jwt_configuration = [{}, {}]; }],
+  ['an object mask for a scalar algorithm', (change) => { change.after_unknown.jwt_configuration = [{ alg: {} }]; }],
+  ['the entire JWT block marked sensitive', (change) => { change.before_sensitive.jwt_configuration = true; }],
+]) {
+  test(`rejects ${name}`, () => {
+    const document = plan();
+    mutate(document.resource_changes.find((item) => item.address === targetAddress).change);
+    assert.throws(() => validateBrowserOriginUpdatePlan(document, expectedSpa), /Terraform/);
+  });
+}
+
+test('accepts Terraform sparse masks when all JWT values are known and non-sensitive', () => {
+  for (const nestedMask of [{}, { jwt_configuration: [{}] }]) {
+    const document = plan();
+    const target = document.resource_changes.find((item) => item.address === targetAddress).change;
+    target.after_unknown = structuredClone(nestedMask);
+    target.before_sensitive = { client_secret: true, ...structuredClone(nestedMask) };
+    target.after_sensitive = { client_secret: true, ...structuredClone(nestedMask) };
+    assert.deepEqual(validateBrowserOriginUpdatePlan(document, expectedSpa).jwtAlgorithm, { before: 'HS256', after: 'RS256' });
+  }
+});
+
+for (const [name, mutate] of [
+  ['a missing output', (outputs) => { delete outputs.issuer; }],
+  ['an unexpected output', (outputs) => { outputs.unexpected = outputs.audience; }],
+  ['a changed output value', (outputs) => { outputs.audience.after = 'synthetic-different-audience'; }],
+  ['an unknown output value', (outputs) => { outputs.spa_client_id.after_unknown = true; }],
+  ['a sensitive output value', (outputs) => { outputs.issuer.after_sensitive = true; }],
+  ['an output with malformed actions', (outputs) => { outputs.audience.actions = ['read']; }],
+]) {
+  test(`rejects ${name}`, () => {
+    const document = plan();
+    mutate(document.output_changes);
+    assert.throws(() => validateBrowserOriginUpdatePlan(document, expectedSpa), /output/i);
+  });
 }
 
 test('rejects a plan for a different client ID, application name or non-SPA application', () => {
@@ -158,6 +229,30 @@ test('rejects a plan for a different client ID, application name or non-SPA appl
     target.after[key] = value;
     assert.throws(() => validateBrowserOriginUpdatePlan(altered, expectedSpa), /identity/);
   }
+});
+
+test('Terraform runner waits for child close after cancellation before allowing private-plan cleanup', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.stdin = new PassThrough();
+  let spawnOptions;
+  const runner = createTerraformRunner({ spawnImpl: (_command, _args, options) => {
+    spawnOptions = options;
+    queueMicrotask(() => child.emit('error', Object.assign(new Error('aborted'), { code: 'ABORT_ERR' })));
+    return child;
+  } });
+  const controller = new AbortController();
+  let settled = false;
+  const result = runner(['plan', '-out=private.tfplan'], { cwd: '/private/plan', env: {}, signal: controller.signal })
+    .finally(() => { settled = true; });
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawnOptions.signal, controller.signal);
+  assert.equal(settled, false);
+  child.emit('close', null);
+  await assert.rejects(result, /could not be started/);
+  assert.equal(settled, true);
 });
 
 test('rejects workspace identity mismatch and stale state version before apply', async () => {
@@ -180,9 +275,11 @@ test('requests exact full fingerprint confirmation and applies only the saved re
   const { deps, calls } = makeDeps();
   const result = await runBrowserOriginUpdateGate(deps);
   assert.equal(result.applied, true);
-  assert.match(calls.challenge, new RegExp(`^APPLY ${organizationName}/${workspaceName} ${targetAddress} [a-f0-9]{64}$`));
+  assert.match(calls.challenge, new RegExp(`^APPLY ${organizationName}/${workspaceName} ${targetAddress} browser-URLs-and-JWT-RS256 [a-f0-9]{64}$`));
   assert.equal(calls.metadata.expiresAt - 1_000, 5 * 60 * 1000);
   assert.deepEqual(calls.preflight, Array.from({ length: 3 }, () => ({ mode: 'reinit', terraformRoot: calls.preflight[0].terraformRoot })));
+  assert.match(calls.challenge, /browser-URLs-and-JWT-RS256/);
+  assert.match(calls.output, /SPA JWT signing algorithm: HS256 -> RS256/);
   const apply = calls.terraform.find(([command]) => command === 'apply');
   assert.deepEqual(apply.slice(0, 3), ['apply', '-input=false', '-no-color']);
   assert.equal(apply.some((arg) => arg.includes('auto-approve') || arg.startsWith('-target') || arg.startsWith('-replace')), false);
