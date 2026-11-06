@@ -503,6 +503,7 @@ test('reports the exact URL and RS256 candidate while making no deployment autho
     callback: 'http://127.0.0.1:5173/', logout: 'http://127.0.0.1:5173', webOrigin: 'http://127.0.0.1:5173',
   });
   assert.equal(candidate.approvedUrlValuesMatch, true);
+  assert.deepEqual(candidate.jwtAlgorithmClassifications, { before: 'HS256', after: 'RS256' });
   assert.equal(candidate.jwtAlgorithmTransition, 'HS256 -> RS256');
   assert.equal(candidate.jwtNestedFieldsUnchanged, true);
   assert.equal(candidate.jwtValuesKnownAndNonSensitive, true);
@@ -517,6 +518,44 @@ test('reports the exact URL and RS256 candidate while making no deployment autho
   assert.deepEqual(report.failedValidationRuleIds, []);
   assert.equal(JSON.stringify(report).includes(secretSentinel), false);
 });
+
+for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = false] of [
+  ['RS256 remains RS256', (target) => { target.before.jwt_configuration[0].alg = 'RS256'; }, 'RS256', 'RS256'],
+  ['other known becomes RS256', (target) => { target.before.jwt_configuration[0].alg = 'ES512'; }, 'other-known', 'RS256'],
+  ['missing algorithm becomes RS256', (target) => { delete target.before.jwt_configuration[0].alg; }, 'missing', 'RS256'],
+  ['missing block becomes RS256', (target) => { delete target.before.jwt_configuration; }, 'missing', 'RS256'],
+  ['explicit false whole-block masks remain known', (target) => {
+    target.before_sensitive = { jwt_configuration: false };
+    target.after_unknown = { jwt_configuration: false };
+    target.after_sensitive = { jwt_configuration: false };
+  }, 'HS256', 'RS256', true],
+  ['unexpected desired HS256', (target) => { target.after.jwt_configuration[0].alg = 'HS256'; }, 'HS256', 'HS256'],
+  ['malformed known value', (target) => { target.after.jwt_configuration[0].alg = 42; }, 'HS256', 'malformed'],
+  ['unknown after algorithm', (target) => { target.after_unknown = { jwt_configuration: [{ alg: true }] }; }, 'HS256', 'unknown-or-sensitive'],
+  ['omitted unknown after algorithm', (target) => {
+    target.after.jwt_configuration[0] = {};
+    target.after_unknown = { jwt_configuration: [{ alg: true }] };
+  }, 'HS256', 'unknown-or-sensitive'],
+  ['omitted unknown JWT block', (target) => {
+    delete target.after.jwt_configuration;
+    target.after_unknown = { jwt_configuration: true };
+  }, 'HS256', 'unknown-or-sensitive'],
+  ['sensitive after algorithm', (target) => { target.after_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'HS256', 'unknown-or-sensitive'],
+  ['sensitive before algorithm', (target) => { target.before_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'unknown-or-sensitive', 'RS256'],
+  ['malformed metadata shape', (target) => { target.after_sensitive = { jwt_configuration: 'masked', client_secret: true }; }, 'HS256', 'malformed'],
+]) {
+  test(`classifies planned JWT algorithm safely when ${label}`, () => {
+    const document = expandedCandidatePlan();
+    const target = document.resource_changes.find((item) => item.address === 'auth0_client.local_spa').change;
+    mutate(target);
+    const candidate = diagnosePlanDocument(document).plannedBrowserOriginSigningCandidate;
+    assert.deepEqual(candidate.jwtAlgorithmClassifications, { before: expectedBefore, after: expectedAfter });
+    assert.equal(candidate.jwtAlgorithmTransition, `${expectedBefore} -> ${expectedAfter}`);
+    assert.equal(candidate.candidateScopeMatches, expectedCandidate);
+    assert.equal(JSON.stringify(candidate).includes('ES512'), false);
+    assert.equal(JSON.stringify(candidate).includes('masked'), false);
+  });
+}
 
 for (const [label, mutate] of [
   ['JWT lifetime change', (target) => { target.after.jwt_configuration[0].lifetime_in_seconds = 7200; }],
