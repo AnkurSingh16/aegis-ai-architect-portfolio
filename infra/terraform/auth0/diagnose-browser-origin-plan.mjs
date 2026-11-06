@@ -90,6 +90,38 @@ function markedAtPath(mask, key, value) {
   return !maskMatchesValue(mask[key], value) || containsTrue(mask[key]);
 }
 
+function jwtAlgorithmMarkerState(mask) {
+  if (!Object.hasOwn(mask, 'jwt_configuration')) return false;
+  const jwtMask = mask.jwt_configuration;
+  if (typeof jwtMask === 'boolean') return jwtMask;
+  if (!Array.isArray(jwtMask) || jwtMask.length !== 1) return null;
+  const blockMask = jwtMask[0];
+  if (blockMask === true) return true;
+  if (typeof blockMask === 'boolean') return false;
+  if (!record(blockMask)) return null;
+  if (Object.hasOwn(blockMask, 'alg') && typeof blockMask.alg !== 'boolean') return null;
+  return blockMask.alg === true;
+}
+
+function classifyPlannedJwtAlgorithm(change, side) {
+  const valueRoot = side === 'before' ? change.before : change.after;
+  const jwtConfiguration = record(valueRoot) ? valueRoot.jwt_configuration : undefined;
+  const fields = side === 'before' ? ['before_sensitive'] : ['after_unknown', 'after_sensitive'];
+  const masksValid = fields.every((field) => Object.hasOwn(change, field) && record(change[field]) && booleanTreeIsValid(change[field]));
+  if (!masksValid) return 'malformed';
+  const markers = fields.map((field) => jwtAlgorithmMarkerState(change[field]));
+  if (markers.includes(null)) return 'malformed';
+  if (markers.includes(true)) return 'unknown-or-sensitive';
+
+  if (jwtConfiguration === undefined || (Array.isArray(jwtConfiguration) && jwtConfiguration.length === 0)) return 'missing';
+  if (!Array.isArray(jwtConfiguration) || jwtConfiguration.length !== 1 || !record(jwtConfiguration[0])) return 'malformed';
+
+  if (!Object.hasOwn(jwtConfiguration[0], 'alg') || jwtConfiguration[0].alg === null) return 'missing';
+  if (typeof jwtConfiguration[0].alg !== 'string') return 'malformed';
+  if (jwtConfiguration[0].alg === 'HS256' || jwtConfiguration[0].alg === 'RS256') return jwtConfiguration[0].alg;
+  return 'other-known';
+}
+
 function safeActions(actions) {
   if (!Array.isArray(actions) || actions.some((action) => typeof action !== 'string' || !safeTerraformActions.has(action))) return ['unknown'];
   return [...actions];
@@ -445,6 +477,7 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
     approvedUrlAdditions: fixedUrlAdditions,
     approvedUrlValuesMatch: null,
     approvedUrlValuesKnownAndNonSensitive: null,
+    jwtAlgorithmClassifications: { before: null, after: null },
     jwtAlgorithmTransition: null,
     jwtNestedFieldsUnchanged: null,
     jwtValuesKnownAndNonSensitive: null,
@@ -481,14 +514,16 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
 
   const beforeJwt = before.jwt_configuration;
   const afterJwt = after.jwt_configuration;
+  const jwtAlgorithmClassifications = {
+    before: classifyPlannedJwtAlgorithm(target, 'before'),
+    after: classifyPlannedJwtAlgorithm(target, 'after'),
+  };
+  const jwtAlgorithmTransition = `${jwtAlgorithmClassifications.before} -> ${jwtAlgorithmClassifications.after}`;
   const jwtShapeValid = Array.isArray(beforeJwt) && beforeJwt.length === 1 && record(beforeJwt[0]) &&
     Array.isArray(afterJwt) && afterJwt.length === 1 && record(afterJwt[0]);
-  let jwtAlgorithmTransition = null;
   let jwtNestedFieldsUnchanged = null;
   let jwtValuesKnownAndNonSensitive = null;
   if (jwtShapeValid) {
-    jwtAlgorithmTransition = beforeJwt[0].alg === approvedSpaJwtAlgorithm.before && afterJwt[0].alg === approvedSpaJwtAlgorithm.after
-      ? `${approvedSpaJwtAlgorithm.before} -> ${approvedSpaJwtAlgorithm.after}` : null;
     const beforeRemainder = { ...beforeJwt[0] };
     const afterRemainder = { ...afterJwt[0] };
     delete beforeRemainder.alg;
@@ -543,7 +578,8 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
   const noUnexpectedOrUnknownValues = metadataValid && resourceChanges.every((item) => !containsTrue(item.change.after_unknown));
   const noOtherResourceAttributeChanges = otherResourceAttributeChangeCount === 0;
   const candidateScopeMatches = resourceChangesMatch && approvedUrlValuesMatch && approvedUrlChangeCount === 3 &&
-    jwtAlgorithmTransition !== null && jwtNestedFieldsUnchanged === true && jwtValuesKnownAndNonSensitive === true &&
+    jwtAlgorithmTransition === `${approvedSpaJwtAlgorithm.before} -> ${approvedSpaJwtAlgorithm.after}` &&
+    jwtNestedFieldsUnchanged === true && jwtValuesKnownAndNonSensitive === true &&
     approvedUrlValuesKnownAndNonSensitive === true && noOtherResourceAttributeChanges && noUnexpectedOrUnknownValues &&
     outputSummary.verifiedNoOp === true;
 
@@ -553,6 +589,7 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
     approvedUrlAdditions: fixedUrlAdditions,
     approvedUrlValuesMatch,
     approvedUrlValuesKnownAndNonSensitive,
+    jwtAlgorithmClassifications,
     jwtAlgorithmTransition,
     jwtNestedFieldsUnchanged,
     jwtValuesKnownAndNonSensitive,
