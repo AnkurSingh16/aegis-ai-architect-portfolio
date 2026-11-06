@@ -30,7 +30,7 @@ const approvedSpaUrls = Object.freeze({
   web_origins: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
   allowed_logout_urls: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
 });
-const approvedSpaJwtAlgorithm = Object.freeze({ before: 'HS256', after: 'RS256' });
+const approvedSpaJwtAlgorithm = Object.freeze({ before: 'empty-string', after: 'RS256' });
 const dashboardObservedSpaJwtAlgorithm = 'HS256';
 const standardJwtSigningAlgorithms = new Set([
   'HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512',
@@ -46,9 +46,17 @@ export const terraformManagedAttributesByResource = Object.freeze({
   ]),
   'auth0_connection_client.local_spa_database': Object.freeze(['connection_id', 'client_id']),
 });
+// Attribute names were checked against Auth0 provider 1.59.0; `encryption_key` is intentionally omitted.
 const safeProviderAttributeNames = new Set([
-  'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'description',
-  'enforce_policies', 'grant_types', 'is_first_party', 'name', 'oidc_conformant', 'scope', 'signing_alg', 'web_origins',
+  'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'async_approval_notification_channels',
+  'callbacks', 'client_aliases', 'client_id', 'client_metadata', 'compliance_level', 'cross_origin_auth',
+  'cross_origin_loc', 'custom_login_page', 'custom_login_page_on', 'description', 'external_client_id',
+  'external_metadata_created_by', 'external_metadata_type', 'form_template', 'grant_types', 'initiate_login_uri',
+  'is_first_party', 'is_token_endpoint_ip_header_trusted', 'jwks_uri', 'logo_uri', 'name', 'oidc_backchannel_logout_urls',
+  'oidc_conformant', 'organization_discovery_methods', 'organization_require_behavior', 'organization_usage',
+  'redirection_policy', 'require_proof_of_possession', 'require_pushed_authorization_requests',
+  'enforce_policies', 'resource_server_identifier', 'scope', 'signing_alg',
+  'skip_non_verifiable_callback_uri_confirmation_prompt', 'sso', 'sso_disabled', 'third_party_security_mode', 'web_origins',
 ]);
 const securityRelevantAttributes = new Set([
   'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'client_authentication_methods',

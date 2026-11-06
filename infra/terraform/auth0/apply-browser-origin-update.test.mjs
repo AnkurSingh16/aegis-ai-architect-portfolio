@@ -12,7 +12,7 @@ const previous = {
   allowed_logout_urls: ['http://127.0.0.1:49321'],
   web_origins: ['http://127.0.0.1:49321'],
   allowed_origins: ['http://127.0.0.1:49321'],
-  jwt_configuration: [{ alg: 'HS256', lifetime_in_seconds: 3600, scopes: {}, secret_encoded: false }],
+  jwt_configuration: [{ alg: '', lifetime_in_seconds: 3600, scopes: {}, secret_encoded: false }],
   client_secret: 'SYNTHETIC_SECRET_MUST_NEVER_BE_LOGGED',
 };
 const desired = {
@@ -142,7 +142,7 @@ test('validates the precise SPA URL and JWT signing updates while preserving all
   assert.deepEqual([result.creates, result.updates, result.deletes], [0, 1, 0]);
   assert.deepEqual(result.after.callbacks, desired.callbacks);
   assert.deepEqual(result.after.web_origins, desired.web_origins);
-  assert.deepEqual(result.jwtAlgorithm, { before: 'HS256', after: 'RS256' });
+  assert.deepEqual(result.jwtAlgorithm, { before: 'empty-string', after: 'RS256' });
 });
 
 for (const [name, mutate] of [
@@ -173,7 +173,10 @@ for (const [name, mutate] of [
   ['a changed JWT sibling setting', (change) => { change.after.jwt_configuration[0].lifetime_in_seconds = 7200; }],
   ['a changed JWT scope', (change) => { change.after.jwt_configuration[0].scopes = { openid: 'openid' }; }],
   ['a missing JWT configuration', (change) => { delete change.before.jwt_configuration; }],
-  ['a non-HS256 before algorithm', (change) => { change.before.jwt_configuration[0].alg = 'RS256'; }],
+  ['an HS256 before algorithm', (change) => { change.before.jwt_configuration[0].alg = 'HS256'; }],
+  ['a nonstandard before algorithm', (change) => { change.before.jwt_configuration[0].alg = 'ES512'; }],
+  ['a missing before algorithm', (change) => { delete change.before.jwt_configuration[0].alg; }],
+  ['a whitespace before algorithm', (change) => { change.before.jwt_configuration[0].alg = ' '; }],
   ['an unexpected after algorithm', (change) => { change.after.jwt_configuration[0].alg = 'HS256'; }],
   ['an unknown JWT algorithm', (change) => { change.after_unknown.jwt_configuration = [{ alg: true }]; }],
   ['a sensitive JWT algorithm', (change) => { change.before_sensitive.jwt_configuration = [{ alg: true }]; }],
@@ -198,7 +201,7 @@ test('accepts Terraform sparse masks when all JWT values are known and non-sensi
     target.after_unknown = structuredClone(nestedMask);
     target.before_sensitive = { client_secret: true, ...structuredClone(nestedMask) };
     target.after_sensitive = { client_secret: true, ...structuredClone(nestedMask) };
-    assert.deepEqual(validateBrowserOriginUpdatePlan(document, expectedSpa).jwtAlgorithm, { before: 'HS256', after: 'RS256' });
+    assert.deepEqual(validateBrowserOriginUpdatePlan(document, expectedSpa).jwtAlgorithm, { before: 'empty-string', after: 'RS256' });
   }
 });
 
@@ -279,7 +282,7 @@ test('requests exact full fingerprint confirmation and applies only the saved re
   assert.equal(calls.metadata.expiresAt - 1_000, 5 * 60 * 1000);
   assert.deepEqual(calls.preflight, Array.from({ length: 3 }, () => ({ mode: 'reinit', terraformRoot: calls.preflight[0].terraformRoot })));
   assert.match(calls.challenge, /browser-URLs-and-JWT-RS256/);
-  assert.match(calls.output, /SPA JWT signing algorithm: HS256 -> RS256/);
+  assert.match(calls.output, /SPA JWT signing algorithm: empty-string -> RS256/);
   const apply = calls.terraform.find(([command]) => command === 'apply');
   assert.deepEqual(apply.slice(0, 3), ['apply', '-input=false', '-no-color']);
   assert.equal(apply.some((arg) => arg.includes('auto-approve') || arg.startsWith('-target') || arg.startsWith('-replace')), false);

@@ -158,8 +158,8 @@ export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId
   const afterJwt = target.after.jwt_configuration;
   if (!Array.isArray(beforeJwt) || beforeJwt.length !== 1 || !record(beforeJwt[0]) ||
       !Array.isArray(afterJwt) || afterJwt.length !== 1 || !record(afterJwt[0]) ||
-      beforeJwt[0].alg !== 'HS256' || afterJwt[0].alg !== 'RS256') {
-    throw new Error('Terraform plan does not contain the approved SPA JWT signing change from HS256 to RS256.');
+      beforeJwt[0].alg !== '' || afterJwt[0].alg !== 'RS256') {
+    throw new Error('Terraform plan does not contain the approved SPA JWT signing change from an empty algorithm to RS256.');
   }
   const beforeJwtUnchanged = { ...beforeJwt[0] };
   const afterJwtUnchanged = { ...afterJwt[0] };
@@ -187,7 +187,7 @@ export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId
     creates: 0, updates: 1, deletes: 0, addresses: expectedResourceAddresses,
     before: Object.freeze({ callbacks: callbackBefore, web_origins: originBefore, allowed_logout_urls: originBefore }),
     after: Object.freeze({ callbacks: callbackAfter, web_origins: originAfter, allowed_logout_urls: originAfter }),
-    jwtAlgorithm: Object.freeze({ before: 'HS256', after: 'RS256' }),
+    jwtAlgorithm: Object.freeze({ before: 'empty-string', after: 'RS256' }),
   });
 }
 
