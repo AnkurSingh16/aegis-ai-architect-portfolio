@@ -338,17 +338,51 @@ test('reports each drift field using allowlisted names, pinned schema mode, owne
       remoteMatchesPlannedDesiredValue: 'differs', operatorReviewRequired: true },
     { attribute: 'allowed_clients', providerSchemaMode: 'configurable', configurationOwnership: 'not-explicitly-managed-origin-unverified',
       securityRelevance: true, savedStateVsRefreshedRemote: 'differs', remoteMatchesRefreshedPreActionBaseline: 'differs',
-      remoteMatchesPlannedDesiredValue: 'differs', operatorReviewRequired: true },
+      remoteMatchesPlannedDesiredValue: 'differs', operatorReviewRequired: true,
+      shapeClassifications: { savedState: 'nonempty-array', refreshedRemote: 'nonempty-array', plannedDesired: 'nonempty-array' } },
     { attribute: 'grant_types', providerSchemaMode: 'configurable', configurationOwnership: 'terraform-managed',
       securityRelevance: true, savedStateVsRefreshedRemote: 'differs', remoteMatchesRefreshedPreActionBaseline: 'matches',
       remoteMatchesPlannedDesiredValue: 'matches', operatorReviewRequired: true },
     { attribute: 'unidentified', providerSchemaMode: 'sensitive', configurationOwnership: 'unidentified',
       securityRelevance: 'unverified', savedStateVsRefreshedRemote: 'unavailable', remoteMatchesRefreshedPreActionBaseline: 'unavailable',
-      remoteMatchesPlannedDesiredValue: 'unavailable', operatorReviewRequired: true },
+      remoteMatchesPlannedDesiredValue: 'unavailable', operatorReviewRequired: true,
+      savedStateVsRefreshedRemoteSensitiveEquality: 'different' },
   ]);
   assert.equal(JSON.stringify(result).includes('client_secret'), false);
   assert.equal(JSON.stringify(result).includes('hidden-after'), false);
   assert.equal(JSON.stringify(result).includes('synthetic-sensitive-value'), false);
+});
+
+test('reports only allowlisted saved, refreshed and planned value shapes for the four reviewed drift fields', () => {
+  const names = ['allowed_clients', 'async_approval_notification_channels', 'client_aliases', 'client_metadata'];
+  const schema = providerSchemaFixture(Object.fromEntries(names.map((name) => [name, schemaAttribute({ optional: true })])));
+  const saved = {
+    async_approval_notification_channels: ['synthetic-channel'],
+    client_aliases: null,
+    client_metadata: {},
+  };
+  const refreshed = {
+    allowed_clients: [],
+    async_approval_notification_channels: [],
+    client_aliases: ['synthetic-alias'],
+    client_metadata: { synthetic_key: 'SYNTHETIC_METADATA_VALUE' },
+  };
+  const planned = plannedBrowserChanges();
+  const target = planned.find((item) => item.address === 'auth0_client.local_spa');
+  target.change.before = { ...target.change.before, ...refreshed };
+  target.change.after = { ...target.change.after, ...refreshed };
+  const result = summarizeDriftAgainstProviderSchema([{
+    ...schemaDrift(saved, refreshed)[0],
+  }], schema, '1.59.0', planned).entries[0];
+  const findings = Object.fromEntries(result.attributeFindings.map((finding) => [finding.attribute, finding.shapeClassifications]));
+  assert.deepEqual(findings, {
+    allowed_clients: { savedState: 'absent', refreshedRemote: 'empty-array', plannedDesired: 'empty-array' },
+    async_approval_notification_channels: { savedState: 'nonempty-array', refreshedRemote: 'empty-array', plannedDesired: 'empty-array' },
+    client_aliases: { savedState: 'null', refreshedRemote: 'nonempty-array', plannedDesired: 'nonempty-array' },
+    client_metadata: { savedState: 'empty-object', refreshedRemote: 'nonempty-object', plannedDesired: 'nonempty-object' },
+  });
+  assert.deepEqual(result.safeNonSensitiveAttributeNames, names.slice().sort());
+  assert.equal(JSON.stringify(result).includes('SYNTHETIC_METADATA_VALUE'), false);
 });
 
 test('attributes explicitly configured on other managed resources are not mislabeled as defaults', () => {
@@ -396,15 +430,49 @@ test('keeps the production Terraform ownership map synchronized with current res
 
 test('does not compare provider-sensitive values even when the plan omits sensitivity masks', () => {
   const schema = providerSchemaFixture({ client_secret: schemaAttribute({ optional: true, sensitive: true }) });
-  const planned = plannedBrowserChanges();
-  const target = planned.find((item) => item.address === 'auth0_client.local_spa');
-  target.change.before.client_secret = 'synthetic-before-secret';
-  target.change.after.client_secret = 'synthetic-after-secret';
   const result = summarizeDriftAgainstProviderSchema(
     schemaDrift({ client_secret: 'synthetic-stale' }, { client_secret: 'synthetic-before-secret' }),
-    schema, '1.59.0', planned);
+    schema, '1.59.0');
   assert.deepEqual(result.entries[0].plannedValueComparison, { matchesRefreshed: 0, differsFromRefreshed: 0, unavailable: 1 });
+  assert.equal(result.entries[0].attributeFindings[0].savedStateVsRefreshedRemoteSensitiveEquality, 'unavailable');
   assert.equal(JSON.stringify(result).includes('synthetic-'), false);
+});
+
+test('compares schema-verified sensitive values in memory only and reports one safe equality class', () => {
+  const schema = providerSchemaFixture({ client_secret: schemaAttribute({ optional: true, sensitive: true }) });
+  for (const [beforeValue, afterValue, expected] of [
+    ['SYNTHETIC_SECRET_SENTINEL', 'SYNTHETIC_SECRET_SENTINEL', 'equal'],
+    ['SYNTHETIC_SECRET_OLD', 'SYNTHETIC_SECRET_NEW', 'different'],
+  ]) {
+    const result = summarizeDriftAgainstProviderSchema(schemaDrift(
+      { client_secret: beforeValue }, { client_secret: afterValue },
+      { client_secret: true }, { client_secret: true }), schema, '1.59.0');
+    const finding = result.entries[0].attributeFindings[0];
+    assert.equal(finding.attribute, 'unidentified');
+    assert.equal(finding.savedStateVsRefreshedRemoteSensitiveEquality, expected);
+    assert.equal(JSON.stringify(result).includes('client_secret'), false);
+    assert.equal(JSON.stringify(result).includes('SYNTHETIC_SECRET'), false);
+  }
+});
+
+test('reports sensitive equality as unavailable when masks are missing or do not match the value shapes', () => {
+  const schema = providerSchemaFixture({ client_secret: schemaAttribute({ optional: true, sensitive: true }) });
+  const value = 'SYNTHETIC_SECRET_SENTINEL';
+  const missingMask = schemaDrift({ client_secret: value }, { client_secret: value },
+    { client_secret: true }, { client_secret: true })[0];
+  delete missingMask.change.after_unknown;
+  const malformedMask = schemaDrift({ client_secret: value }, { client_secret: value },
+    { client_secret: [true] }, { client_secret: true })[0];
+  const unknownAfter = schemaDrift({ client_secret: value }, { client_secret: value },
+    { client_secret: true }, { client_secret: true }, { client_secret: true });
+  const missingBeforeValue = schemaDrift({}, { client_secret: value }, {}, { client_secret: true })[0];
+  const missingAfterValue = schemaDrift({ client_secret: value }, {}, { client_secret: true }, {})[0];
+  for (const drift of [[missingMask], [malformedMask], unknownAfter, [missingBeforeValue], [missingAfterValue]]) {
+    const result = summarizeDriftAgainstProviderSchema(drift, schema, '1.59.0');
+    assert.equal(result.entries[0].attributeFindings[0].savedStateVsRefreshedRemoteSensitiveEquality, 'unavailable');
+    assert.equal(JSON.stringify(result).includes('client_secret'), false);
+    assert.equal(JSON.stringify(result).includes(value), false);
+  }
 });
 
 test('does not compare attributes with unknown or incomplete provider schema metadata', () => {
