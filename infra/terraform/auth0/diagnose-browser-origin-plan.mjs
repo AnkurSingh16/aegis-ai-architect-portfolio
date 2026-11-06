@@ -58,6 +58,9 @@ const safeProviderAttributeNames = new Set([
   'enforce_policies', 'resource_server_identifier', 'scope', 'signing_alg',
   'skip_non_verifiable_callback_uri_confirmation_prompt', 'sso', 'sso_disabled', 'third_party_security_mode', 'web_origins',
 ]);
+const reviewedDriftShapeAttributes = new Set([
+  'allowed_clients', 'async_approval_notification_channels', 'client_aliases', 'client_metadata',
+]);
 const securityRelevantAttributes = new Set([
   'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'client_authentication_methods',
   'connection_id', 'enforce_policies', 'grant_types', 'identifier', 'is_first_party', 'oidc_conformant',
@@ -313,6 +316,32 @@ function safeValueRelationship(leftRoot, rightRoot, key, unavailable) {
   return isDeepStrictEqual(leftRoot[key], rightRoot[key]) ? 'matches' : 'differs';
 }
 
+function safeValueShape(root, key, unavailable) {
+  if (unavailable) return 'unavailable';
+  if (!record(root) || !Object.hasOwn(root, key)) return 'absent';
+  const value = root[key];
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return value.length === 0 ? 'empty-array' : 'nonempty-array';
+  if (record(value)) return Object.keys(value).length === 0 ? 'empty-object' : 'nonempty-object';
+  return 'other';
+}
+
+function safeSensitiveValueEquality(change, key, mode, markersMalformed) {
+  const before = change?.before;
+  const after = change?.after;
+  const beforeSensitive = change?.before_sensitive;
+  const afterSensitive = change?.after_sensitive;
+  const afterUnknown = change?.after_unknown;
+  if (!mode?.sensitive || markersMalformed || !record(before) || !record(after) ||
+      !Object.hasOwn(before, key) || !Object.hasOwn(after, key) ||
+      !record(beforeSensitive) || !record(afterSensitive) ||
+      !record(afterUnknown) || !maskMatchesValue(beforeSensitive, before) ||
+      !maskMatchesValue(afterSensitive, after) || !maskMatchesValue(afterUnknown, after) ||
+      !markerAppliesToAttribute(beforeSensitive, key) || !markerAppliesToAttribute(afterSensitive, key) ||
+      markerAppliesToAttribute(afterUnknown, key)) return 'unavailable';
+  return isDeepStrictEqual(before[key], after[key]) ? 'equal' : 'different';
+}
+
 function providerSchemaRoot(schemaJson, pinnedVersion) {
   if (pinnedVersion !== expectedProviderVersion) return null;
   let schema;
@@ -352,7 +381,10 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
     const plannedChange = plannedByAddress.get(resource);
     const attributeFindings = [];
     const driftMarkersMalformed = ['before_sensitive', 'after_sensitive', 'after_unknown']
-      .some((field) => Object.hasOwn(change, field) && !booleanTreeIsValid(change[field]));
+      .some((field) => Object.hasOwn(change, field) && !booleanTreeIsValid(change[field])) ||
+      (Object.hasOwn(change, 'before_sensitive') && !maskMatchesValue(change.before_sensitive, change.before)) ||
+      (Object.hasOwn(change, 'after_sensitive') && !maskMatchesValue(change.after_sensitive, change.after)) ||
+      (Object.hasOwn(change, 'after_unknown') && !maskMatchesValue(change.after_unknown, change.after));
     for (const key of keys) {
       const mode = schemaAttributeMode(attributes[key]);
       const planUnknown = markerAppliesToAttribute(change.after_unknown, key);
@@ -366,8 +398,11 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
       if (mode && !driftMarkersMalformed && (mode.required || mode.optional)) configurableAttributeCount += 1;
       if (!driftMarkersMalformed && securityRelevantAttributes.has(key)) securityRelevantAttributeCount += 1;
       if (safeProviderAttributeNames.has(key) && mode && !driftMarkersMalformed && !mode.sensitive && !planSensitive && !planUnknown) safeNames.add(key);
-      const plannedMarkersMalformed = record(plannedChange) && ['before_sensitive', 'after_sensitive', 'after_unknown']
-        .some((field) => Object.hasOwn(plannedChange, field) && !booleanTreeIsValid(plannedChange[field]));
+      const plannedMarkersMalformed = record(plannedChange) && (['before_sensitive', 'after_sensitive', 'after_unknown']
+        .some((field) => Object.hasOwn(plannedChange, field) && !booleanTreeIsValid(plannedChange[field])) ||
+        (Object.hasOwn(plannedChange, 'before_sensitive') && !maskMatchesValue(plannedChange.before_sensitive, plannedChange.before)) ||
+        (Object.hasOwn(plannedChange, 'after_sensitive') && !maskMatchesValue(plannedChange.after_sensitive, plannedChange.after)) ||
+        (Object.hasOwn(plannedChange, 'after_unknown') && !maskMatchesValue(plannedChange.after_unknown, plannedChange.after)));
       const refreshedBeforeAction = record(plannedChange?.before) ? plannedChange.before : null;
       const refreshedRemote = record(change.after) ? change.after : null;
       const planValueUnavailable = plannedMarkersMalformed || driftMarkersMalformed || planUnknown || planSensitive || !mode || mode.sensitive ||
@@ -387,7 +422,7 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
       // A field absent from HCL is not proven to be a provider default; its origin remains unverified.
       const configurationOwnership = !attributeIdentityVerified ? 'unidentified' :
         terraformManagedAttributesByResource[resource]?.includes(key) ? 'terraform-managed' : 'not-explicitly-managed-origin-unverified';
-      attributeFindings.push({
+      const finding = {
         attribute: safeName,
         providerSchemaMode: schemaClassification(mode),
         configurationOwnership,
@@ -396,7 +431,18 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
         remoteMatchesRefreshedPreActionBaseline: remoteMatchesRefreshedBaseline,
         remoteMatchesPlannedDesiredValue: safeValueRelationship(refreshedRemote, plannedAfter, key, desiredValueUnavailable),
         operatorReviewRequired: true,
-      });
+      };
+      if (attributeIdentityVerified && reviewedDriftShapeAttributes.has(key)) {
+        finding.shapeClassifications = Object.freeze({
+          savedState: safeValueShape(change.before, key, savedVsRemoteUnavailable),
+          refreshedRemote: safeValueShape(change.after, key, savedVsRemoteUnavailable),
+          plannedDesired: safeValueShape(plannedAfter, key, desiredValueUnavailable),
+        });
+      }
+      if (mode?.sensitive || planSensitive) {
+        finding.savedStateVsRefreshedRemoteSensitiveEquality = safeSensitiveValueEquality(change, key, mode, driftMarkersMalformed);
+      }
+      attributeFindings.push(finding);
     }
     const unknownCount = counts.unknownUnrecognized;
     return {
