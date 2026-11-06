@@ -363,6 +363,18 @@ test('attributes explicitly configured on other managed resources are not mislab
     remoteMatchesRefreshedPreActionBaseline: 'unavailable', remoteMatchesPlannedDesiredValue: 'unavailable', operatorReviewRequired: true }]);
 });
 
+test('keeps schema attributes with potentially sensitive names unidentified even when values are masked from output', () => {
+  const schema = providerSchemaFixture({ encryption_key: schemaAttribute({ optional: true }) });
+  const result = summarizeDriftAgainstProviderSchema(
+    schemaDrift({ encryption_key: 'SYNTHETIC_ENCRYPTION_VALUE_BEFORE' }, { encryption_key: 'SYNTHETIC_ENCRYPTION_VALUE_AFTER' }),
+    schema, '1.59.0').entries[0];
+  assert.deepEqual(result.attributeFindings.map(({ attribute, providerSchemaMode, configurationOwnership }) =>
+    ({ attribute, providerSchemaMode, configurationOwnership })), [{ attribute: 'unidentified',
+    providerSchemaMode: 'configurable', configurationOwnership: 'unidentified' }]);
+  assert.equal(JSON.stringify(result).includes('encryption_key'), false);
+  assert.equal(JSON.stringify(result).includes('SYNTHETIC_ENCRYPTION_VALUE'), false);
+});
+
 test('keeps the production Terraform ownership map synchronized with current resource declarations', () => {
   const source = readFileSync(new URL('./main.tf', import.meta.url), 'utf8');
   const resourceDeclarations = Object.keys(terraformManagedAttributesByResource);
@@ -546,7 +558,7 @@ const plannedBefore = {
   allowed_logout_urls: ['http://127.0.0.1:49321'],
   web_origins: ['http://127.0.0.1:49321'],
   allowed_origins: ['http://127.0.0.1:49321'],
-  jwt_configuration: [{ alg: 'HS256', lifetime_in_seconds: 3600, scopes: {}, secret_encoded: false }],
+  jwt_configuration: [{ alg: '', lifetime_in_seconds: 3600, scopes: {}, secret_encoded: false }],
   client_secret: secretSentinel,
 };
 function expandedCandidatePlan() {
@@ -582,8 +594,8 @@ test('reports the exact URL and RS256 candidate while making no deployment autho
     callback: 'http://127.0.0.1:5173/', logout: 'http://127.0.0.1:5173', webOrigin: 'http://127.0.0.1:5173',
   });
   assert.equal(candidate.approvedUrlValuesMatch, true);
-  assert.deepEqual(candidate.jwtAlgorithmClassifications, { before: 'HS256', after: 'RS256' });
-  assert.equal(candidate.jwtAlgorithmTransition, 'HS256 -> RS256');
+  assert.deepEqual(candidate.jwtAlgorithmClassifications, { before: 'empty-string', after: 'RS256' });
+  assert.equal(candidate.jwtAlgorithmTransition, 'empty-string -> RS256');
   assert.equal(candidate.jwtNestedFieldsUnchanged, true);
   assert.equal(candidate.jwtValuesKnownAndNonSensitive, true);
   assert.equal(candidate.otherResourceAttributeChangeCount, 0);
@@ -598,10 +610,10 @@ test('reports the exact URL and RS256 candidate while making no deployment autho
   assert.equal(JSON.stringify(report).includes(secretSentinel), false);
 });
 
-for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = false, expectedDashboardDifference = false] of [
+for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = false, expectedDashboardDifference = true] of [
   ['RS256 remains RS256', (target) => { target.before.jwt_configuration[0].alg = 'RS256'; }, 'RS256', 'RS256', false, true],
   ['standard ES512 becomes RS256', (target) => { target.before.jwt_configuration[0].alg = 'ES512'; }, 'ES512', 'RS256', false, true],
-  ['empty algorithm becomes RS256', (target) => { target.before.jwt_configuration[0].alg = ''; }, 'empty-string', 'RS256', false, true],
+  ['empty algorithm becomes RS256', (target) => { target.before.jwt_configuration[0].alg = ''; }, 'empty-string', 'RS256', true, true],
   ['whitespace algorithm becomes RS256', (target) => { target.before.jwt_configuration[0].alg = ' \t '; }, 'whitespace-only', 'RS256', false, true],
   ['capitalization mismatch becomes RS256', (target) => { target.before.jwt_configuration[0].alg = 'hs256'; }, 'capitalization-mismatch', 'RS256', false, true],
   ['unexpected string becomes RS256 without disclosure', (target) => { target.before.jwt_configuration[0].alg = 'SYNTHETIC-UNRECOGNIZED-ALG'; }, 'unexpected-nonstandard', 'RS256', false, true],
@@ -611,21 +623,21 @@ for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = fa
     target.before_sensitive = { jwt_configuration: false };
     target.after_unknown = { jwt_configuration: false };
     target.after_sensitive = { jwt_configuration: false };
-  }, 'HS256', 'RS256', true],
-  ['unexpected desired HS256', (target) => { target.after.jwt_configuration[0].alg = 'HS256'; }, 'HS256', 'HS256'],
-  ['malformed known value', (target) => { target.after.jwt_configuration[0].alg = 42; }, 'HS256', 'malformed'],
-  ['unknown after algorithm', (target) => { target.after_unknown = { jwt_configuration: [{ alg: true }] }; }, 'HS256', 'unknown-or-sensitive'],
+  }, 'empty-string', 'RS256', true, true],
+  ['unexpected desired HS256', (target) => { target.after.jwt_configuration[0].alg = 'HS256'; }, 'empty-string', 'HS256'],
+  ['malformed known value', (target) => { target.after.jwt_configuration[0].alg = 42; }, 'empty-string', 'malformed'],
+  ['unknown after algorithm', (target) => { target.after_unknown = { jwt_configuration: [{ alg: true }] }; }, 'empty-string', 'unknown-or-sensitive'],
   ['omitted unknown after algorithm', (target) => {
     target.after.jwt_configuration[0] = {};
     target.after_unknown = { jwt_configuration: [{ alg: true }] };
-  }, 'HS256', 'unknown-or-sensitive'],
+  }, 'empty-string', 'unknown-or-sensitive'],
   ['omitted unknown JWT block', (target) => {
     delete target.after.jwt_configuration;
     target.after_unknown = { jwt_configuration: true };
-  }, 'HS256', 'unknown-or-sensitive'],
-  ['sensitive after algorithm', (target) => { target.after_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'HS256', 'unknown-or-sensitive'],
+  }, 'empty-string', 'unknown-or-sensitive'],
+  ['sensitive after algorithm', (target) => { target.after_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'empty-string', 'unknown-or-sensitive'],
   ['sensitive before algorithm', (target) => { target.before_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'unknown-or-sensitive', 'RS256', false, null],
-  ['malformed metadata shape', (target) => { target.after_sensitive = { jwt_configuration: 'masked', client_secret: true }; }, 'HS256', 'malformed'],
+  ['malformed metadata shape', (target) => { target.after_sensitive = { jwt_configuration: 'masked', client_secret: true }; }, 'empty-string', 'malformed'],
 ]) {
   test(`classifies planned JWT algorithm safely when ${label}`, () => {
     const document = expandedCandidatePlan();
@@ -651,7 +663,7 @@ for (const algorithm of ['HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512', '
     const candidate = diagnosePlanDocument(document).plannedBrowserOriginSigningCandidate;
     assert.equal(candidate.jwtAlgorithmClassifications.before, algorithm);
     assert.equal(candidate.jwtAlgorithmClassifications.after, 'RS256');
-    assert.equal(candidate.candidateScopeMatches, algorithm === 'HS256');
+    assert.equal(candidate.candidateScopeMatches, false);
     assert.equal(candidate.diagnosticAuthorizesDeployment, false);
   });
 }
