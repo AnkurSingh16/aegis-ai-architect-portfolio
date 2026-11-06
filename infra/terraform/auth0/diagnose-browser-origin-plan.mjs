@@ -30,6 +30,7 @@ const approvedSpaUrls = Object.freeze({
   web_origins: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
   allowed_logout_urls: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
 });
+const approvedSpaJwtAlgorithm = Object.freeze({ before: 'HS256', after: 'RS256' });
 const safeProviderAttributeNames = new Set([
   'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'description',
   'enforce_policies', 'grant_types', 'is_first_party', 'name', 'oidc_conformant', 'scope', 'signing_alg', 'web_origins',
@@ -75,6 +76,20 @@ function containsTrue(value) {
   return false;
 }
 
+function maskMatchesValue(mask, value) {
+  if (typeof mask === 'boolean') return true;
+  if (Array.isArray(mask)) return Array.isArray(value) && mask.length === value.length &&
+    mask.every((entry, index) => maskMatchesValue(entry, value[index]));
+  if (record(mask)) return record(value) && Object.entries(mask).every(([key, entry]) =>
+    Object.hasOwn(value, key) && maskMatchesValue(entry, value[key]));
+  return false;
+}
+
+function markedAtPath(mask, key, value) {
+  if (!Object.hasOwn(mask, key)) return false;
+  return !maskMatchesValue(mask[key], value) || containsTrue(mask[key]);
+}
+
 function safeActions(actions) {
   if (!Array.isArray(actions) || actions.some((action) => typeof action !== 'string' || !safeTerraformActions.has(action))) return ['unknown'];
   return [...actions];
@@ -85,13 +100,6 @@ function booleanTreeIsValid(value) {
   if (Array.isArray(value)) return value.every(booleanTreeIsValid);
   if (record(value)) return Object.values(value).every(booleanTreeIsValid);
   return false;
-}
-
-function markerStatus(container, key) {
-  if (!record(container) || !Object.hasOwn(container, key)) return null;
-  const marker = container[key];
-  if (!booleanTreeIsValid(marker)) return null;
-  return containsTrue(marker);
 }
 
 function markerAppliesToAttribute(marker, key) {
@@ -421,6 +429,146 @@ function summarizePlannedBrowserOriginUpdate(resourceChanges) {
   };
 }
 
+/** Summarize the expanded candidate without treating it as approval for drift. */
+function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, resourceDrift) {
+  const driftCount = Array.isArray(resourceDrift) ? resourceDrift.length : null;
+  const resourceDriftStatus = resourceDrift === undefined ? 'absent' :
+    !Array.isArray(resourceDrift) ? 'malformed' : resourceDrift.length === 0 ? 'empty' : 'nonempty';
+  const fixedUrlAdditions = Object.freeze({
+    callback: 'http://127.0.0.1:5173/',
+    logout: 'http://127.0.0.1:5173',
+    webOrigin: 'http://127.0.0.1:5173',
+  });
+  const empty = {
+    resourceInventoryMatches: null,
+    targetActions: null,
+    approvedUrlAdditions: fixedUrlAdditions,
+    approvedUrlValuesMatch: null,
+    approvedUrlValuesKnownAndNonSensitive: null,
+    jwtAlgorithmTransition: null,
+    jwtNestedFieldsUnchanged: null,
+    jwtValuesKnownAndNonSensitive: null,
+    otherResourceAttributeChangeCount: null,
+    noOtherResourceAttributeChanges: null,
+    noUnexpectedOrUnknownValues: null,
+    verifiedNoOpOutputs: outputSummary.verifiedNoOp,
+    candidateScopeMatches: null,
+    resourceDriftCount: driftCount,
+    resourceDriftStatus,
+    resourceDriftBlocksDeployment: resourceDriftStatus === 'nonempty' || resourceDriftStatus === 'malformed',
+    resourceDriftAuthorized: false,
+    diagnosticAuthorizesDeployment: false,
+  };
+  if (!Array.isArray(resourceChanges)) return empty;
+
+  const addresses = resourceChanges.map((item) => expectedManagedAddress(item) ? item.address : null);
+  const resourceInventoryMatches = resourceChanges.length === expectedResourceAddresses.length &&
+    addresses.every((address) => address !== null) && new Set(addresses).size === expectedResourceAddresses.length &&
+    expectedResourceAddresses.every((address) => addresses.includes(address));
+  const targets = resourceChanges.filter((item) => record(item) && item.address === 'auth0_client.local_spa');
+  if (targets.length !== 1 || !record(targets[0].change)) return { ...empty, resourceInventoryMatches, candidateScopeMatches: false };
+
+  const target = targets[0].change;
+  const before = record(target.before) ? target.before : {};
+  const after = record(target.after) ? target.after : {};
+  let approvedUrlValuesMatch = true;
+  let approvedUrlValuesKnownAndNonSensitive = null;
+  let approvedUrlChangeCount = 0;
+  for (const [key, approved] of Object.entries(approvedSpaUrls)) {
+    if (!isDeepStrictEqual(before[key], approved.before) || !isDeepStrictEqual(after[key], approved.after)) approvedUrlValuesMatch = false;
+    if (!isDeepStrictEqual(before[key], after[key])) approvedUrlChangeCount += 1;
+  }
+
+  const beforeJwt = before.jwt_configuration;
+  const afterJwt = after.jwt_configuration;
+  const jwtShapeValid = Array.isArray(beforeJwt) && beforeJwt.length === 1 && record(beforeJwt[0]) &&
+    Array.isArray(afterJwt) && afterJwt.length === 1 && record(afterJwt[0]);
+  let jwtAlgorithmTransition = null;
+  let jwtNestedFieldsUnchanged = null;
+  let jwtValuesKnownAndNonSensitive = null;
+  if (jwtShapeValid) {
+    jwtAlgorithmTransition = beforeJwt[0].alg === approvedSpaJwtAlgorithm.before && afterJwt[0].alg === approvedSpaJwtAlgorithm.after
+      ? `${approvedSpaJwtAlgorithm.before} -> ${approvedSpaJwtAlgorithm.after}` : null;
+    const beforeRemainder = { ...beforeJwt[0] };
+    const afterRemainder = { ...afterJwt[0] };
+    delete beforeRemainder.alg;
+    delete afterRemainder.alg;
+    jwtNestedFieldsUnchanged = isDeepStrictEqual(beforeRemainder, afterRemainder);
+    const masksValid = ['after_unknown', 'before_sensitive', 'after_sensitive'].every((field) =>
+      Object.hasOwn(target, field) && record(target[field]) && booleanTreeIsValid(target[field]) &&
+      maskMatchesValue(target[field], field === 'before_sensitive' ? before : after));
+    jwtValuesKnownAndNonSensitive = masksValid &&
+      !markedAtPath(target.after_unknown, 'jwt_configuration', afterJwt) &&
+      !markedAtPath(target.before_sensitive, 'jwt_configuration', beforeJwt) &&
+      !markedAtPath(target.after_sensitive, 'jwt_configuration', afterJwt);
+  }
+  const targetMasksValid = ['after_unknown', 'before_sensitive', 'after_sensitive'].every((field) =>
+    Object.hasOwn(target, field) && record(target[field]) && booleanTreeIsValid(target[field]) &&
+    maskMatchesValue(target[field], field === 'before_sensitive' ? before : after));
+  approvedUrlValuesKnownAndNonSensitive = targetMasksValid && Object.keys(approvedSpaUrls).every((key) =>
+    !markedAtPath(target.after_unknown, key, after[key]) && !markedAtPath(target.before_sensitive, key, before[key]) &&
+    !markedAtPath(target.after_sensitive, key, after[key]));
+
+  const excluded = new Set([...Object.keys(approvedSpaUrls), 'jwt_configuration']);
+  let otherResourceAttributeChangeCount = 0;
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (excluded.has(key)) continue;
+    if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key) || !isDeepStrictEqual(before[key], after[key])) {
+      otherResourceAttributeChangeCount += 1;
+    }
+  }
+
+  let resourceChangesMatch = resourceInventoryMatches && isDeepStrictEqual(targets[0].change.actions, ['update']);
+  for (const item of resourceChanges) {
+    if (!record(item)) {
+      resourceChangesMatch = false;
+      otherResourceAttributeChangeCount += 1;
+      continue;
+    }
+    if (item.address === 'auth0_client.local_spa') continue;
+    const change = record(item.change) ? item.change : {};
+    const valuesEqual = record(change.before) && record(change.after) && isDeepStrictEqual(change.before, change.after);
+    if (!isDeepStrictEqual(change.actions, ['no-op']) || !valuesEqual) {
+      resourceChangesMatch = false;
+      otherResourceAttributeChangeCount += 1;
+    }
+  }
+  const metadataValid = resourceChanges.every((item) => {
+    const change = record(item?.change) ? item.change : {};
+    return record(change.before) && record(change.after) &&
+      ['after_unknown', 'before_sensitive', 'after_sensitive'].every((field) =>
+        Object.hasOwn(change, field) && record(change[field]) && booleanTreeIsValid(change[field]) &&
+        maskMatchesValue(change[field], field === 'before_sensitive' ? change.before : change.after));
+  });
+  const noUnexpectedOrUnknownValues = metadataValid && resourceChanges.every((item) => !containsTrue(item.change.after_unknown));
+  const noOtherResourceAttributeChanges = otherResourceAttributeChangeCount === 0;
+  const candidateScopeMatches = resourceChangesMatch && approvedUrlValuesMatch && approvedUrlChangeCount === 3 &&
+    jwtAlgorithmTransition !== null && jwtNestedFieldsUnchanged === true && jwtValuesKnownAndNonSensitive === true &&
+    approvedUrlValuesKnownAndNonSensitive === true && noOtherResourceAttributeChanges && noUnexpectedOrUnknownValues &&
+    outputSummary.verifiedNoOp === true;
+
+  return {
+    resourceInventoryMatches,
+    targetActions: safeActions(target.actions),
+    approvedUrlAdditions: fixedUrlAdditions,
+    approvedUrlValuesMatch,
+    approvedUrlValuesKnownAndNonSensitive,
+    jwtAlgorithmTransition,
+    jwtNestedFieldsUnchanged,
+    jwtValuesKnownAndNonSensitive,
+    otherResourceAttributeChangeCount,
+    noOtherResourceAttributeChanges,
+    noUnexpectedOrUnknownValues,
+    verifiedNoOpOutputs: outputSummary.verifiedNoOp,
+    candidateScopeMatches,
+    resourceDriftCount: driftCount,
+    resourceDriftStatus,
+    resourceDriftBlocksDeployment: resourceDriftStatus === 'nonempty' || resourceDriftStatus === 'malformed',
+    resourceDriftAuthorized: false,
+    diagnosticAuthorizesDeployment: false,
+  };
+}
+
 export function parsePinnedAuth0ProviderVersion(lockContents) {
   if (typeof lockContents !== 'string') return null;
   const blocks = [...lockContents.matchAll(/provider\s+"registry\.terraform\.io\/auth0\/auth0"\s*\{([^}]*)\}/g)];
@@ -434,6 +582,7 @@ export function parsePinnedAuth0ProviderVersion(lockContents) {
 function summarizeOutputChanges(outputChanges) {
   if (!record(outputChanges)) {
     return { declaredKeysMatch: outputChanges === undefined ? null : false, unexpectedOutputCount: null,
+      verifiedNoOp: outputChanges === undefined || (record(outputChanges) && Object.keys(outputChanges).length === 0) ? null : false,
       outputs: declaredOutputNames.map((name) => ({ name, actions: null, beforeAfterEqual: null,
         afterUnknown: null, beforeSensitive: null, afterSensitive: null })) };
   }
@@ -442,9 +591,9 @@ function summarizeOutputChanges(outputChanges) {
   const outputs = declaredOutputNames.map((name) => {
     const change = outputChanges[name];
     const valid = record(change);
-    const afterUnknown = valid ? markerStatus(change, 'after_unknown') : null;
-    const beforeSensitive = valid ? markerStatus(change, 'before_sensitive') : null;
-    const afterSensitive = valid ? markerStatus(change, 'after_sensitive') : null;
+    const afterUnknown = valid && typeof change.after_unknown === 'boolean' ? change.after_unknown : null;
+    const beforeSensitive = valid && typeof change.before_sensitive === 'boolean' ? change.before_sensitive : null;
+    const afterSensitive = valid && typeof change.after_sensitive === 'boolean' ? change.after_sensitive : null;
     const valuesPresent = valid && Object.hasOwn(change, 'before') && Object.hasOwn(change, 'after');
     return {
       name,
@@ -457,7 +606,10 @@ function summarizeOutputChanges(outputChanges) {
       afterSensitive,
     };
   });
-  return { declaredKeysMatch, unexpectedOutputCount: actualNames.filter((name) => !declaredOutputNames.includes(name)).length, outputs };
+  const verifiedNoOp = declaredKeysMatch && outputs.every((output) => output.actions?.length === 1 && output.actions[0] === 'no-op' &&
+    output.beforeAfterEqual === true && output.afterUnknown === false && output.beforeSensitive === false && output.afterSensitive === false);
+  return { declaredKeysMatch, unexpectedOutputCount: actualNames.filter((name) => !declaredOutputNames.includes(name)).length,
+    verifiedNoOp, outputs };
 }
 
 function safeVersion(value) {
@@ -499,6 +651,7 @@ export function diagnosePlanDocument(document, schemaJson, pinnedVersion) {
   const formatVersion = safeVersion(document?.format_version);
   const terraformVersion = safeVersion(document?.terraform_version);
   const errors = [];
+  const outputChangeSummary = summarizeOutputChanges(document?.output_changes);
 
   if (!isObject) errors.push('plan.document.object');
   if (typeof document?.format_version !== 'string') errors.push('plan.format_version.string');
@@ -521,7 +674,7 @@ export function diagnosePlanDocument(document, schemaJson, pinnedVersion) {
     errors.push('plan.action_invocations.absent_or_empty_array');
   }
   if (isObject && document.output_changes !== undefined &&
-      (!record(document.output_changes) || Object.keys(document.output_changes).length !== 0)) {
+      (!record(document.output_changes) || (Object.keys(document.output_changes).length > 0 && outputChangeSummary.verifiedNoOp !== true))) {
     errors.push('plan.output_changes.absent_or_empty_object');
   }
 
@@ -550,8 +703,9 @@ export function diagnosePlanDocument(document, schemaJson, pinnedVersion) {
     actionCounts: actions,
     resourceDriftSummary: summarizeResourceDrift(document?.resource_drift),
     providerSchemaSummary: summarizeDriftAgainstProviderSchema(document?.resource_drift, schemaJson, pinnedVersion, document?.resource_changes),
-    outputChangeSummary: summarizeOutputChanges(document?.output_changes),
+    outputChangeSummary,
     plannedBrowserOriginUpdate: summarizePlannedBrowserOriginUpdate(document?.resource_changes),
+    plannedBrowserOriginSigningCandidate: summarizeBrowserOriginSigningCandidate(document?.resource_changes, outputChangeSummary, document?.resource_drift),
     failedValidationRuleIds: Object.freeze(errors),
   });
 }
@@ -572,6 +726,7 @@ export function diagnosePlanJson(jsonText, schemaJson, pinnedVersion) {
       providerSchemaSummary: summarizeDriftAgainstProviderSchema(undefined, schemaJson, pinnedVersion),
       outputChangeSummary: summarizeOutputChanges(undefined),
       plannedBrowserOriginUpdate: summarizePlannedBrowserOriginUpdate(undefined),
+      plannedBrowserOriginSigningCandidate: summarizeBrowserOriginSigningCandidate(undefined, summarizeOutputChanges(undefined), undefined),
       failedValidationRuleIds: Object.freeze(['plan.json.parse']),
     });
   }

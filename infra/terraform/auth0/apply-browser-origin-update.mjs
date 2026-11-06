@@ -48,7 +48,44 @@ function containsTrue(value) {
   return false;
 }
 
-/** Validate that Terraform proposes only the approved three URL additions. */
+function maskMatchesValue(mask, value) {
+  if (typeof mask === 'boolean') return true;
+  if (Array.isArray(mask)) return Array.isArray(value) && mask.length === value.length &&
+    mask.every((entry, index) => maskMatchesValue(entry, value[index]));
+  if (record(mask)) return record(value) && Object.entries(mask).every(([key, entry]) =>
+    Object.hasOwn(value, key) && maskMatchesValue(entry, value[key]));
+  return false;
+}
+
+function maskAtPathHasTrue(mask, key, value) {
+  if (!Object.hasOwn(mask, key)) return false;
+  return !maskMatchesValue(mask[key], value) || containsTrue(mask[key]);
+}
+
+const expectedOutputNames = Object.freeze(['issuer', 'audience', 'spa_client_id']);
+
+function hasOnlyExplicitFalseMetadata(metadata, value) {
+  // Terraform's masks are sparse: omitted leaves are known/non-sensitive.
+  // Validate any present structure and reject every explicit marked leaf.
+  if (metadata === undefined) return true;
+  return maskMatchesValue(metadata, value) && !containsTrue(metadata);
+}
+
+function validateOutputChanges(outputChanges) {
+  if (!record(outputChanges) || !same(Object.keys(outputChanges).sort(), [...expectedOutputNames].sort())) {
+    throw new Error('Terraform plan output changes are missing, unexpected, or malformed.');
+  }
+  for (const name of expectedOutputNames) {
+    const output = outputChanges[name];
+    if (!record(output) || !same(output.actions, ['no-op']) ||
+        typeof output.before !== 'string' || typeof output.after !== 'string' || output.before !== output.after ||
+        output.after_unknown !== false || output.before_sensitive !== false || output.after_sensitive !== false) {
+      throw new Error('Terraform plan outputs are not verified unchanged, known, and non-sensitive.');
+    }
+  }
+}
+
+/** Validate the approved browser URL additions and SPA JWT signing update. */
 export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId } = {}) {
   if (typeof spaName !== 'string' || !spaName || typeof spaClientId !== 'string' || !spaClientId) {
     throw new Error('The expected local SPA identity is unavailable. Stop for manual review.');
@@ -59,10 +96,10 @@ export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId
       !Array.isArray(document.resource_changes) ||
       (document.resource_drift !== undefined && (!Array.isArray(document.resource_drift) || document.resource_drift.length !== 0)) ||
       (document.deferred_changes !== undefined && (!Array.isArray(document.deferred_changes) || document.deferred_changes.length !== 0)) ||
-      (document.action_invocations !== undefined && (!Array.isArray(document.action_invocations) || document.action_invocations.length !== 0)) ||
-      (document.output_changes !== undefined && (!record(document.output_changes) || Object.keys(document.output_changes).length !== 0))) {
+      (document.action_invocations !== undefined && (!Array.isArray(document.action_invocations) || document.action_invocations.length !== 0))) {
     throw new Error('Terraform plan is malformed, incomplete, or contains drift or unrelated changes. Stop for manual review.');
   }
+  validateOutputChanges(document.output_changes);
   if (record(document.planned_values) && document.planned_values.root_module?.child_modules?.length) {
     throw new Error('Terraform plan contains an unexpected module.');
   }
@@ -76,6 +113,9 @@ export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId
         item.previous_address !== undefined || item.deposed !== undefined || item.generated_config !== undefined ||
         item.address !== `${item.type}.${item.name}` || item.provider_name !== 'registry.terraform.io/auth0/auth0' ||
         !record(item.change) || !Array.isArray(item.change.actions) || !record(item.change.after_unknown) ||
+        !maskMatchesValue(item.change.after_unknown, item.change.after) ||
+        (Object.hasOwn(item.change, 'before_sensitive') && !maskMatchesValue(item.change.before_sensitive, item.change.before)) ||
+        (Object.hasOwn(item.change, 'after_sensitive') && !maskMatchesValue(item.change.after_sensitive, item.change.after)) ||
         containsTrue(item.change.after_unknown) || item.change.importing !== undefined ||
         (item.change.replace_paths !== undefined && (!Array.isArray(item.change.replace_paths) || item.change.replace_paths.length !== 0)) ||
         (item.action_reason !== undefined && typeof item.action_reason !== 'string')) {
@@ -113,9 +153,30 @@ export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId
   if (!same(target.before.allowed_origins, originBefore) || !same(target.after.allowed_origins, originBefore)) {
     throw new Error('Terraform planned an unexpected CORS origin change.');
   }
+
+  const beforeJwt = target.before.jwt_configuration;
+  const afterJwt = target.after.jwt_configuration;
+  if (!Array.isArray(beforeJwt) || beforeJwt.length !== 1 || !record(beforeJwt[0]) ||
+      !Array.isArray(afterJwt) || afterJwt.length !== 1 || !record(afterJwt[0]) ||
+      beforeJwt[0].alg !== 'HS256' || afterJwt[0].alg !== 'RS256') {
+    throw new Error('Terraform plan does not contain the approved SPA JWT signing change from HS256 to RS256.');
+  }
+  const beforeJwtUnchanged = { ...beforeJwt[0] };
+  const afterJwtUnchanged = { ...afterJwt[0] };
+  delete beforeJwtUnchanged.alg;
+  delete afterJwtUnchanged.alg;
+  if (!same(beforeJwtUnchanged, afterJwtUnchanged) ||
+      !record(target.before_sensitive) || !record(target.after_sensitive) ||
+      !hasOnlyExplicitFalseMetadata(target.before_sensitive.jwt_configuration, beforeJwt) ||
+      !hasOnlyExplicitFalseMetadata(target.after_sensitive.jwt_configuration, afterJwt) ||
+      maskAtPathHasTrue(target.after_unknown, 'jwt_configuration', afterJwt) ||
+      maskAtPathHasTrue(target.before_sensitive, 'jwt_configuration', beforeJwt) ||
+      maskAtPathHasTrue(target.after_sensitive, 'jwt_configuration', afterJwt)) {
+    throw new Error('Terraform planned an unknown, sensitive, or unrelated SPA JWT configuration change.');
+  }
   const beforeUnchanged = { ...target.before };
   const afterUnchanged = { ...target.after };
-  for (const key of ['callbacks', 'web_origins', 'allowed_logout_urls']) {
+  for (const key of ['callbacks', 'web_origins', 'allowed_logout_urls', 'jwt_configuration']) {
     delete beforeUnchanged[key];
     delete afterUnchanged[key];
   }
@@ -126,6 +187,7 @@ export function validateBrowserOriginUpdatePlan(document, { spaName, spaClientId
     creates: 0, updates: 1, deletes: 0, addresses: expectedResourceAddresses,
     before: Object.freeze({ callbacks: callbackBefore, web_origins: originBefore, allowed_logout_urls: originBefore }),
     after: Object.freeze({ callbacks: callbackAfter, web_origins: originAfter, allowed_logout_urls: originAfter }),
+    jwtAlgorithm: Object.freeze({ before: 'HS256', after: 'RS256' }),
   });
 }
 
@@ -209,19 +271,29 @@ function assertSameStateIdentity(first, next) {
   }
 }
 
-async function defaultRunTerraform(args, { cwd, env, signal, input }) {
-  return await new Promise((resolve, reject) => {
-    const child = spawn('terraform', args, { cwd, env, signal, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdoutText = '';
-    let stderrText = '';
-    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdoutText += chunk; });
-    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderrText += chunk; });
-    child.once('error', () => reject(new Error('Terraform command could not be started.')));
-    child.once('close', (code) => resolve({ code, stdout: stdoutText, stderr: stderrText }));
-    if (input) child.stdin.end(input);
-    else child.stdin.end();
-  });
+export function createTerraformRunner({ spawnImpl = spawn } = {}) {
+  return async function runTerraform(args, { cwd, env, signal, input } = {}) {
+    return await new Promise((resolve, reject) => {
+      const child = spawnImpl('terraform', args, { cwd, env, signal, stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdoutText = '';
+      let stderrText = '';
+      let spawnFailed = false;
+      child.stdout.setEncoding('utf8').on('data', (chunk) => { stdoutText += chunk; });
+      child.stderr.setEncoding('utf8').on('data', (chunk) => { stderrText += chunk; });
+      // Wait for close after error/abort so callers cannot remove a private plan
+      // directory while Terraform may still be using it.
+      child.once('error', () => { spawnFailed = true; });
+      child.once('close', (code) => {
+        if (spawnFailed) reject(new Error('Terraform command could not be started.'));
+        else resolve({ code, stdout: stdoutText, stderr: stderrText });
+      });
+      if (input) child.stdin.end(input);
+      else child.stdin.end();
+    });
+  };
 }
+
+const defaultRunTerraform = createTerraformRunner();
 
 function safeTerraformEnvironment(secrets) {
   const keys = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SSL_CERT_FILE', 'SSL_CERT_DIR'];
@@ -269,7 +341,7 @@ async function cleanupPrivatePlan(directory, { rmImpl = rm } = {}) {
 
 function fullFingerprint(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 function exactApprovalText(fingerprint) {
-  return `APPLY ${organizationName}/${workspaceName} ${targetAddress} ${fingerprint}`;
+  return `APPLY ${organizationName}/${workspaceName} ${targetAddress} browser-URLs-and-JWT-RS256 ${fingerprint}`;
 }
 
 /** Orchestrator is dependency-injected so tests cannot invoke a real Terraform executable. */
@@ -317,6 +389,7 @@ export async function runBrowserOriginUpdateGate(deps = {}) {
     io.write?.(`Workspace: ${organizationName}/${workspaceName}; resource: ${targetAddress}\n`);
     io.write?.(`Callback URLs: ${summary.before.callbacks.join(', ')} -> ${summary.after.callbacks.join(', ')}\n`);
     io.write?.(`Web origins and logout URLs: ${summary.before.web_origins.join(', ')} -> ${summary.after.web_origins.join(', ')}\n`);
+    io.write?.(`SPA JWT signing algorithm: ${summary.jwtAlgorithm.before} -> ${summary.jwtAlgorithm.after}\n`);
     const createdAt = now();
     const accepted = await approve(exactApprovalText(fingerprint), { organization: organizationName, workspace: workspaceName,
       resource: targetAddress, fingerprint, expiresAt: createdAt + approvalLifetimeMs, signal });

@@ -347,7 +347,7 @@ test('reports only allowlisted versions, field flags, counts, rule IDs, and expe
   assert.deepEqual(report.failedValidationRuleIds, []);
   assert.equal(JSON.stringify(report).includes(secretSentinel), false);
   assert.deepEqual(Object.keys(report).sort(), ['actionCounts', 'booleans', 'counts', 'failedValidationRuleIds',
-    'formatVersion', 'optionalFields', 'outputChangeSummary', 'plannedBrowserOriginUpdate', 'providerSchemaSummary',
+    'formatVersion', 'optionalFields', 'outputChangeSummary', 'plannedBrowserOriginSigningCandidate', 'plannedBrowserOriginUpdate', 'providerSchemaSummary',
     'requiredFields', 'resourceDriftSummary', 'terraformVersion'].sort());
 });
 
@@ -444,6 +444,7 @@ test('classifies the three declared no-op outputs without exposing their values'
   const summary = diagnosePlanDocument(document).outputChangeSummary;
   assert.equal(summary.declaredKeysMatch, true);
   assert.equal(summary.unexpectedOutputCount, 0);
+  assert.equal(summary.verifiedNoOp, true);
   assert.deepEqual(summary.outputs.map(({ name, actions, beforeAfterEqual, afterUnknown, afterSensitive }) =>
     ({ name, actions, beforeAfterEqual, afterUnknown, afterSensitive })), [
     { name: 'issuer', actions: ['no-op'], beforeAfterEqual: true, afterUnknown: false, afterSensitive: false },
@@ -451,6 +452,148 @@ test('classifies the three declared no-op outputs without exposing their values'
     { name: 'spa_client_id', actions: ['no-op'], beforeAfterEqual: true, afterUnknown: false, afterSensitive: false },
   ]);
   assert.equal(JSON.stringify(summary).includes(secretSentinel), false);
+});
+
+const expectedAddresses = [
+  'auth0_resource_server.cases',
+  'auth0_resource_server_scope.read_cases',
+  'auth0_resource_server_scope.write_cases',
+  'auth0_client.local_spa',
+  'auth0_connection_client.local_spa_database',
+];
+const plannedBefore = {
+  id: 'synthetic-spa-id', name: 'Aegis AI Local SPA', app_type: 'spa',
+  callbacks: ['http://127.0.0.1:49321/auth/callback'],
+  allowed_logout_urls: ['http://127.0.0.1:49321'],
+  web_origins: ['http://127.0.0.1:49321'],
+  allowed_origins: ['http://127.0.0.1:49321'],
+  jwt_configuration: [{ alg: 'HS256', lifetime_in_seconds: 3600, scopes: {}, secret_encoded: false }],
+  client_secret: secretSentinel,
+};
+function expandedCandidatePlan() {
+  const outputChanges = Object.fromEntries([
+    ['issuer', 'https://synthetic.auth0.example/'],
+    ['audience', 'https://aegis.synthetic.example/api'],
+    ['spa_client_id', 'synthetic-spa-id'],
+  ].map(([name, value]) => [name, outputChange(value, value)]));
+  const resourceChanges = expectedAddresses.map((address) => {
+    const [type, name] = address.split('.');
+    const base = { address, mode: 'managed', type, name, provider_name: auth0ProviderAddress };
+    if (address !== 'auth0_client.local_spa') {
+      const value = { id: `synthetic-${name}` };
+      return { ...base, change: { actions: ['no-op'], before: value, after: clone(value),
+        after_unknown: {}, before_sensitive: {}, after_sensitive: {} } };
+    }
+    const after = clone(plannedBefore);
+    after.callbacks.push('http://127.0.0.1:5173/');
+    after.allowed_logout_urls.push('http://127.0.0.1:5173');
+    after.web_origins.push('http://127.0.0.1:5173');
+    after.jwt_configuration[0].alg = 'RS256';
+    return { ...base, change: { actions: ['update'], before: clone(plannedBefore), after,
+      after_unknown: {}, before_sensitive: { client_secret: true }, after_sensitive: { client_secret: true } } };
+  });
+  return { ...clone(baseline), resource_changes: resourceChanges, output_changes: outputChanges };
+}
+
+test('reports the exact URL and RS256 candidate while making no deployment authorization claim', () => {
+  const document = expandedCandidatePlan();
+  const report = diagnosePlanDocument(document);
+  const candidate = report.plannedBrowserOriginSigningCandidate;
+  assert.deepEqual(candidate.approvedUrlAdditions, {
+    callback: 'http://127.0.0.1:5173/', logout: 'http://127.0.0.1:5173', webOrigin: 'http://127.0.0.1:5173',
+  });
+  assert.equal(candidate.approvedUrlValuesMatch, true);
+  assert.equal(candidate.jwtAlgorithmTransition, 'HS256 -> RS256');
+  assert.equal(candidate.jwtNestedFieldsUnchanged, true);
+  assert.equal(candidate.jwtValuesKnownAndNonSensitive, true);
+  assert.equal(candidate.otherResourceAttributeChangeCount, 0);
+  assert.equal(candidate.noOtherResourceAttributeChanges, true);
+  assert.equal(candidate.noUnexpectedOrUnknownValues, true);
+  assert.equal(candidate.verifiedNoOpOutputs, true);
+  assert.equal(candidate.candidateScopeMatches, true);
+  assert.equal(candidate.resourceDriftBlocksDeployment, false);
+  assert.equal(candidate.resourceDriftAuthorized, false);
+  assert.equal(candidate.diagnosticAuthorizesDeployment, false);
+  assert.deepEqual(report.failedValidationRuleIds, []);
+  assert.equal(JSON.stringify(report).includes(secretSentinel), false);
+});
+
+for (const [label, mutate] of [
+  ['JWT lifetime change', (target) => { target.after.jwt_configuration[0].lifetime_in_seconds = 7200; }],
+  ['JWT scopes change', (target) => { target.after.jwt_configuration[0].scopes = { openid: 'openid' }; }],
+  ['missing JWT configuration', (target) => { delete target.after.jwt_configuration; }],
+  ['unknown JWT configuration', (target) => { target.after_unknown = { jwt_configuration: [{ alg: true }] }; }],
+  ['sensitive approved URL value', (target) => { target.after_sensitive = { client_secret: true, callbacks: [true] }; }],
+  ['sensitive JWT configuration', (target) => { target.after_sensitive = { jwt_configuration: true, client_secret: true }; }],
+  ['malformed JWT metadata', (target) => { target.after_sensitive = { jwt_configuration: 'sensitive', client_secret: true }; }],
+  ['unexpected SPA attribute', (target) => { target.after.grant_types = ['client_credentials']; }],
+  ['malformed target action shape', (target) => { target.actions = { 0: 'update', length: 1 }; }],
+]) {
+  test(`rejects candidate scope with ${label}`, () => {
+    const document = expandedCandidatePlan();
+    const target = document.resource_changes.find((item) => item.address === 'auth0_client.local_spa').change;
+    mutate(target);
+    const result = diagnosePlanDocument(document).plannedBrowserOriginSigningCandidate;
+    assert.notEqual(result.candidateScopeMatches, true);
+  });
+}
+
+test('nonempty resource drift remains a deployment blocker even when candidate scope matches', () => {
+  const document = expandedCandidatePlan();
+  document.resource_drift = [driftEntry('auth0_client.local_spa', { allowed_clients: [] }, { allowed_clients: ['synthetic-other-app'] })];
+  const report = diagnosePlanDocument(document);
+  const candidate = report.plannedBrowserOriginSigningCandidate;
+  assert.equal(candidate.candidateScopeMatches, true);
+  assert.equal(candidate.resourceDriftCount, 1);
+  assert.equal(candidate.resourceDriftBlocksDeployment, true);
+  assert.equal(candidate.resourceDriftAuthorized, false);
+  assert.equal(candidate.diagnosticAuthorizesDeployment, false);
+  assert.ok(report.failedValidationRuleIds.includes('plan.resource_drift.absent_or_empty_array'));
+});
+
+test('distinguishes omitted, empty and malformed drift metadata without authorizing deployment', () => {
+  const absent = expandedCandidatePlan();
+  delete absent.resource_drift;
+  const absentCandidate = diagnosePlanDocument(absent).plannedBrowserOriginSigningCandidate;
+  assert.equal(absentCandidate.resourceDriftStatus, 'absent');
+  assert.equal(absentCandidate.resourceDriftBlocksDeployment, false);
+  assert.equal(absentCandidate.diagnosticAuthorizesDeployment, false);
+
+  const malformed = expandedCandidatePlan();
+  malformed.resource_drift = {};
+  const malformedCandidate = diagnosePlanDocument(malformed).plannedBrowserOriginSigningCandidate;
+  assert.equal(malformedCandidate.resourceDriftStatus, 'malformed');
+  assert.equal(malformedCandidate.resourceDriftBlocksDeployment, true);
+  assert.equal(malformedCandidate.diagnosticAuthorizesDeployment, false);
+});
+
+test('malformed resource entries produce a nonmatching candidate summary instead of throwing', () => {
+  const document = expandedCandidatePlan();
+  document.resource_changes[0] = null;
+  const report = diagnosePlanDocument(document);
+  assert.equal(report.plannedBrowserOriginSigningCandidate.resourceInventoryMatches, false);
+  assert.notEqual(report.plannedBrowserOriginSigningCandidate.candidateScopeMatches, true);
+  assert.equal(JSON.stringify(report).includes(secretSentinel), false);
+});
+
+test('rejects changed outputs and keeps unverified no-op outputs from matching the candidate', () => {
+  const document = expandedCandidatePlan();
+  document.output_changes.issuer.actions = ['update'];
+  const report = diagnosePlanDocument(document);
+  assert.equal(report.outputChangeSummary.verifiedNoOp, false);
+  assert.notEqual(report.plannedBrowserOriginSigningCandidate.candidateScopeMatches, true);
+  assert.ok(report.failedValidationRuleIds.includes('plan.output_changes.absent_or_empty_object'));
+});
+
+test('rejects structurally invalid object masks for scalar no-op outputs', () => {
+  const document = expandedCandidatePlan();
+  document.output_changes.issuer.after_unknown = {};
+  document.output_changes.audience.before_sensitive = {};
+  document.output_changes.spa_client_id.after_sensitive = {};
+  const report = diagnosePlanDocument(document);
+  assert.equal(report.outputChangeSummary.verifiedNoOp, false);
+  assert.notEqual(report.plannedBrowserOriginSigningCandidate.candidateScopeMatches, true);
+  assert.ok(report.failedValidationRuleIds.includes('plan.output_changes.absent_or_empty_object'));
 });
 
 test('classifies changes to all three declared outputs while suppressing output values', () => {
