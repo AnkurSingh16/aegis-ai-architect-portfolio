@@ -31,6 +31,21 @@ const approvedSpaUrls = Object.freeze({
   allowed_logout_urls: { before: ['http://127.0.0.1:49321'], after: ['http://127.0.0.1:49321', 'http://127.0.0.1:5173'] },
 });
 const approvedSpaJwtAlgorithm = Object.freeze({ before: 'HS256', after: 'RS256' });
+const dashboardObservedSpaJwtAlgorithm = 'HS256';
+const standardJwtSigningAlgorithms = new Set([
+  'HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512',
+  'ES256', 'ES384', 'ES512', 'PS256', 'PS384', 'PS512', 'EdDSA',
+]);
+export const terraformManagedAttributesByResource = Object.freeze({
+  'auth0_resource_server.cases': Object.freeze(['name', 'identifier', 'signing_alg', 'enforce_policies']),
+  'auth0_resource_server_scope.read_cases': Object.freeze(['resource_server_identifier', 'scope', 'description']),
+  'auth0_resource_server_scope.write_cases': Object.freeze(['resource_server_identifier', 'scope', 'description']),
+  'auth0_client.local_spa': Object.freeze([
+    'name', 'app_type', 'oidc_conformant', 'is_first_party', 'grant_types', 'callbacks',
+    'allowed_origins', 'web_origins', 'allowed_logout_urls', 'jwt_configuration',
+  ]),
+  'auth0_connection_client.local_spa_database': Object.freeze(['connection_id', 'client_id']),
+});
 const safeProviderAttributeNames = new Set([
   'allowed_clients', 'allowed_logout_urls', 'allowed_origins', 'app_type', 'callbacks', 'description',
   'enforce_policies', 'grant_types', 'is_first_party', 'name', 'oidc_conformant', 'scope', 'signing_alg', 'web_origins',
@@ -103,6 +118,25 @@ function jwtAlgorithmMarkerState(mask) {
   return blockMask.alg === true;
 }
 
+function classifyJwtAlgorithmValue(value) {
+  if (value === undefined || value === null) return 'missing';
+  if (typeof value !== 'string') return 'malformed';
+  if (value.length === 0) return 'empty-string';
+  if (value.trim().length === 0) return 'whitespace-only';
+  if (standardJwtSigningAlgorithms.has(value)) return value;
+  const matchingStandard = [...standardJwtSigningAlgorithms].find((algorithm) =>
+    algorithm.toLowerCase() === value.toLowerCase());
+  return matchingStandard ? 'capitalization-mismatch' : 'unexpected-nonstandard';
+}
+
+function dashboardAlgorithmComparison(classification) {
+  if (standardJwtSigningAlgorithms.has(classification)) {
+    return classification === dashboardObservedSpaJwtAlgorithm ? 'matches' : 'differs';
+  }
+  if (['empty-string', 'whitespace-only', 'capitalization-mismatch', 'unexpected-nonstandard'].includes(classification)) return 'differs';
+  return 'unverifiable';
+}
+
 function classifyPlannedJwtAlgorithm(change, side) {
   const valueRoot = side === 'before' ? change.before : change.after;
   const jwtConfiguration = record(valueRoot) ? valueRoot.jwt_configuration : undefined;
@@ -116,10 +150,8 @@ function classifyPlannedJwtAlgorithm(change, side) {
   if (jwtConfiguration === undefined || (Array.isArray(jwtConfiguration) && jwtConfiguration.length === 0)) return 'missing';
   if (!Array.isArray(jwtConfiguration) || jwtConfiguration.length !== 1 || !record(jwtConfiguration[0])) return 'malformed';
 
-  if (!Object.hasOwn(jwtConfiguration[0], 'alg') || jwtConfiguration[0].alg === null) return 'missing';
-  if (typeof jwtConfiguration[0].alg !== 'string') return 'malformed';
-  if (jwtConfiguration[0].alg === 'HS256' || jwtConfiguration[0].alg === 'RS256') return jwtConfiguration[0].alg;
-  return 'other-known';
+  if (!Object.hasOwn(jwtConfiguration[0], 'alg')) return 'missing';
+  return classifyJwtAlgorithmValue(jwtConfiguration[0].alg);
 }
 
 function safeActions(actions) {
@@ -267,6 +299,12 @@ function schemaClassification(mode) {
   return 'unknownUnrecognized';
 }
 
+function safeValueRelationship(leftRoot, rightRoot, key, unavailable) {
+  if (unavailable || !record(leftRoot) || !record(rightRoot) ||
+      !Object.hasOwn(leftRoot, key) || !Object.hasOwn(rightRoot, key)) return 'unavailable';
+  return isDeepStrictEqual(leftRoot[key], rightRoot[key]) ? 'matches' : 'differs';
+}
+
 function providerSchemaRoot(schemaJson, pinnedVersion) {
   if (pinnedVersion !== expectedProviderVersion) return null;
   let schema;
@@ -304,6 +342,7 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
     let securityRelevantAttributeCount = 0;
     const plannedValueComparison = { matchesRefreshed: 0, differsFromRefreshed: 0, unavailable: 0 };
     const plannedChange = plannedByAddress.get(resource);
+    const attributeFindings = [];
     const driftMarkersMalformed = ['before_sensitive', 'after_sensitive', 'after_unknown']
       .some((field) => Object.hasOwn(change, field) && !booleanTreeIsValid(change[field]));
     for (const key of keys) {
@@ -323,13 +362,33 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
         .some((field) => Object.hasOwn(plannedChange, field) && !booleanTreeIsValid(plannedChange[field]));
       const refreshedBeforeAction = record(plannedChange?.before) ? plannedChange.before : null;
       const refreshedRemote = record(change.after) ? change.after : null;
-      if (!refreshedBeforeAction || !refreshedRemote || !Object.hasOwn(refreshedBeforeAction, key) || !Object.hasOwn(refreshedRemote, key) ||
-          plannedMarkersMalformed || driftMarkersMalformed || planUnknown || planSensitive || !mode || mode.sensitive ||
-          markerAppliesToAttribute(plannedChange?.after_unknown, key) || markerAppliesToAttribute(plannedChange?.before_sensitive, key) ||
-          markerAppliesToAttribute(plannedChange?.after_sensitive, key)) {
+      const planValueUnavailable = plannedMarkersMalformed || driftMarkersMalformed || planUnknown || planSensitive || !mode || mode.sensitive ||
+        markerAppliesToAttribute(plannedChange?.after_unknown, key) || markerAppliesToAttribute(plannedChange?.before_sensitive, key) ||
+        markerAppliesToAttribute(plannedChange?.after_sensitive, key);
+      const remoteMatchesRefreshedBaseline = safeValueRelationship(refreshedBeforeAction, refreshedRemote, key, planValueUnavailable);
+      if (remoteMatchesRefreshedBaseline === 'unavailable') {
         plannedValueComparison.unavailable += 1;
-      } else if (isDeepStrictEqual(refreshedBeforeAction[key], refreshedRemote[key])) plannedValueComparison.matchesRefreshed += 1;
+      } else if (remoteMatchesRefreshedBaseline === 'matches') plannedValueComparison.matchesRefreshed += 1;
       else plannedValueComparison.differsFromRefreshed += 1;
+
+      const savedVsRemoteUnavailable = driftMarkersMalformed || planSensitive || planUnknown || !mode || mode.sensitive;
+      const plannedAfter = record(plannedChange?.after) ? plannedChange.after : null;
+      const desiredValueUnavailable = planValueUnavailable || !plannedAfter;
+      const safeName = safeProviderAttributeNames.has(key) && !planSensitive && !mode?.sensitive ? key : 'unidentified';
+      const attributeIdentityVerified = safeName !== 'unidentified' && Boolean(mode) && !driftMarkersMalformed;
+      // A field absent from HCL is not proven to be a provider default; its origin remains unverified.
+      const configurationOwnership = !attributeIdentityVerified ? 'unidentified' :
+        terraformManagedAttributesByResource[resource]?.includes(key) ? 'terraform-managed' : 'not-explicitly-managed-origin-unverified';
+      attributeFindings.push({
+        attribute: safeName,
+        providerSchemaMode: schemaClassification(mode),
+        configurationOwnership,
+        securityRelevance: !attributeIdentityVerified ? 'unverified' : securityRelevantAttributes.has(key),
+        savedStateVsRefreshedRemote: safeValueRelationship(change.before, change.after, key, savedVsRemoteUnavailable),
+        remoteMatchesRefreshedPreActionBaseline: remoteMatchesRefreshedBaseline,
+        remoteMatchesPlannedDesiredValue: safeValueRelationship(refreshedRemote, plannedAfter, key, desiredValueUnavailable),
+        operatorReviewRequired: true,
+      });
     }
     const unknownCount = counts.unknownUnrecognized;
     return {
@@ -344,6 +403,7 @@ export function summarizeDriftAgainstProviderSchema(drift, schemaJson, pinnedVer
       securityRelevantSettingAffected: securityRelevantAttributeCount > 0 ? true : unknownCount > 0 ? null : false,
       plannedValueComparison,
       safeNonSensitiveAttributeNames: [...safeNames].sort(),
+      attributeFindings,
     };
   });
   const aggregate = { computedOnly: 0, optionalComputed: 0, configurable: 0, sensitive: 0, unknownUnrecognized: 0 };
@@ -479,6 +539,8 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
     approvedUrlValuesKnownAndNonSensitive: null,
     jwtAlgorithmClassifications: { before: null, after: null },
     jwtAlgorithmTransition: null,
+    beforeAlgorithmDiffersFromDashboardObservation: null,
+    desiredAlgorithmIsExactlyRS256: null,
     jwtNestedFieldsUnchanged: null,
     jwtValuesKnownAndNonSensitive: null,
     otherResourceAttributeChangeCount: null,
@@ -519,6 +581,7 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
     after: classifyPlannedJwtAlgorithm(target, 'after'),
   };
   const jwtAlgorithmTransition = `${jwtAlgorithmClassifications.before} -> ${jwtAlgorithmClassifications.after}`;
+  const dashboardComparison = dashboardAlgorithmComparison(jwtAlgorithmClassifications.before);
   const jwtShapeValid = Array.isArray(beforeJwt) && beforeJwt.length === 1 && record(beforeJwt[0]) &&
     Array.isArray(afterJwt) && afterJwt.length === 1 && record(afterJwt[0]);
   let jwtNestedFieldsUnchanged = null;
@@ -591,6 +654,8 @@ function summarizeBrowserOriginSigningCandidate(resourceChanges, outputSummary, 
     approvedUrlValuesKnownAndNonSensitive,
     jwtAlgorithmClassifications,
     jwtAlgorithmTransition,
+    beforeAlgorithmDiffersFromDashboardObservation: dashboardComparison === 'unverifiable' ? null : dashboardComparison === 'differs',
+    desiredAlgorithmIsExactlyRS256: jwtAlgorithmClassifications.after === approvedSpaJwtAlgorithm.after,
     jwtNestedFieldsUnchanged,
     jwtValuesKnownAndNonSensitive,
     otherResourceAttributeChangeCount,
