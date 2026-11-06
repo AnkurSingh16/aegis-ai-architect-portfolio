@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { diagnosePlanDocument, diagnosePlanJson, runPlanDiagnostic, sameHcpIdentity,
   assertDiagnosticInvocation, createTerraformDiagnosticAdapters, parsePinnedAuth0ProviderVersion,
-  summarizeDriftAgainstProviderSchema } from './diagnose-browser-origin-plan.mjs';
+  summarizeDriftAgainstProviderSchema, terraformManagedAttributesByResource } from './diagnose-browser-origin-plan.mjs';
 
 const secretSentinel = 'SYNTHETIC_PLAN_SECRET_SENTINEL_DO_NOT_EMIT';
 const baseline = {
@@ -303,6 +304,84 @@ test('compares refreshed drift with the post-refresh pre-action baseline using c
   assert.equal(JSON.stringify(differing).includes('provider-normalized'), false);
 });
 
+test('reports each drift field using allowlisted names, pinned schema mode, ownership, and three distinct value comparisons', () => {
+  const schema = providerSchemaFixture({
+    callbacks: schemaAttribute({ optional: true }),
+    allowed_clients: schemaAttribute({ optional: true }),
+    grant_types: schemaAttribute({ optional: true }),
+    client_secret: schemaAttribute({ optional: true, sensitive: true }),
+  });
+  const planned = plannedBrowserChanges();
+  const target = planned.find((item) => item.address === 'auth0_client.local_spa');
+  target.change.before.callbacks = ['refreshed-callback'];
+  target.change.after.callbacks = ['desired-callback'];
+  target.change.before.allowed_clients = ['refreshed-client'];
+  target.change.after.allowed_clients = ['desired-client'];
+  target.change.before.grant_types = ['authorization_code'];
+  target.change.after.grant_types = ['authorization_code'];
+  target.change.before.client_secret = 'synthetic-sensitive-value';
+  target.change.after.client_secret = 'synthetic-sensitive-value';
+  target.change.before_sensitive = {};
+  target.change.after_unknown = {};
+  target.change.after_sensitive = {};
+  target.change.before_sensitive.client_secret = true;
+  target.change.after_sensitive.client_secret = true;
+
+  const drift = schemaDrift(
+    { callbacks: ['saved-callback'], allowed_clients: ['saved-client'], grant_types: ['old-grant'], client_secret: 'hidden-before' },
+    { callbacks: ['refreshed-callback'], allowed_clients: ['remote-client'], grant_types: ['authorization_code'], client_secret: 'hidden-after' },
+    { client_secret: true }, { client_secret: true }, {});
+  const result = summarizeDriftAgainstProviderSchema(drift, schema, '1.59.0', planned).entries[0];
+  assert.deepEqual(result.attributeFindings, [
+    { attribute: 'callbacks', providerSchemaMode: 'configurable', configurationOwnership: 'terraform-managed',
+      securityRelevance: true, savedStateVsRefreshedRemote: 'differs', remoteMatchesRefreshedPreActionBaseline: 'matches',
+      remoteMatchesPlannedDesiredValue: 'differs', operatorReviewRequired: true },
+    { attribute: 'allowed_clients', providerSchemaMode: 'configurable', configurationOwnership: 'not-explicitly-managed-origin-unverified',
+      securityRelevance: true, savedStateVsRefreshedRemote: 'differs', remoteMatchesRefreshedPreActionBaseline: 'differs',
+      remoteMatchesPlannedDesiredValue: 'differs', operatorReviewRequired: true },
+    { attribute: 'grant_types', providerSchemaMode: 'configurable', configurationOwnership: 'terraform-managed',
+      securityRelevance: true, savedStateVsRefreshedRemote: 'differs', remoteMatchesRefreshedPreActionBaseline: 'matches',
+      remoteMatchesPlannedDesiredValue: 'matches', operatorReviewRequired: true },
+    { attribute: 'unidentified', providerSchemaMode: 'sensitive', configurationOwnership: 'unidentified',
+      securityRelevance: 'unverified', savedStateVsRefreshedRemote: 'unavailable', remoteMatchesRefreshedPreActionBaseline: 'unavailable',
+      remoteMatchesPlannedDesiredValue: 'unavailable', operatorReviewRequired: true },
+  ]);
+  assert.equal(JSON.stringify(result).includes('client_secret'), false);
+  assert.equal(JSON.stringify(result).includes('hidden-after'), false);
+  assert.equal(JSON.stringify(result).includes('synthetic-sensitive-value'), false);
+});
+
+test('attributes explicitly configured on other managed resources are not mislabeled as defaults', () => {
+  const schema = providerSchemaFixture({}, '1.0', {
+    auth0_resource_server: { version: 2, block: { attributes: { signing_alg: schemaAttribute({ optional: true }) } } },
+  });
+  const drift = [{ address: 'auth0_resource_server.cases', mode: 'managed', type: 'auth0_resource_server', name: 'cases',
+    provider_name: auth0ProviderAddress, change: { actions: ['update'], before: { signing_alg: 'HS256' }, after: { signing_alg: 'RS256' } } }];
+  const result = summarizeDriftAgainstProviderSchema(drift, schema, '1.59.0').entries[0];
+  assert.deepEqual(result.attributeFindings, [{ attribute: 'signing_alg', providerSchemaMode: 'configurable',
+    configurationOwnership: 'terraform-managed', securityRelevance: true, savedStateVsRefreshedRemote: 'differs',
+    remoteMatchesRefreshedPreActionBaseline: 'unavailable', remoteMatchesPlannedDesiredValue: 'unavailable', operatorReviewRequired: true }]);
+});
+
+test('keeps the production Terraform ownership map synchronized with current resource declarations', () => {
+  const source = readFileSync(new URL('./main.tf', import.meta.url), 'utf8');
+  const resourceDeclarations = Object.keys(terraformManagedAttributesByResource);
+  const configuredResources = [...source.matchAll(/^resource "([a-z][a-z0-9_]*)" "([a-z][a-z0-9_]*)" \{/gm)]
+    .map((match) => `${match[1]}.${match[2]}`).sort();
+  assert.deepEqual(configuredResources, [...resourceDeclarations].sort());
+  for (const resourceAddress of resourceDeclarations) {
+    const [type, name] = resourceAddress.split('.');
+    const heading = `resource "${type}" "${name}" {`;
+    const start = source.indexOf(heading);
+    assert.notEqual(start, -1, `missing Terraform resource ${type}.${name}`);
+    const nextResource = source.indexOf('\nresource "', start + heading.length);
+    const body = source.slice(start, nextResource < 0 ? source.length : nextResource);
+    const declared = [...body.matchAll(/^ {2}([a-z][a-z0-9_]*)\s*(?:=|\{)/gm)].map((match) => match[1]).sort();
+    assert.deepEqual(declared, [...terraformManagedAttributesByResource[resourceAddress]].sort(),
+      `ownership map differs from HCL for ${type}.${name}`);
+  }
+});
+
 test('does not compare provider-sensitive values even when the plan omits sensitivity masks', () => {
   const schema = providerSchemaFixture({ client_secret: schemaAttribute({ optional: true, sensitive: true }) });
   const planned = plannedBrowserChanges();
@@ -519,11 +598,15 @@ test('reports the exact URL and RS256 candidate while making no deployment autho
   assert.equal(JSON.stringify(report).includes(secretSentinel), false);
 });
 
-for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = false] of [
-  ['RS256 remains RS256', (target) => { target.before.jwt_configuration[0].alg = 'RS256'; }, 'RS256', 'RS256'],
-  ['other known becomes RS256', (target) => { target.before.jwt_configuration[0].alg = 'ES512'; }, 'other-known', 'RS256'],
-  ['missing algorithm becomes RS256', (target) => { delete target.before.jwt_configuration[0].alg; }, 'missing', 'RS256'],
-  ['missing block becomes RS256', (target) => { delete target.before.jwt_configuration; }, 'missing', 'RS256'],
+for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = false, expectedDashboardDifference = false] of [
+  ['RS256 remains RS256', (target) => { target.before.jwt_configuration[0].alg = 'RS256'; }, 'RS256', 'RS256', false, true],
+  ['standard ES512 becomes RS256', (target) => { target.before.jwt_configuration[0].alg = 'ES512'; }, 'ES512', 'RS256', false, true],
+  ['empty algorithm becomes RS256', (target) => { target.before.jwt_configuration[0].alg = ''; }, 'empty-string', 'RS256', false, true],
+  ['whitespace algorithm becomes RS256', (target) => { target.before.jwt_configuration[0].alg = ' \t '; }, 'whitespace-only', 'RS256', false, true],
+  ['capitalization mismatch becomes RS256', (target) => { target.before.jwt_configuration[0].alg = 'hs256'; }, 'capitalization-mismatch', 'RS256', false, true],
+  ['unexpected string becomes RS256 without disclosure', (target) => { target.before.jwt_configuration[0].alg = 'SYNTHETIC-UNRECOGNIZED-ALG'; }, 'unexpected-nonstandard', 'RS256', false, true],
+  ['missing algorithm becomes RS256', (target) => { delete target.before.jwt_configuration[0].alg; }, 'missing', 'RS256', false, null],
+  ['missing block becomes RS256', (target) => { delete target.before.jwt_configuration; }, 'missing', 'RS256', false, null],
   ['explicit false whole-block masks remain known', (target) => {
     target.before_sensitive = { jwt_configuration: false };
     target.after_unknown = { jwt_configuration: false };
@@ -541,7 +624,7 @@ for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = fa
     target.after_unknown = { jwt_configuration: true };
   }, 'HS256', 'unknown-or-sensitive'],
   ['sensitive after algorithm', (target) => { target.after_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'HS256', 'unknown-or-sensitive'],
-  ['sensitive before algorithm', (target) => { target.before_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'unknown-or-sensitive', 'RS256'],
+  ['sensitive before algorithm', (target) => { target.before_sensitive = { client_secret: true, jwt_configuration: [{ alg: true }] }; }, 'unknown-or-sensitive', 'RS256', false, null],
   ['malformed metadata shape', (target) => { target.after_sensitive = { jwt_configuration: 'masked', client_secret: true }; }, 'HS256', 'malformed'],
 ]) {
   test(`classifies planned JWT algorithm safely when ${label}`, () => {
@@ -551,9 +634,25 @@ for (const [label, mutate, expectedBefore, expectedAfter, expectedCandidate = fa
     const candidate = diagnosePlanDocument(document).plannedBrowserOriginSigningCandidate;
     assert.deepEqual(candidate.jwtAlgorithmClassifications, { before: expectedBefore, after: expectedAfter });
     assert.equal(candidate.jwtAlgorithmTransition, `${expectedBefore} -> ${expectedAfter}`);
+    assert.equal(candidate.beforeAlgorithmDiffersFromDashboardObservation, expectedDashboardDifference);
+    assert.equal(candidate.desiredAlgorithmIsExactlyRS256, expectedAfter === 'RS256');
     assert.equal(candidate.candidateScopeMatches, expectedCandidate);
-    assert.equal(JSON.stringify(candidate).includes('ES512'), false);
     assert.equal(JSON.stringify(candidate).includes('masked'), false);
+    assert.equal(JSON.stringify(candidate).includes('SYNTHETIC-UNRECOGNIZED-ALG'), false);
+  });
+}
+
+for (const algorithm of ['HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512',
+  'PS256', 'PS384', 'PS512', 'EdDSA']) {
+  test(`allows only the reviewed standard JWT signing algorithm label ${algorithm}`, () => {
+    const document = expandedCandidatePlan();
+    const target = document.resource_changes.find((item) => item.address === 'auth0_client.local_spa').change;
+    target.before.jwt_configuration[0].alg = algorithm;
+    const candidate = diagnosePlanDocument(document).plannedBrowserOriginSigningCandidate;
+    assert.equal(candidate.jwtAlgorithmClassifications.before, algorithm);
+    assert.equal(candidate.jwtAlgorithmClassifications.after, 'RS256');
+    assert.equal(candidate.candidateScopeMatches, algorithm === 'HS256');
+    assert.equal(candidate.diagnosticAuthorizesDeployment, false);
   });
 }
 
