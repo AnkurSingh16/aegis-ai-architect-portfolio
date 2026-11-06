@@ -171,3 +171,7 @@ After the SPA and API are provisioned and `.env.api` includes the verified publi
 - Use feature branches and pull requests; GitHub Actions gates quality.
 - Do not deploy mock endpoints as if they were authenticated AI services.
 - Add infrastructure only after cost review and explicit human approval.
+
+### Auth0 state-only reconciliation
+
+The interactive `node infra/terraform/auth0/plan-state-reconciliation.mjs` command creates only a private, short-lived `terraform plan -refresh-only` artifact and emits a sanitized acceptance summary. It requires the exact reviewed HCP identity, five-resource inventory, four approved null-to-empty drift shapes and an equal provider-sensitive comparison; it performs no state write or Auth0 change. A future refresh-only apply needs separate implementation review and explicit approval. After such an approved state-only reconciliation, the normal plan should show the pending browser/JWT update; a no-op plan is expected only after that separate deployment succeeds.
