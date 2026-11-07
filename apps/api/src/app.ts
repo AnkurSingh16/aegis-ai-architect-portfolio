@@ -8,16 +8,20 @@ import { resolveAuthConfig, type AuthConfig } from './auth/config.js';
 import { createTokenVerifier } from './auth/token.js';
 import { registerProtectedCaseRoutes } from './auth/routes.js';
 import { createDatabasePool, verifyRuntimeRole } from './storage/database.js';
+import { createOllamaProvider, resolveOllamaConfig, type AnalysisProvider } from './ai/provider.js';
 
 export interface AppOptions {
   authConfig?: AuthConfig;
-  testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool };
+  testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool; analysisProvider?: AnalysisProvider };
 }
 
 export function createApp(options: AppOptions = {}) {
   if (options.testDependencies && process.env.NODE_ENV !== 'test') throw new Error('Test dependencies are unavailable.');
   const authConfig = options.authConfig ? resolveAuthConfig({ AUTH0_ISSUER: options.authConfig.issuer,
     AUTH0_AUDIENCE: options.authConfig.audience, DATABASE_URL: options.authConfig.databaseUrl }) : resolveAuthConfig(process.env);
+  const aiConfig = resolveOllamaConfig(process.env);
+  if (aiConfig && !authConfig) throw new Error('AI analysis requires the authenticated case API.');
+  const analysisProvider = options.testDependencies?.analysisProvider ?? (aiConfig ? createOllamaProvider(aiConfig) : undefined);
   const app = Fastify({ logger: false, ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   app.get('/api/health', async () => ({ ok: true, service: 'aegis-api', mode: 'starter' }));
 
@@ -33,7 +37,7 @@ export function createApp(options: AppOptions = {}) {
       catch { await closeDatabase(); throw new Error('Protected case storage initialization failed.'); }
     });
     app.addHook('onClose', closeDatabase);
-    app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify));
+    app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider));
   }
 
   // Do NOT enable unauthenticated demo routes in production.

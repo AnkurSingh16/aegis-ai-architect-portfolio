@@ -24,6 +24,13 @@ vi.mock('@auth0/auth0-react', () => ({
 const config = { domain: 'dev-tzvthmve8npi2dw7.au.auth0.com', clientId: 'public-client-id', audience: 'https://aegis-ai.local/api' };
 const northCase = { id: 'case-1', tenant_id: '10000000-0000-4000-8000-000000000001',
   synthetic_case_id: 'SYN-NORTH-001', status: 'open', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
+const analysis = { caseId: 'case-1', category: 'incident', priority: 'high', recommendedTeam: 'Platform support',
+  rationale: 'The stored synthetic case fields indicate a possible sign-in interruption.',
+  nextAction: 'Review the synthetic service impact and incident timeline.', confidence: 0.72, uncertainty: 'moderate',
+  evidenceReferences: ['synthetic_case_id', 'status'], humanReviewRequired: true,
+  execution: { provider: 'ollama', model: 'fixture-model:1b', mode: 'local-model' },
+  metrics: { latencyMs: 25, promptTokens: 20, generatedTokens: 30 },
+  disclaimer: 'Advisory analysis only. Evidence references identify case fields; they are not RAG citations or external source grounding.' };
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -220,6 +227,104 @@ describe('development Auth0 case experience', () => {
     render(<DevAuthExperience config={config} />);
     expect(await screen.findByText('SYN-NORTH-001')).toBeTruthy();
     expect(storageWrite).not.toHaveBeenCalled();
+  });
+
+  it('analyzes only a displayed authorized case and renders review metadata without sending case text', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => analysis });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with local AI' }));
+    expect(await screen.findByText(/possible sign-in interruption/)).toBeTruthy();
+    expect(screen.getByText(/Human review is required/)).toBeTruthy();
+    expect(screen.getByText(/not RAG citations or external source grounding/)).toBeTruthy();
+    expect(screen.getByText(/Model-reported confidence \(uncalibrated\)/)).toBeTruthy();
+    expect(screen.getByText(/20 input tokens/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/tenants/10000000-0000-4000-8000-000000000001/cases/case-1/ai-analysis',
+      expect.objectContaining({ method: 'POST', credentials: 'omit', redirect: 'error',
+        headers: { Authorization: 'Bearer private-test-token', Accept: 'application/json' }, signal: expect.any(AbortSignal) }));
+    expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('body');
+  });
+
+  it('distinguishes disabled local inference and provider failure without fabricating results', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'ai_analysis_disabled' }) })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'ai_analysis_unavailable' }) });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with local AI' }));
+    expect(await screen.findByText(/Local AI analysis is disabled/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze with local AI' }));
+    expect(await screen.findByText(/Analysis could not be completed/)).toBeTruthy();
+    expect(screen.queryByText(/possible sign-in interruption/)).toBeNull();
+  });
+
+  it('cancels stale analysis on tenant change and clears analysis on logout', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    let resolveAnalysis!: (body: unknown) => void;
+    const delayed = new Promise<unknown>((resolve) => { resolveAnalysis = resolve; });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => delayed })
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+    globalThis.fetch = fetchMock;
+    const { container } = render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with local AI' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByLabelText('Requested tenant'), { target: { value: '20000000-0000-4000-8000-000000000002' } });
+    await act(async () => { resolveAnalysis(analysis); await delayed; });
+    expect(container.textContent).not.toContain('possible sign-in interruption');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(container.textContent).not.toContain('possible sign-in interruption');
+    expect(fetchMock.mock.calls[1][1].signal.aborted).toBe(true);
+  });
+
+  it('clears successful analysis on sign-out and never persists its bearer token', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => analysis });
+    render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with local AI' }));
+    expect(await screen.findByText(/possible sign-in interruption/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(screen.queryByText(/possible sign-in interruption/)).toBeNull();
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+    expect(document.body.textContent).not.toContain('private-test-token');
+  });
+
+  it('aborts and discards analysis when the authenticated identity changes during response parsing', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-a' } };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    let resolveBody!: (value: unknown) => void;
+    const delayedBody = new Promise<unknown>((resolve) => { resolveBody = resolve; });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => delayedBody })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] });
+    globalThis.fetch = fetchMock;
+    const { container, rerender } = render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with local AI' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-b' } };
+    rerender(<DevAuthExperience config={config} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await act(async () => { resolveBody(analysis); await delayedBody; });
+    expect(fetchMock.mock.calls[1][1].signal.aborted).toBe(true);
+    expect(container.textContent).not.toContain('possible sign-in interruption');
+    expect(container.textContent).toContain('SYN-NORTH-001');
   });
 
   it('does not surface token acquisition or redirect errors', async () => {
