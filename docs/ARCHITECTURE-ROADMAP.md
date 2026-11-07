@@ -40,6 +40,16 @@ See [ADR 003](adr/003-auth0-tenant-authorization.md), the [security runbook](SEC
 
 See [ADR 004](adr/004-auth0-terraform-foundation.md) and [the Auth0 security runbook](SECURITY-RUNBOOK.md).
 
+## Milestone 3A — authenticated AI-assisted case intelligence
+
+- A development-only `POST /api/tenants/:tenantId/cases/:caseId/ai-analysis` route reuses RS256 token verification, `read:cases`, database membership and forced RLS. It reads the authorized stored row in the existing repeatable-read transaction, releases the connection, then performs inference; rejected requests never invoke the provider.
+- The first provider is optional Ollama at the fixed loopback endpoint. It is disabled by default, requires an explicit server-side development opt-in, has no cloud fallback or model download path, and bounds concurrency, request/response size, generation, and duration.
+- The database row contains a synthetic case ID/status/timestamps, not a narrative. The prompt uses that authorized row plus the source-controlled synthetic fixture catalog; browser-supplied case text is rejected. Output is strict JSON with allowlisted categories, priorities, teams, next actions and references to case fields. These references are not RAG citations or external grounding.
+- UI analysis is read-only, authenticated, cancellation-aware, and clears stale results across tenant, case, identity and session changes. All recommendations require human review; no status update, communication, or escalation is performed.
+- Deterministic evaluation tests measure contract and fixture behavior only. Real inference and model quality have not been evaluated. Synthetic fixtures and mocked provider endpoints keep CI offline.
+
+See [ADR 006](adr/006-local-ai-case-intelligence.md), the [README local inference guide](../README.md#ai-assisted-case-intelligence-milestone-3a), and [security runbook](SECURITY-RUNBOOK.md).
+
 ## Vertical slice 1 — actual product foundations
 - PostgreSQL tables for tenants, users, documents, audit events; deny cross-tenant queries.
 - Measured AI and retrieval, building on the local Auth0/JWT and tenant-membership foundation in Milestone 2B.
