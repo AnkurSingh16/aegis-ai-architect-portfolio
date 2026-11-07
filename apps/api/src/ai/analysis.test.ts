@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { syntheticCases } from '../contracts/triage.js';
-import { buildAnalysisPrompt, createAnalysisResult, isAnalysisResult, parseAnalysisOutput, recommendedActions } from './analysis.js';
+import { analysisOutputFailureReason, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult,
+  isAnalysisResult, parseAnalysisOutput, recommendedActions } from './analysis.js';
 import { createOllamaProvider, ollamaEndpointForTests, resolveOllamaConfig } from './provider.js';
 import type { StoredCase } from '../storage/models.js';
 
@@ -15,6 +16,20 @@ const validOutput = {
   nextAction: recommendedActions[0], confidence: 0.72, uncertainty: 'moderate',
   evidenceReferences: ['synthetic_case_id', 'status'], humanReviewRequired: true,
 };
+const schemaFailureCases: Array<[string, unknown, string]> = [
+  ['invalid_root', null, 'private-root-marker'],
+  ['invalid_keys', { ...validOutput, privateExtraKey: 'private-key-value' }, 'private-key-value'],
+  ['invalid_category', { ...validOutput, category: 'private-category-value' }, 'private-category-value'],
+  ['invalid_priority', { ...validOutput, priority: 'private-priority-value' }, 'private-priority-value'],
+  ['invalid_team', { ...validOutput, recommendedTeam: 'private-team-value' }, 'private-team-value'],
+  ['invalid_next_action', { ...validOutput, nextAction: 'private-action-value' }, 'private-action-value'],
+  ['invalid_uncertainty', { ...validOutput, uncertainty: 'private-uncertainty-value' }, 'private-uncertainty-value'],
+  ['invalid_confidence', { ...validOutput, confidence: 2 }, '"confidence":2'],
+  ['invalid_rationale', { ...validOutput, rationale: '' }, '"rationale":""'],
+  ['unsafe_rationale', { ...validOutput, rationale: 'private-rationale-marker https://private.invalid' }, 'private-rationale-marker'],
+  ['invalid_evidence_references', { ...validOutput, evidenceReferences: ['private-evidence-value'] }, 'private-evidence-value'],
+  ['invalid_human_review', { ...validOutput, humanReviewRequired: false }, '"humanReviewRequired":false'],
+];
 function ollamaResponse(output: unknown = validOutput, extra: Record<string, unknown> = {}) {
   return new Response(JSON.stringify({ model: 'synthetic-model:1b', done: true, response: JSON.stringify(output),
     prompt_eval_count: 20, eval_count: 35, ...extra }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -25,7 +40,7 @@ function ollamaTextResponse(text: string, extra: Record<string, unknown> = {}) {
 }
 type FailureLog = Record<string, string | number | null>;
 async function expectFailureStage(fetchImpl: typeof fetch, failureStage: string,
-  options: { signal?: AbortSignal; timeoutMs?: number } = {}) {
+  options: { signal?: AbortSignal; timeoutMs?: number; schemaReason?: string } = {}) {
   const log = vi.fn<(event: FailureLog) => void>();
   await expect(createOllamaProvider({ model: 'synthetic-model:1b', timeoutMs: options.timeoutMs ?? 5000, maxConcurrent: 1 },
     { fetchImpl, log }).analyze(storedCase, options.signal ?? new AbortController().signal))
@@ -33,6 +48,7 @@ async function expectFailureStage(fetchImpl: typeof fetch, failureStage: string,
   expect(log).toHaveBeenCalledTimes(1);
   const event = log.mock.calls[0]?.[0];
   expect(event).toMatchObject({ event: 'ai_case_analysis', provider: 'ollama', outcome: 'failure', failureStage });
+  if (options.schemaReason !== undefined) expect(event?.schemaReason).toBe(options.schemaReason);
   expect(event?.latencyMs).toEqual(expect.any(Number));
   return event as FailureLog;
 }
@@ -64,6 +80,24 @@ describe('AI case analysis output contract', () => {
     ['credential language in rationale', { rationale: 'The secret should be used to call another service.' }],
   ])('rejects %s', (_name, override) => {
     expect(() => parseAnalysisOutput({ ...validOutput, ...override })).toThrow('Model output is invalid.');
+  });
+
+  it.each(schemaFailureCases)('classifies schema failure as %s without changing the generic validation error', (reason, value) => {
+    try {
+      parseAnalysisOutput(value);
+      throw new Error('Expected invalid output to be rejected.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AnalysisOutputValidationError);
+      expect(error).toMatchObject({ message: 'Model output is invalid.', reason });
+    }
+  });
+
+  it('maps unexpected validator exceptions to the fixed unclassified reason', () => {
+    expect(analysisOutputFailureReason(new Error('private validator exception'))).toBe('unclassified');
+    const malformed = new Proxy(new AnalysisOutputValidationError('invalid_root'), {
+      get(target, property, receiver) { return property === 'reason' ? 'private-arbitrary-reason' : Reflect.get(target, property, receiver); },
+    });
+    expect(analysisOutputFailureReason(malformed)).toBe('unclassified');
   });
 
   it('uses only allowlisted synthetic catalog context after a stored ID match', () => {
@@ -200,7 +234,15 @@ describe('optional fixed-loopback Ollama provider', () => {
   it('classifies output contract failures without logging model output', async () => {
     const event = await expectFailureStage(vi.fn<typeof fetch>().mockResolvedValue(
       ollamaResponse({ ...validOutput, evidenceReferences: ['private-output-marker'] })), 'output_schema');
+    expect(event.schemaReason).toBe('invalid_evidence_references');
     expect(JSON.stringify(event)).not.toContain('private-output-marker');
+  });
+
+  it.each(schemaFailureCases)('logs only the fixed schema reason %s', async (schemaReason, output, privateMarker) => {
+    const event = await expectFailureStage(vi.fn<typeof fetch>().mockResolvedValue(ollamaResponse(output)),
+      'output_schema', { schemaReason });
+    expect(event).toMatchObject({ outcome: 'failure', failureStage: 'output_schema', schemaReason });
+    expect(JSON.stringify(event)).not.toContain(privateMarker);
   });
 
   it('classifies caller cancellation exactly once', async () => {
@@ -386,7 +428,8 @@ describe('optional fixed-loopback Ollama provider', () => {
     for (const marker of [privatePrompt, privateResponse, privateCompletion, 'authorization', 'password']) {
       expect(serialized).not.toContain(marker);
     }
-    expect(Object.keys(event).sort()).toEqual(['event', 'failureStage', 'latencyMs', 'outcome', 'provider', 'responseBytes'].sort());
+    expect(Object.keys(event).sort()).toEqual(['event', 'failureStage', 'latencyMs', 'outcome', 'provider', 'responseBytes', 'schemaReason'].sort());
+    expect(event.schemaReason).toBe('invalid_evidence_references');
   });
 
   it('never retries, rejects canceled calls, and enforces the concurrent inference bound', async () => {
