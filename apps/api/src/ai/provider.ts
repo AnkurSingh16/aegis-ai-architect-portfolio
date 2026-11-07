@@ -6,6 +6,15 @@ const maxResponseBytes = 8192;
 const maxPromptBytes = 4096;
 const allowedModel = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
+type FailureStage = 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
+  'response_envelope' | 'model_json_parse' | 'output_schema' | 'generation_timeout' |
+  'request_cancelled' | 'input_validation' | 'unknown';
+type FailureMetadata = { httpStatus?: number; responseBytes?: number };
+
+class ProviderFailure extends Error {
+  constructor(readonly stage: FailureStage, readonly metadata: FailureMetadata = {}) { super(); }
+}
+
 export class AnalysisUnavailableError extends Error {
   constructor() { super('AI analysis is unavailable. Check the local development provider and retry.'); }
 }
@@ -42,10 +51,13 @@ export function resolveOllamaConfig(env: NodeJS.ProcessEnv, nodeEnv = env.NODE_E
   return { model, timeoutMs, maxConcurrent };
 }
 
-async function readBoundedBody(response: Response): Promise<string> {
+async function readBoundedBody(response: Response): Promise<{ text: string; responseBytes: number }> {
   const declared = response.headers.get('content-length');
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > maxResponseBytes)) throw new AnalysisUnavailableError();
-  if (!response.body) throw new AnalysisUnavailableError();
+  if (declared !== null && !/^\d+$/.test(declared)) throw new ProviderFailure('response_envelope');
+  if (declared !== null && Number(declared) > maxResponseBytes) {
+    throw new ProviderFailure('response_size', { responseBytes: maxResponseBytes + 1 });
+  }
+  if (!response.body) throw new ProviderFailure('response_decode');
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -55,19 +67,35 @@ async function readBoundedBody(response: Response): Promise<string> {
       if (done) break;
       size += value.byteLength;
       if (size > maxResponseBytes) {
-        await reader.cancel();
-        throw new AnalysisUnavailableError();
+        try { await reader.cancel(); } catch { /* Preserve the bounded-size failure. */ }
+        throw new ProviderFailure('response_size', { responseBytes: maxResponseBytes + 1 });
       }
       chunks.push(value);
     }
+  } catch (error) {
+    if (error instanceof ProviderFailure) throw error;
+    throw new ProviderFailure('response_decode', { responseBytes: Math.min(size, maxResponseBytes + 1) });
   } finally { reader.releaseLock(); }
-  return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size));
+  try {
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size)), responseBytes: size };
+  } catch {
+    throw new ProviderFailure('response_decode', { responseBytes: size });
+  }
 }
 
 function optionalTokenCount(value: unknown): number | null {
   if (value === undefined) return null;
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new AnalysisUnavailableError();
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new ProviderFailure('response_envelope');
   return value as number;
+}
+
+function safeHttpStatus(value: number): number | undefined {
+  return Number.isSafeInteger(value) && value >= 100 && value <= 599 ? value : undefined;
+}
+
+function logSafely(log: (event: Record<string, string | number | null>) => void,
+  event: Record<string, string | number | null>): void {
+  try { log(event); } catch { /* Diagnostics must never change the analysis outcome. */ }
 }
 
 export function createOllamaProvider(config: OllamaConfig, options: {
@@ -85,37 +113,75 @@ export function createOllamaProvider(config: OllamaConfig, options: {
       active++;
       const started = now();
       const controller = new AbortController();
-      const cancel = () => controller.abort();
-      const timeout = setTimeout(cancel, config.timeoutMs);
+      let abortCause: 'generation_timeout' | 'request_cancelled' | undefined;
+      const abort = (cause: 'generation_timeout' | 'request_cancelled') => {
+        if (!controller.signal.aborted) {
+          abortCause = cause;
+          controller.abort();
+        }
+      };
+      const throwIfAborted = () => {
+        if (abortCause) throw new ProviderFailure(abortCause);
+      };
+      const cancel = () => abort('request_cancelled');
+      const timeout = setTimeout(() => abort('generation_timeout'), config.timeoutMs);
       signal.addEventListener('abort', cancel, { once: true });
       try {
-        if (signal.aborted) throw new AnalysisUnavailableError();
-        const prompt = buildAnalysisPrompt(stored);
-        if (Buffer.byteLength(prompt) > maxPromptBytes) throw new AnalysisUnavailableError();
-        const response = await fetchImpl(endpoint, {
-          method: 'POST', redirect: 'error', signal: controller.signal,
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ model: config.model, prompt, stream: false, format: 'json',
-            options: { temperature: 0.1, num_predict: 256 }, keep_alive: '5m' }),
-        });
-        if (!response.ok) throw new AnalysisUnavailableError();
-        const raw = await readBoundedBody(response);
+        if (signal.aborted) cancel();
+        if (abortCause) throw new ProviderFailure(abortCause);
+        let prompt: string;
+        try { prompt = buildAnalysisPrompt(stored); }
+        catch { throw new ProviderFailure('input_validation'); }
+        if (Buffer.byteLength(prompt) > maxPromptBytes) throw new ProviderFailure('input_validation');
+        let response: Response;
+        try {
+          response = await fetchImpl(endpoint, {
+            method: 'POST', redirect: 'error', signal: controller.signal,
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ model: config.model, prompt, stream: false, format: 'json',
+              options: { temperature: 0.1, num_predict: 256 }, keep_alive: '5m' }),
+          });
+        } catch {
+          if (abortCause) throw new ProviderFailure(abortCause);
+          throw new ProviderFailure('provider_connection');
+        }
+        throwIfAborted();
+        if (!response.ok) throw new ProviderFailure('provider_http', { httpStatus: safeHttpStatus(response.status) });
+        const body = await readBoundedBody(response);
+        throwIfAborted();
         let envelope: unknown;
-        try { envelope = JSON.parse(raw); } catch { throw new AnalysisUnavailableError(); }
-        if (typeof envelope !== 'object' || envelope === null || Array.isArray(envelope)) throw new AnalysisUnavailableError();
+        try { envelope = JSON.parse(body.text); }
+        catch { throw new ProviderFailure('response_envelope', { responseBytes: body.responseBytes }); }
+        if (typeof envelope !== 'object' || envelope === null || Array.isArray(envelope)) {
+          throw new ProviderFailure('response_envelope', { responseBytes: body.responseBytes });
+        }
         const result = envelope as Record<string, unknown>;
         if (result.done !== true || result.model !== config.model || typeof result.response !== 'string' ||
-            Buffer.byteLength(result.response) > 4096) throw new AnalysisUnavailableError();
+            Buffer.byteLength(result.response) > 4096) {
+          throw new ProviderFailure('response_envelope', { responseBytes: body.responseBytes });
+        }
         let modelJson: unknown;
-        try { modelJson = JSON.parse(result.response); } catch { throw new AnalysisUnavailableError(); }
-        const output = parseAnalysisOutput(modelJson);
+        try { modelJson = JSON.parse(result.response); }
+        catch { throw new ProviderFailure('model_json_parse', { responseBytes: body.responseBytes }); }
+        let output: ReturnType<typeof parseAnalysisOutput>;
+        try { output = parseAnalysisOutput(modelJson); }
+        catch { throw new ProviderFailure('output_schema', { responseBytes: body.responseBytes }); }
         const metrics = { latencyMs: Math.max(0, Math.round(now() - started)),
           promptTokens: optionalTokenCount(result.prompt_eval_count), generatedTokens: optionalTokenCount(result.eval_count) };
-        log({ event: 'ai_case_analysis', provider: 'ollama', model: config.model, outcome: 'success', ...metrics });
-        return createAnalysisResult(stored.id, output, config.model, metrics);
-      } catch {
-        if (!signal.aborted) log({ event: 'ai_case_analysis', provider: 'ollama', model: config.model,
-          outcome: 'failure', latencyMs: Math.max(0, Math.round(now() - started)), promptTokens: null, generatedTokens: null });
+        const analysis = createAnalysisResult(stored.id, output, config.model, metrics);
+        throwIfAborted();
+        logSafely(log, { event: 'ai_case_analysis', provider: 'ollama', model: config.model, outcome: 'success', ...metrics });
+        return analysis;
+      } catch (error) {
+        const failure = error instanceof ProviderFailure ? error : new ProviderFailure('unknown');
+        const failureStage = abortCause ?? failure.stage;
+        const event: Record<string, string | number | null> = {
+          event: 'ai_case_analysis', provider: 'ollama', outcome: 'failure', failureStage,
+          latencyMs: Math.max(0, Math.round(now() - started)),
+        };
+        if (failure.metadata.httpStatus !== undefined) event.httpStatus = failure.metadata.httpStatus;
+        if (failure.metadata.responseBytes !== undefined) event.responseBytes = failure.metadata.responseBytes;
+        logSafely(log, event);
         throw new AnalysisUnavailableError();
       } finally {
         clearTimeout(timeout);
