@@ -31,6 +31,32 @@ export type AnalysisResult = AnalysisModelOutput & {
 const disclaimer: AnalysisResult['disclaimer'] = 'Advisory analysis only. Evidence references identify case fields; they are not RAG citations or external source grounding.';
 const caseKeys = ['id', 'tenant_id', 'synthetic_case_id', 'status', 'created_at', 'updated_at'];
 
+/** @internal Fixed identifiers for sanitized provider diagnostics. */
+export const analysisOutputFailureReasons = [
+  'invalid_root', 'invalid_keys', 'invalid_category', 'invalid_priority', 'invalid_team', 'invalid_next_action',
+  'invalid_uncertainty', 'invalid_confidence', 'invalid_rationale', 'unsafe_rationale',
+  'invalid_evidence_references', 'invalid_human_review', 'unclassified',
+] as const;
+/** @internal */
+export type AnalysisOutputFailureReason = typeof analysisOutputFailureReasons[number];
+
+/** @internal Carries no model-provided values and preserves the existing generic error message. */
+export class AnalysisOutputValidationError extends Error {
+  constructor(readonly reason: Exclude<AnalysisOutputFailureReason, 'unclassified'>) {
+    super('Model output is invalid.');
+    this.name = 'AnalysisOutputValidationError';
+  }
+}
+
+/** @internal Converts any unexpected validator exception into a fixed, non-sensitive reason. */
+export function analysisOutputFailureReason(error: unknown): AnalysisOutputFailureReason {
+  try {
+    if (error instanceof AnalysisOutputValidationError &&
+        (analysisOutputFailureReasons as readonly string[]).includes(error.reason)) return error.reason;
+  } catch { /* Treat malformed error objects as unclassified. */ }
+  return 'unclassified';
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -71,20 +97,32 @@ export function buildAnalysisPrompt(stored: StoredCase): string {
 
 /** Strictly validates untrusted model JSON and rejects unknown keys, unsafe enums, and unsupported evidence. */
 export function parseAnalysisOutput(value: unknown): AnalysisModelOutput {
-  if (!isRecord(value)) throw new Error('Model output is invalid.');
+  if (!isRecord(value)) throw new AnalysisOutputValidationError('invalid_root');
   const keys = ['category', 'priority', 'recommendedTeam', 'rationale', 'nextAction', 'confidence', 'uncertainty', 'evidenceReferences', 'humanReviewRequired'];
-  if (Object.keys(value).length !== keys.length || !keys.every((key) => Object.hasOwn(value, key))) throw new Error('Model output is invalid.');
-  if (!categories.includes(value.category as typeof categories[number]) || !priorities.includes(value.priority as typeof priorities[number]) ||
-      !suggestedTeams.includes(value.recommendedTeam as typeof suggestedTeams[number]) ||
-      !recommendedActions.includes(value.nextAction as typeof recommendedActions[number]) ||
-      !uncertaintyLevels.includes(value.uncertainty as typeof uncertaintyLevels[number]) ||
-      typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1 ||
-      !boundedText(value.rationale, 700) || value.humanReviewRequired !== true ||
-      !Array.isArray(value.evidenceReferences) || value.evidenceReferences.length < 1 || value.evidenceReferences.length > evidenceFields.length ||
+  if (Object.keys(value).length !== keys.length || !keys.every((key) => Object.hasOwn(value, key))) {
+    throw new AnalysisOutputValidationError('invalid_keys');
+  }
+  if (!categories.includes(value.category as typeof categories[number])) throw new AnalysisOutputValidationError('invalid_category');
+  if (!priorities.includes(value.priority as typeof priorities[number])) throw new AnalysisOutputValidationError('invalid_priority');
+  if (!suggestedTeams.includes(value.recommendedTeam as typeof suggestedTeams[number])) throw new AnalysisOutputValidationError('invalid_team');
+  if (!recommendedActions.includes(value.nextAction as typeof recommendedActions[number])) {
+    throw new AnalysisOutputValidationError('invalid_next_action');
+  }
+  if (!uncertaintyLevels.includes(value.uncertainty as typeof uncertaintyLevels[number])) {
+    throw new AnalysisOutputValidationError('invalid_uncertainty');
+  }
+  if (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) {
+    throw new AnalysisOutputValidationError('invalid_confidence');
+  }
+  if (!boundedText(value.rationale, 700)) throw new AnalysisOutputValidationError('invalid_rationale');
+  if (value.humanReviewRequired !== true) throw new AnalysisOutputValidationError('invalid_human_review');
+  if (!Array.isArray(value.evidenceReferences) || value.evidenceReferences.length < 1 || value.evidenceReferences.length > evidenceFields.length ||
       !value.evidenceReferences.every((field) => evidenceFields.includes(field as typeof evidenceFields[number])) ||
-      new Set(value.evidenceReferences).size !== value.evidenceReferences.length) throw new Error('Model output is invalid.');
+      new Set(value.evidenceReferences).size !== value.evidenceReferences.length) {
+    throw new AnalysisOutputValidationError('invalid_evidence_references');
+  }
   if (/<\/?[a-z][^>]*>|https?:\/\/|\b(?:bearer|api[_ -]?key|password|secret)\b|\bignore (?:all )?(?:prior|previous|system)|\bignore human review|\bexecute\b|\bescalate\b|\bsend (?:a )?(?:customer )?message|\bchange (?:the )?case status|\breveal (?:the )?(?:system )?prompt\b/i
-    .test(value.rationale as string)) throw new Error('Model output is invalid.');
+    .test(value.rationale as string)) throw new AnalysisOutputValidationError('unsafe_rationale');
   return value as AnalysisModelOutput;
 }
 

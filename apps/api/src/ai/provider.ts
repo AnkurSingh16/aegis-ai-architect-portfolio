@@ -1,5 +1,6 @@
 import type { StoredCase } from '../storage/models.js';
-import { buildAnalysisPrompt, createAnalysisResult, parseAnalysisOutput, type AnalysisResult } from './analysis.js';
+import { analysisOutputFailureReason, buildAnalysisPrompt, createAnalysisResult, parseAnalysisOutput,
+  type AnalysisOutputFailureReason, type AnalysisResult } from './analysis.js';
 
 const endpoint = 'http://127.0.0.1:11434/api/generate';
 const maxResponseBytes = 8192;
@@ -9,7 +10,7 @@ const allowedModel = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 type FailureStage = 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
   'response_envelope' | 'model_json_parse' | 'output_schema' | 'generation_timeout' |
   'request_cancelled' | 'input_validation' | 'unknown';
-type FailureMetadata = { httpStatus?: number; responseBytes?: number };
+type FailureMetadata = { httpStatus?: number; responseBytes?: number; schemaReason?: AnalysisOutputFailureReason };
 
 class ProviderFailure extends Error {
   constructor(readonly stage: FailureStage, readonly metadata: FailureMetadata = {}) { super(); }
@@ -165,7 +166,11 @@ export function createOllamaProvider(config: OllamaConfig, options: {
         catch { throw new ProviderFailure('model_json_parse', { responseBytes: body.responseBytes }); }
         let output: ReturnType<typeof parseAnalysisOutput>;
         try { output = parseAnalysisOutput(modelJson); }
-        catch { throw new ProviderFailure('output_schema', { responseBytes: body.responseBytes }); }
+        catch (error) {
+          throw new ProviderFailure('output_schema', {
+            responseBytes: body.responseBytes, schemaReason: analysisOutputFailureReason(error),
+          });
+        }
         const metrics = { latencyMs: Math.max(0, Math.round(now() - started)),
           promptTokens: optionalTokenCount(result.prompt_eval_count), generatedTokens: optionalTokenCount(result.eval_count) };
         const analysis = createAnalysisResult(stored.id, output, config.model, metrics);
@@ -181,6 +186,7 @@ export function createOllamaProvider(config: OllamaConfig, options: {
         };
         if (failure.metadata.httpStatus !== undefined) event.httpStatus = failure.metadata.httpStatus;
         if (failure.metadata.responseBytes !== undefined) event.responseBytes = failure.metadata.responseBytes;
+        if (failureStage === 'output_schema') event.schemaReason = failure.metadata.schemaReason ?? 'unclassified';
         logSafely(log, event);
         throw new AnalysisUnavailableError();
       } finally {
