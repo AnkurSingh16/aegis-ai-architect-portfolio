@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { syntheticCases } from '../contracts/triage.js';
-import { analysisOutputFailureReason, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult,
+import { analysisOutputFailureReason, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult, evidenceFields,
   isAnalysisResult, parseAnalysisOutput, recommendedActions } from './analysis.js';
 import { createOllamaProvider, ollamaEndpointForTests, resolveOllamaConfig } from './provider.js';
 import type { StoredCase } from '../storage/models.js';
@@ -40,7 +40,7 @@ function ollamaTextResponse(text: string, extra: Record<string, unknown> = {}) {
 }
 type FailureLog = Record<string, string | number | null>;
 async function expectFailureStage(fetchImpl: typeof fetch, failureStage: string,
-  options: { signal?: AbortSignal; timeoutMs?: number; schemaReason?: string } = {}) {
+  options: { signal?: AbortSignal; timeoutMs?: number; schemaReason?: string; evidenceReason?: string } = {}) {
   const log = vi.fn<(event: FailureLog) => void>();
   await expect(createOllamaProvider({ model: 'synthetic-model:1b', timeoutMs: options.timeoutMs ?? 5000, maxConcurrent: 1 },
     { fetchImpl, log }).analyze(storedCase, options.signal ?? new AbortController().signal))
@@ -49,6 +49,7 @@ async function expectFailureStage(fetchImpl: typeof fetch, failureStage: string,
   const event = log.mock.calls[0]?.[0];
   expect(event).toMatchObject({ event: 'ai_case_analysis', provider: 'ollama', outcome: 'failure', failureStage });
   if (options.schemaReason !== undefined) expect(event?.schemaReason).toBe(options.schemaReason);
+  if (options.evidenceReason !== undefined) expect(event?.evidenceReason).toBe(options.evidenceReason);
   expect(event?.latencyMs).toEqual(expect.any(Number));
   return event as FailureLog;
 }
@@ -98,6 +99,65 @@ describe('AI case analysis output contract', () => {
     }
     expect(parseAnalysisOutput({ ...validOutput, evidenceReferences: ['synthetic_case_id', 'status', 'created_at', 'updated_at'] })
       .evidenceReferences).toHaveLength(4);
+  });
+
+  it.each([
+    ['not_array', { marker: 'private-object-evidence-value' }],
+    ['empty_array', []],
+    ['too_many_items', ['status', 'status', 'not-an-identifier', 'created_at', 'updated_at']],
+    ['invalid_identifier', ['private-identifier-marker', 'private-identifier-marker']],
+    ['invalid_identifier', [42]],
+    ['duplicate_identifier', ['status', 'status']],
+  ] as const)('classifies evidence rejection as %s without changing the generic error', (evidenceReason, evidenceReferences) => {
+    try {
+      parseAnalysisOutput({ ...validOutput, evidenceReferences });
+      throw new Error('Expected evidence references to be rejected.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AnalysisOutputValidationError);
+      expect(error).toMatchObject({ reason: 'invalid_evidence_references', evidenceReason, message: 'Model output is invalid.' });
+    }
+  });
+
+  it('keeps the existing evidence predicate precedence when multiple conditions fail', () => {
+    const tooManyAndInvalid = ['status', 'status', 'invalid-marker', 'created_at', 'updated_at'];
+    try {
+      parseAnalysisOutput({ ...validOutput, evidenceReferences: tooManyAndInvalid });
+      throw new Error('Expected too many references to be rejected.');
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'invalid_evidence_references', evidenceReason: 'too_many_items' });
+    }
+    const invalidAndDuplicate = ['invalid-marker', 'invalid-marker'];
+    try {
+      parseAnalysisOutput({ ...validOutput, evidenceReferences: invalidAndDuplicate });
+      throw new Error('Expected the invalid identifier to be rejected.');
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'invalid_evidence_references', evidenceReason: 'invalid_identifier' });
+    }
+  });
+
+  it('preserves the prior evidence acceptance predicate for representative JSON values', () => {
+    const candidates: unknown[] = [null, 'status', {}, [], ['private-id'], [42], ['status', 'status'],
+      ['status', 'created_at', 'updated_at', 'synthetic_case_id', 'status'], ['status'], [...evidenceFields]];
+    const acceptedByPriorPredicate = (references: unknown): boolean => Array.isArray(references) &&
+      references.length >= 1 && references.length <= evidenceFields.length &&
+      references.every((field) => evidenceFields.includes(field as typeof evidenceFields[number])) &&
+      new Set(references).size === references.length;
+    for (const evidenceReferences of candidates) {
+      let acceptedByCurrentValidator = true;
+      try { parseAnalysisOutput({ ...validOutput, evidenceReferences }); }
+      catch { acceptedByCurrentValidator = false; }
+      expect(acceptedByCurrentValidator).toBe(acceptedByPriorPredicate(evidenceReferences));
+    }
+  });
+
+  it('does not attach evidence reasons to unrelated validation failures', () => {
+    try {
+      parseAnalysisOutput({ ...validOutput, category: 'private-category-marker' });
+      throw new Error('Expected the category to be rejected.');
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'invalid_category', message: 'Model output is invalid.' });
+      expect(error).not.toHaveProperty('evidenceReason');
+    }
   });
 
   it.each(schemaFailureCases)('classifies schema failure as %s without changing the generic validation error', (reason, value) => {
@@ -197,6 +257,10 @@ describe('optional fixed-loopback Ollama provider', () => {
     expect(request.prompt).toContain(storedCase.synthetic_case_id);
     expect(request.prompt).not.toContain(storedCase.tenant_id);
     expect(result.metrics).toEqual({ latencyMs: 18, promptTokens: 20, generatedTokens: 35 });
+    expect(log).toHaveBeenCalledOnce();
+    expect(Object.keys(log.mock.calls[0]?.[0] ?? {}).sort()).toEqual([
+      'event', 'provider', 'model', 'outcome', 'latencyMs', 'promptTokens', 'generatedTokens',
+    ].sort());
     expect(JSON.stringify(log.mock.calls)).not.toContain(request.prompt);
   });
 
@@ -263,15 +327,37 @@ describe('optional fixed-loopback Ollama provider', () => {
 
   it('classifies output contract failures without logging model output', async () => {
     const event = await expectFailureStage(vi.fn<typeof fetch>().mockResolvedValue(
-      ollamaResponse({ ...validOutput, evidenceReferences: ['private-output-marker'] })), 'output_schema');
-    expect(event.schemaReason).toBe('invalid_evidence_references');
+      ollamaResponse({ ...validOutput, evidenceReferences: ['private-output-marker'] })), 'output_schema', {
+      schemaReason: 'invalid_evidence_references', evidenceReason: 'invalid_identifier',
+    });
     expect(JSON.stringify(event)).not.toContain('private-output-marker');
+  });
+
+  it.each([
+    ['not_array', { marker: 'private-object-marker' }],
+    ['empty_array', []],
+    ['too_many_items', ['status', 'status', 'private-excess-marker', 'created_at', 'updated_at']],
+    ['invalid_identifier', ['private-identifier-marker']],
+    ['invalid_identifier', [23]],
+    ['duplicate_identifier', ['status', 'status']],
+  ] as const)('logs only evidence reason %s and the unchanged broad schema reason', async (evidenceReason, evidenceReferences) => {
+    const marker = 'private-model-evidence-marker';
+    const response = ollamaResponse({ ...validOutput, evidenceReferences });
+    const event = await expectFailureStage(vi.fn<typeof fetch>().mockResolvedValue(response), 'output_schema', {
+      schemaReason: 'invalid_evidence_references', evidenceReason,
+    });
+    expect(Object.keys(event).sort()).toEqual([
+      'event', 'provider', 'outcome', 'failureStage', 'latencyMs', 'responseBytes', 'schemaReason', 'evidenceReason',
+    ].sort());
+    expect(JSON.stringify(event)).not.toContain(marker);
+    expect(JSON.stringify(event)).not.toContain('private-');
   });
 
   it.each(schemaFailureCases)('logs only the fixed schema reason %s', async (schemaReason, output, privateMarker) => {
     const event = await expectFailureStage(vi.fn<typeof fetch>().mockResolvedValue(ollamaResponse(output)),
       'output_schema', { schemaReason });
     expect(event).toMatchObject({ outcome: 'failure', failureStage: 'output_schema', schemaReason });
+    if (schemaReason !== 'invalid_evidence_references') expect(event).not.toHaveProperty('evidenceReason');
     expect(JSON.stringify(event)).not.toContain(privateMarker);
   });
 
@@ -458,7 +544,7 @@ describe('optional fixed-loopback Ollama provider', () => {
     for (const marker of [privatePrompt, privateResponse, privateCompletion, 'authorization', 'password']) {
       expect(serialized).not.toContain(marker);
     }
-    expect(Object.keys(event).sort()).toEqual(['event', 'failureStage', 'latencyMs', 'outcome', 'provider', 'responseBytes', 'schemaReason'].sort());
+    expect(Object.keys(event).sort()).toEqual(['event', 'failureStage', 'latencyMs', 'outcome', 'provider', 'responseBytes', 'schemaReason', 'evidenceReason'].sort());
     expect(event.schemaReason).toBe('invalid_evidence_references');
   });
 
