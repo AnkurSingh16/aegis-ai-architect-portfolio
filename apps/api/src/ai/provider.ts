@@ -1,6 +1,6 @@
 import type { StoredCase } from '../storage/models.js';
-import { analysisOutputFailureReason, buildAnalysisPrompt, createAnalysisResult, parseAnalysisOutput,
-  type AnalysisOutputFailureReason, type AnalysisResult } from './analysis.js';
+import { analysisOutputFailureReason, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult, parseAnalysisOutput,
+  type AnalysisOutputFailureReason, type AnalysisResult, type EvidenceReferenceFailureReason } from './analysis.js';
 
 const endpoint = 'http://127.0.0.1:11434/api/generate';
 const maxResponseBytes = 8192;
@@ -10,7 +10,8 @@ const allowedModel = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 type FailureStage = 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
   'response_envelope' | 'model_json_parse' | 'output_schema' | 'generation_timeout' |
   'request_cancelled' | 'input_validation' | 'unknown';
-type FailureMetadata = { httpStatus?: number; responseBytes?: number; schemaReason?: AnalysisOutputFailureReason };
+type FailureMetadata = { httpStatus?: number; responseBytes?: number; schemaReason?: AnalysisOutputFailureReason;
+  evidenceReason?: EvidenceReferenceFailureReason };
 
 class ProviderFailure extends Error {
   constructor(readonly stage: FailureStage, readonly metadata: FailureMetadata = {}) { super(); }
@@ -167,8 +168,15 @@ export function createOllamaProvider(config: OllamaConfig, options: {
         let output: ReturnType<typeof parseAnalysisOutput>;
         try { output = parseAnalysisOutput(modelJson); }
         catch (error) {
+          let evidenceReason: EvidenceReferenceFailureReason | undefined;
+          try {
+            if (error instanceof AnalysisOutputValidationError && error.reason === 'invalid_evidence_references') {
+              evidenceReason = error.evidenceReason;
+            }
+          } catch { /* Omit malformed diagnostic metadata and preserve the generic schema failure. */ }
           throw new ProviderFailure('output_schema', {
             responseBytes: body.responseBytes, schemaReason: analysisOutputFailureReason(error),
+            ...(evidenceReason === undefined ? {} : { evidenceReason }),
           });
         }
         const metrics = { latencyMs: Math.max(0, Math.round(now() - started)),
@@ -186,7 +194,12 @@ export function createOllamaProvider(config: OllamaConfig, options: {
         };
         if (failure.metadata.httpStatus !== undefined) event.httpStatus = failure.metadata.httpStatus;
         if (failure.metadata.responseBytes !== undefined) event.responseBytes = failure.metadata.responseBytes;
-        if (failureStage === 'output_schema') event.schemaReason = failure.metadata.schemaReason ?? 'unclassified';
+        if (failureStage === 'output_schema') {
+          event.schemaReason = failure.metadata.schemaReason ?? 'unclassified';
+          if (failure.metadata.schemaReason === 'invalid_evidence_references' && failure.metadata.evidenceReason !== undefined) {
+            event.evidenceReason = failure.metadata.evidenceReason;
+          }
+        }
         logSafely(log, event);
         throw new AnalysisUnavailableError();
       } finally {

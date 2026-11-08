@@ -39,12 +39,20 @@ export const analysisOutputFailureReasons = [
 ] as const;
 /** @internal */
 export type AnalysisOutputFailureReason = typeof analysisOutputFailureReasons[number];
+/** @internal Fixed, non-sensitive diagnostic reasons for evidence-reference rejection. */
+export type EvidenceReferenceFailureReason = 'not_array' | 'empty_array' | 'too_many_items' | 'invalid_identifier' | 'duplicate_identifier';
 
 /** @internal Carries no model-provided values and preserves the existing generic error message. */
 export class AnalysisOutputValidationError extends Error {
-  constructor(readonly reason: Exclude<AnalysisOutputFailureReason, 'unclassified'>) {
+  readonly reason: Exclude<AnalysisOutputFailureReason, 'unclassified'>;
+  declare readonly evidenceReason?: EvidenceReferenceFailureReason;
+  constructor(reason: 'invalid_evidence_references', evidenceReason: EvidenceReferenceFailureReason);
+  constructor(reason: Exclude<AnalysisOutputFailureReason, 'unclassified' | 'invalid_evidence_references'>);
+  constructor(reason: Exclude<AnalysisOutputFailureReason, 'unclassified'>, evidenceReason?: EvidenceReferenceFailureReason) {
     super('Model output is invalid.');
     this.name = 'AnalysisOutputValidationError';
+    this.reason = reason;
+    if (reason === 'invalid_evidence_references' && evidenceReason !== undefined) this.evidenceReason = evidenceReason;
   }
 }
 
@@ -116,10 +124,20 @@ export function parseAnalysisOutput(value: unknown): AnalysisModelOutput {
   }
   if (!boundedText(value.rationale, 700)) throw new AnalysisOutputValidationError('invalid_rationale');
   if (value.humanReviewRequired !== true) throw new AnalysisOutputValidationError('invalid_human_review');
-  if (!Array.isArray(value.evidenceReferences) || value.evidenceReferences.length < 1 || value.evidenceReferences.length > evidenceFields.length ||
-      !value.evidenceReferences.every((field) => evidenceFields.includes(field as typeof evidenceFields[number])) ||
-      new Set(value.evidenceReferences).size !== value.evidenceReferences.length) {
-    throw new AnalysisOutputValidationError('invalid_evidence_references');
+  if (!Array.isArray(value.evidenceReferences)) {
+    throw new AnalysisOutputValidationError('invalid_evidence_references', 'not_array');
+  }
+  if (value.evidenceReferences.length < 1) {
+    throw new AnalysisOutputValidationError('invalid_evidence_references', 'empty_array');
+  }
+  if (value.evidenceReferences.length > evidenceFields.length) {
+    throw new AnalysisOutputValidationError('invalid_evidence_references', 'too_many_items');
+  }
+  if (!value.evidenceReferences.every((field) => evidenceFields.includes(field as typeof evidenceFields[number]))) {
+    throw new AnalysisOutputValidationError('invalid_evidence_references', 'invalid_identifier');
+  }
+  if (new Set(value.evidenceReferences).size !== value.evidenceReferences.length) {
+    throw new AnalysisOutputValidationError('invalid_evidence_references', 'duplicate_identifier');
   }
   if (/<\/?[a-z][^>]*>|https?:\/\/|\b(?:bearer|api[_ -]?key|password|secret)\b|\bignore (?:all )?(?:prior|previous|system)|\bignore human review|\bexecute\b|\bescalate\b|\bsend (?:a )?(?:customer )?message|\bchange (?:the )?case status|\breveal (?:the )?(?:system )?prompt\b/i
     .test(value.rationale as string)) throw new AnalysisOutputValidationError('unsafe_rationale');
