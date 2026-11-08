@@ -40,12 +40,6 @@ jobs:
         with:
           terraform_version: 1.9.8
           terraform_wrapper: false
-      - name: Validate Auth0 Terraform (no credentials)
-        working-directory: infra/terraform/auth0
-        run: |
-          terraform fmt -check -recursive
-          terraform init -backend=false -input=false -no-color
-          terraform validate -no-color
       - name: Lint
         run: npm run lint
       - name: Typecheck
@@ -58,6 +52,15 @@ jobs:
         run: npm run build
       - name: Check whitespace errors
         run: git diff --check
+      - name: Validate Auth0 Terraform (no credentials)
+        working-directory: infra/terraform/auth0
+        env:
+          TF_REGISTRY_CLIENT_TIMEOUT: "45"
+          TF_REGISTRY_DISCOVERY_RETRY: "2"
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false -no-color
+          terraform validate -no-color
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7
