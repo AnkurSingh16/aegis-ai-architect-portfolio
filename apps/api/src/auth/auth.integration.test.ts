@@ -95,7 +95,9 @@ describe('authenticated HTTP with real PostgreSQL membership authorization', () 
     expect(authorized.json()).toMatchObject({ caseId: northId, humanReviewRequired: true,
       execution: { provider: 'ollama', mode: 'local-model' } });
     expect(analysisProvider.analyze).toHaveBeenCalledOnce();
-    expect(analysisProvider.analyze).toHaveBeenCalledWith(expect.objectContaining({ id: northId, tenant_id: north.tenantId }), expect.any(AbortSignal));
+    expect(analysisProvider.analyze).toHaveBeenCalledWith(expect.objectContaining({ id: northId, tenant_id: north.tenantId }),
+      expect.any(AbortSignal), expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/));
+    expect(authorized.headers['x-aegis-correlation-id']).toBe(vi.mocked(analysisProvider.analyze).mock.calls[0]?.[2]);
 
     vi.mocked(analysisProvider.analyze).mockClear();
     expect((await app.inject({ method: 'POST', url: endpoint(north.tenantId, northId) })).statusCode).toBe(401);
