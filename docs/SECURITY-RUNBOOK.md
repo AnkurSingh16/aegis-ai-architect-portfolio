@@ -31,6 +31,18 @@ The fixed Vite origin is `http://127.0.0.1:5173`; its `/api` proxy targets the l
 
 Run `npm run lint`, `npm run typecheck`, `npm run test:coverage`, `npm run build`, and `npm run test:integration -w apps/api` against the dedicated local `aegis_test` database. Tests use local generated RSA keys/JWKS and synthetic data; they do not contact Auth0. Runtime failures return stable messages and structured request identifiers without token contents, subjects, connection strings or raw SQL errors. If a test shows cross-tenant access, missing-context access, unexpected membership writes, or a leaked credential, stop the local API, preserve sanitized logs, and investigate the migration, runtime role and RLS before continuing.
 
+## Tenant-owned document storage foundation (Milestone 4.1)
+
+Migration `003_tenant_documents.sql` adds `aegis.documents` and `aegis.document_chunks`. Document identity is tenant-scoped and versioned by stable synthetic source identity plus a positive version number. A new version is a new document row; chunks reference the exact tenant, opaque document UUID, document version, and source identity. Chunk order is unique within that version. Foreign keys enforce tenant, version, and provenance linkage in PostgreSQL.
+
+The document record bounds owner/provenance/revision fields and JSON metadata; its source SHA-256 must have the expected lowercase hexadecimal form. Because the source document bytes are not stored, this schema does not prove that digest matches the source or that the owner claim is true. A future trusted synthetic-catalog ingestion process must validate provenance and compute the digest. Chunk text is capped at 8 KiB and PostgreSQL verifies its SHA-256 over UTF-8 bytes. No HTTP upload or ingestion path exists.
+
+Both tables have RLS enabled and forced. Runtime SELECT requires `aegis.access_mode='authenticated'`, the matching transaction-local tenant, and a membership row for the transaction-local issuer and subject. The membership table's own RLS policy restricts that lookup to the verified principal context. Missing or mismatched principal, tenant context, or membership returns no rows. The `aegis_app` role has SELECT only on documents and chunks; it cannot INSERT, UPDATE, DELETE, or TRUNCATE them. Database administration and integration-fixture setup remain separate from the runtime role.
+
+The migration runner applies migrations transactionally and verifies recorded SHA-256 checksums. Integration tests refuse non-loopback or non-`aegis_test` admin/runtime connection targets before fixture setup. This PR does not migrate `aegis_local`. A failed transactional migration is rolled back; do not edit migration 003 after it is recorded or perform an ad hoc schema rollback. Any rollback of a database where document data exists requires a separately reviewed, additive recovery plan and explicit approval. The runtime safety check now requires the six expected tables to have forced RLS and non-runtime ownership, validates intended grants, and fails closed for extra tables in the `aegis` schema.
+
+Storage does not implement ingestion, retrieval, full-text search, embeddings, model calls, or HTTP endpoints. Those require subsequent reviews and tests; only synthetic source-controlled records are allowed for the initial corpus.
+
 ## Auth0 Terraform credential and state handling
 
 - Create `.env.auth0` only with `node scripts/setup-auth0-env.mjs` in an interactive terminal. It contains the provisioner Management API client secret, is separate from PostgreSQL root `.env`, ignored by Git, created exclusively with mode `0600`, and must never be printed or pasted into a ticket or chat.

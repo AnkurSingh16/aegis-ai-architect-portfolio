@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed for Milestone 4; no retrieval or document-management implementation is authorized by this ADR.
+Proposed for Milestone 4. The first storage-only slice is under review; no retrieval, ingestion, inference, or HTTP document-management behavior is included.
 
 ## Context
 
@@ -51,6 +51,18 @@ Milestone 4 may be considered complete only when all of the following are demons
 6. Add local-only provider orchestration after the transaction closes, retaining current provider safety controls.
 7. Add deterministic retrieval/groundedness contract tests and separately approved local evaluation.
 8. Review operational metrics, resource cost, failure recovery, and documentation before considering any wider dataset or provider.
+
+## Milestone 4.1 storage foundation
+
+The first independently reviewable slice adds only `aegis.documents` and `aegis.document_chunks` through a new additive, checksummed migration. A document version is identified by `(tenant_id, source_identity, version)`; a new version is a new row, and chunks bind to the exact tenant, document ID, version, and source identity with a composite foreign key. Chunk positions are unique within a document version. Opaque UUIDs are storage identifiers, not authorization credentials.
+
+Document rows carry bounded source-owner, fixed synthetic-catalog provenance, revision, metadata, and a lowercase SHA-256 source-content digest. Chunk content is bounded to 8 KiB and its SHA-256 is checked in PostgreSQL against the stored UTF-8 bytes. The document digest is shape-checked only because the original document bytes are not stored in this slice; future trusted ingestion must compute and verify it against the source bytes. Provenance columns describe administrator-supplied claims and do not independently prove ownership.
+
+Both tables use enabled and forced RLS. Runtime SELECT policies require authenticated access mode, the matching transaction-local tenant, and the matching principal membership visible through the existing membership RLS policy. Fixture mode, missing/mismatched identity, and missing tenant context return no rows. `aegis_app` receives SELECT only on these tables; ingestion remains unavailable to the application role and outside this slice. No HTTP upload, document mutation, retrieval, vector index, or model call is introduced.
+
+Migration 003 is applied transactionally by the existing migration runner, whose recorded checksum remains authoritative. Integration setup must validate both administrator and runtime connection targets as loopback `aegis_test` before fixture writes. This PR does not apply the migration to `aegis_local`. A failed migration transaction rolls back; schema rollback or removal of populated rows requires a separate reviewed migration and approval, not an automatic `DROP`.
+
+The runtime-role verifier requires the six expected application tables, RLS enabled and forced, non-runtime ownership, expected SELECT privileges, and no document/chunk DML. It fails closed if an unexpected table appears in the application schema. The storage integration suite uses synthetic records inserted through its isolated administrator connection and checks cross-tenant reads, principal/tenant context, version/provenance foreign keys, integrity bounds, runtime privileges, migration replay, transaction snapshots, connection reuse, and concurrent tenant isolation.
 
 ## Risks and mitigations
 
