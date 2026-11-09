@@ -21,6 +21,31 @@ export type AnalysisModelOutput = {
   evidenceReferences: Array<typeof evidenceFields[number]>;
   humanReviewRequired: true;
 };
+
+/** Fixed Ollama generation constraint; parseAnalysisOutput remains authoritative. */
+export const analysisOutputJsonSchema = {
+  type: 'object',
+  required: [
+    'category', 'priority', 'recommendedTeam', 'rationale', 'nextAction',
+    'confidence', 'uncertainty', 'evidenceReferences', 'humanReviewRequired',
+  ],
+  additionalProperties: false,
+  properties: {
+    category: { type: 'string', enum: categories },
+    priority: { type: 'string', enum: priorities },
+    recommendedTeam: { type: 'string', enum: suggestedTeams },
+    rationale: { type: 'string', minLength: 1, maxLength: 700 },
+    nextAction: { type: 'string', enum: recommendedActions },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    uncertainty: { type: 'string', enum: uncertaintyLevels },
+    evidenceReferences: {
+      type: 'array', minItems: 1, maxItems: evidenceFields.length,
+      items: { type: 'string', enum: evidenceFields },
+    },
+    humanReviewRequired: { type: 'boolean', enum: [true] },
+  },
+} as const;
+
 export type AnalysisResult = AnalysisModelOutput & {
   caseId: string;
   execution: { provider: 'ollama'; model: string; mode: 'local-model' };
