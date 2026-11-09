@@ -57,6 +57,8 @@ See [ADR 006](adr/006-local-ai-case-intelligence.md), the [README local inferenc
 - The optional local evaluation runner uses only the existing bounded Ollama provider and in-memory synthetic `StoredCase` values. It has six statically declared sequential slots (two per case type), no retry or replacement path, sanitized one-time reporting, and no database or authenticated HTTP access. Ordinary tests and CI remain provider-mocked and offline.
 - Reliability work is limited to defects demonstrated by the evaluation; existing Auth0, membership, forced RLS, request correlation, schema validation and human-review boundaries remain authoritative.
 
+**Execution status (2026-11-09):** The deterministic dataset, scorer, private report handling and offline tests are implemented. The authorized local evaluation made **0/6 generation attempts**: its first preflight exposed a harness defect because the lsof invocation omitted the TCP-state field that the parser expected. The state-aware preflight correction is covered by synthetic tests. No model output or evaluation report was created. Per the evaluation authorization boundary, running the fixed harness requires separate approval; therefore live model quality remains **not measured** and Milestone 3B.16 is **blocked** pending that approval.
+
 See [ADR 007](adr/007-tenant-scoped-grounded-case-intelligence.md) for the proposed Milestone 4 architecture. Milestone 4 is design-only until its entry criteria and a separate implementation approval are met.
 
 ## Milestone 4 — tenant-scoped, evidence-grounded case intelligence (proposed)

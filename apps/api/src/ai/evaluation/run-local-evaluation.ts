@@ -7,6 +7,7 @@ import { stdin, stdout } from 'node:process';
 import { analysisOutputJsonSchema, parseAnalysisOutput } from '../analysis.js';
 import { createOllamaProvider, resolveOllamaConfig } from '../provider.js';
 import { evaluationDatasetVersion, evaluationLabelStatus, plannedEvaluationSlotCount, plannedEvaluationSlots } from './dataset.js';
+import { assertSafeOllamaTcpRecords, parseOllamaTcpRecords } from './ollama-socket-preflight.js';
 import { reservePrivateReport, writePrivateReport } from './private-report.js';
 import { runPlannedEvaluation, type AttemptRecord } from './runner.js';
 
@@ -51,34 +52,8 @@ function assertSourceIdentity(): string {
 }
 
 function assertLsofAvailableAndIdle(): void {
-  const output = commandOutput('/usr/sbin/lsof', ['-nP', '-Fpcn', '-iTCP:11434']);
-  const records: Array<{ pid: number; command: string; name: string }> = [];
-  let pid = 0;
-  let command = '';
-  for (const line of output.split('\n')) {
-    if (line.startsWith('p')) pid = Number(line.slice(1));
-    else if (line.startsWith('c')) command = line.slice(1);
-    else if (line.startsWith('n')) records.push({ pid, command, name: line.slice(1) });
-  }
-  const listeners = records.filter((item) => item.name.endsWith('(LISTEN)'));
-  if (!listeners.some((item) => /^127\.0\.0\.1:11434 \(LISTEN\)$/.test(item.name)) ||
-      listeners.some((item) => !/^127\.0\.0\.1:11434 \(LISTEN\)$/.test(item.name))) {
-    throw new Error('Ollama is not bound exclusively to the approved loopback endpoint.');
-  }
-  const established = records.filter((item) => item.name.endsWith('(ESTABLISHED)'));
-  const ownClientEndpoints = new Set(established.filter((item) => item.pid === process.pid &&
-    /->127\.0\.0\.1:11434 \(ESTABLISHED\)$/.test(item.name)).map((item) => item.name.replace(/ \(ESTABLISHED\)$/, '')));
-  for (const item of established) {
-    const name = item.name.replace(/ \(ESTABLISHED\)$/, '');
-    const isOllamaServerSide = /^127\.0\.0\.1:11434->127\.0\.0\.1:\d+$/.test(name);
-    const isClientSide = /->127\.0\.0\.1:11434$/.test(name);
-    if (isClientSide && item.pid !== process.pid) throw new Error('Another Ollama client is connected; concurrent generation cannot be ruled out.');
-    if (isOllamaServerSide) {
-      const remotePort = name.match(/->127\.0\.0\.1:(\d+)$/)?.[1];
-      const matchingOwn = remotePort !== undefined && ownClientEndpoints.has(`127.0.0.1:${remotePort}->127.0.0.1:11434`);
-      if (!matchingOwn || item.command !== 'ollama') throw new Error('Another Ollama client is connected; concurrent generation cannot be ruled out.');
-    }
-  }
+  const output = commandOutput('/usr/sbin/lsof', ['-nP', '-FpcnT', '-iTCP:11434']);
+  assertSafeOllamaTcpRecords(parseOllamaTcpRecords(output), process.pid);
 }
 
 async function getLocalJson(path: '/api/tags' | '/api/ps'): Promise<unknown> {
