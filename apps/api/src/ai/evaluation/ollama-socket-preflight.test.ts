@@ -27,7 +27,7 @@ describe('Ollama socket preflight', () => {
   it('fails closed on malformed process and TCP state metadata', () => {
     expect(() => assertSafeOllamaTcpRecords([{ pid: Number.NaN, command: 'ollama', name: '127.0.0.1:11434', state: 'LISTEN' }], 100))
       .toThrow('Ollama TCP socket metadata is incomplete or unsupported.');
-    expect(() => assertSafeOllamaTcpRecords([{ pid: 1, command: 'ollama', name: '127.0.0.1:11434', state: 'CLOSE_WAIT' }], 100))
+    expect(() => assertSafeOllamaTcpRecords([{ pid: 1, command: 'ollama', name: '127.0.0.1:11434', state: 'UNKNOWN' }], 100))
       .toThrow('Ollama TCP socket metadata is incomplete or unsupported.');
   });
 
@@ -78,5 +78,26 @@ describe('Ollama socket preflight', () => {
       { pid: 44786, command: 'ollama', name: '127.0.0.1:11434->127.0.0.1:50000', state: 'ESTABLISHED' },
     ];
     expect(() => assertSafeOllamaTcpRecords(records, 100)).not.toThrow();
+  });
+
+  it('allows the current harness loopback health socket after its HTTP request closes', () => {
+    const records = [
+      { pid: 44786, command: 'ollama', name: '127.0.0.1:11434', state: 'LISTEN' },
+      { pid: 100, command: 'node', name: '127.0.0.1:50000->127.0.0.1:11434', state: 'CLOSE_WAIT' },
+    ];
+    expect(() => assertSafeOllamaTcpRecords(records, 100)).not.toThrow();
+  });
+
+  it('rejects a closing Ollama socket owned by another client or with an unknown endpoint', () => {
+    const foreign = [
+      { pid: 44786, command: 'ollama', name: '127.0.0.1:11434', state: 'LISTEN' },
+      { pid: 300, command: 'browser', name: '127.0.0.1:50000->127.0.0.1:11434', state: 'CLOSE_WAIT' },
+    ];
+    const malformed = [
+      { pid: 44786, command: 'ollama', name: '127.0.0.1:11434', state: 'LISTEN' },
+      { pid: 100, command: 'node', name: 'unexpected', state: 'CLOSE_WAIT' },
+    ];
+    expect(() => assertSafeOllamaTcpRecords(foreign, 100)).toThrow('Another Ollama client is connected; concurrent generation cannot be ruled out.');
+    expect(() => assertSafeOllamaTcpRecords(malformed, 100)).toThrow('Another Ollama client is connected; concurrent generation cannot be ruled out.');
   });
 });

@@ -58,7 +58,7 @@ export function parseOllamaTcpRecords(output: string): OllamaTcpRecord[] {
 /** Fail closed unless Ollama is loopback-only and no other client is connected. */
 export function assertSafeOllamaTcpRecords(records: readonly OllamaTcpRecord[], currentPid: number): void {
   if (records.length === 0 || records.some((record) => !Number.isSafeInteger(record.pid) || record.pid <= 0 ||
-      record.command.length === 0 || record.name.length === 0 || !['LISTEN', 'ESTABLISHED'].includes(record.state ?? ''))) {
+      record.command.length === 0 || record.name.length === 0 || !['LISTEN', 'ESTABLISHED', 'CLOSE_WAIT'].includes(record.state ?? ''))) {
     throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
   }
   const listeners = records.filter((record) => record.state === 'LISTEN');
@@ -75,6 +75,11 @@ export function assertSafeOllamaTcpRecords(records: readonly OllamaTcpRecord[], 
     const port = name.match(/^127\.0\.0\.1:11434->127\.0\.0\.1:(\d+)$/)?.[1];
     return port !== undefined && Number(port) >= 1 && Number(port) <= 65535 ? port : undefined;
   };
+  for (const record of records.filter((candidate) => candidate.state === 'CLOSE_WAIT')) {
+    if (record.pid !== currentPid || clientPort(record.name) === undefined) {
+      throw new Error('Another Ollama client is connected; concurrent generation cannot be ruled out.');
+    }
+  }
   const ownClientEndpoints = new Set(established.filter((record) => record.pid === currentPid && clientPort(record.name) !== undefined)
     .map((record) => record.name));
   for (const record of established) {
