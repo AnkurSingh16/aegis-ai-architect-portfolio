@@ -23,8 +23,13 @@ export class AnalysisUnavailableError extends Error {
 export class AnalysisDisabledError extends Error {
   constructor() { super('AI analysis is disabled for this development server.'); }
 }
-export interface AnalysisProvider { analyze(stored: StoredCase, signal: AbortSignal): Promise<AnalysisResult> }
+export interface AnalysisProvider { analyze(stored: StoredCase, signal: AbortSignal, correlationId?: string): Promise<AnalysisResult> }
 export interface OllamaConfig { model: string; timeoutMs: number; maxConcurrent: number }
+
+const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function safeCorrelationId(value: unknown): string | undefined {
+  return typeof value === 'string' && canonicalUuid.test(value) ? value : undefined;
+}
 
 function proxyModeEnabled(env: NodeJS.ProcessEnv, execArgs: readonly string[]): boolean {
   const proxyVariables = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
@@ -110,9 +115,10 @@ export function createOllamaProvider(config: OllamaConfig, options: {
   const now = options.now ?? Date.now;
   const log = options.log ?? ((event) => console.info(JSON.stringify(event)));
   return {
-    async analyze(stored, signal) {
+    async analyze(stored, signal, correlationId) {
       if (active >= config.maxConcurrent) throw new AnalysisUnavailableError();
       active++;
+      const safeId = safeCorrelationId(correlationId);
       const started = now();
       const controller = new AbortController();
       let abortCause: 'generation_timeout' | 'request_cancelled' | undefined;
@@ -183,7 +189,8 @@ export function createOllamaProvider(config: OllamaConfig, options: {
           promptTokens: optionalTokenCount(result.prompt_eval_count), generatedTokens: optionalTokenCount(result.eval_count) };
         const analysis = createAnalysisResult(stored.id, output, config.model, metrics);
         throwIfAborted();
-        logSafely(log, { event: 'ai_case_analysis', provider: 'ollama', model: config.model, outcome: 'success', ...metrics });
+        logSafely(log, { event: 'ai_case_analysis', provider: 'ollama', model: config.model, outcome: 'success', ...metrics,
+          ...(safeId === undefined ? {} : { correlationId: safeId }) });
         return analysis;
       } catch (error) {
         const failure = error instanceof ProviderFailure ? error : new ProviderFailure('unknown');
@@ -191,6 +198,7 @@ export function createOllamaProvider(config: OllamaConfig, options: {
         const event: Record<string, string | number | null> = {
           event: 'ai_case_analysis', provider: 'ollama', outcome: 'failure', failureStage,
           latencyMs: Math.max(0, Math.round(now() - started)),
+          ...(safeId === undefined ? {} : { correlationId: safeId }),
         };
         if (failure.metadata.httpStatus !== undefined) event.httpStatus = failure.metadata.httpStatus;
         if (failure.metadata.responseBytes !== undefined) event.responseBytes = failure.metadata.responseBytes;

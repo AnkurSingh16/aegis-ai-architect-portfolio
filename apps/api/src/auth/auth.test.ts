@@ -13,6 +13,7 @@ const issuer = 'https://synthetic.auth0.example/';
 const audience = 'https://aegis.synthetic.example/api';
 const tenant = '10000000-0000-4000-8000-000000000001';
 const id = '12345678-1234-4234-8234-123456789abc';
+const correlationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const config = { issuer, audience, databaseUrl: 'postgres://localhost/aegis_test' };
 let keys: Awaited<ReturnType<typeof generateKeyPair>>;
 let otherKeys: Awaited<ReturnType<typeof generateKeyPair>>;
@@ -224,6 +225,15 @@ describe('protected HTTP routes', () => {
     expect((await app.inject('/api/health')).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/demo/triage', payload: { caseId: 'SYNTHETIC-LOGIN-001' } })).statusCode).toBe(200);
   });
+  it('does not expose a correlation header on unrelated or unauthenticated requests', async () => {
+    const app = appFor(fakePool().pool);
+    const health = await app.inject({ method: 'GET', url: '/api/health' });
+    const unauthenticated = await app.inject({ method: 'POST', url: `/api/tenants/${tenant}/cases/${id}/ai-analysis`,
+      headers: { 'x-request-id': 'caller-controlled-request-id', 'x-aegis-correlation-id': 'caller-controlled-correlation-id' } });
+    expect(health.headers['x-aegis-correlation-id']).toBeUndefined();
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.headers['x-aegis-correlation-id']).toBeUndefined();
+  });
   it('supports scoped list, read, synthetic create and status update', async () => {
     const { pool } = fakePool(); const app = appFor(pool); const authorization = await bearer();
     for (const request of [
@@ -234,6 +244,7 @@ describe('protected HTTP routes', () => {
     ]) {
       const reply = await app.inject({ ...request, headers: { authorization } });
       expect(reply.statusCode).toBe(request.method === 'POST' ? 201 : 200);
+      expect(reply.headers['x-aegis-correlation-id']).toBeUndefined();
     }
   });
   it('intersects token permissions with reader membership and does not accept claim role elevation', async () => {
@@ -279,30 +290,84 @@ describe('authenticated AI case analysis boundary', () => {
 
   it('analyzes only a stored case after the authorized transaction has committed and released', async () => {
     const fixture = fakePool();
-    const analyze = vi.fn(async (stored, signal) => {
+    const observedIds: string[] = [];
+    const analyze = vi.fn(async (stored, signal, correlationId) => {
       expect(fixture.release).toHaveBeenCalledWith(false);
       expect(stored.synthetic_case_id).toBe('SYNTHETIC-LOGIN-001');
       expect(signal.aborted).toBe(false);
+      observedIds.push(correlationId);
       return analysisResult;
     });
     const reply = await appFor(fixture.pool, { analyze }).inject({ method: 'POST', url: analysisPath, headers: { authorization: await bearer() } });
     expect(reply.statusCode).toBe(200);
     expect(reply.json()).toEqual(analysisResult);
+    expect(reply.headers['x-aegis-correlation-id']).toMatch(correlationIdPattern);
+    expect(reply.json()).not.toHaveProperty('correlationId');
+    expect(observedIds).toEqual([reply.headers['x-aegis-correlation-id']]);
     expect(analyze).toHaveBeenCalledOnce();
     expect(fixture.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it('ignores caller-supplied request IDs, emits distinct server IDs, and preserves the error header', async () => {
+    const authorization = await bearer();
+    const analyze = vi.fn(async (stored: Parameters<AnalysisProvider['analyze']>[0], signal: AbortSignal, correlationId?: string) => {
+      expect(stored.synthetic_case_id).toBe('SYNTHETIC-LOGIN-001');
+      expect(signal.aborted).toBe(false);
+      expect(correlationId).toMatch(correlationIdPattern);
+      return analysisResult;
+    });
+    const app = appFor(fakePool().pool, { analyze });
+    const headers = { authorization, 'x-request-id': 'caller-controlled-request-id', 'x-aegis-correlation-id': 'caller-controlled-correlation-id' };
+    const first = await app.inject({ method: 'POST', url: analysisPath, headers });
+    const second = await app.inject({ method: 'POST', url: analysisPath, headers });
+    const firstId = first.headers['x-aegis-correlation-id'];
+    const secondId = second.headers['x-aegis-correlation-id'];
+    expect(firstId).toMatch(correlationIdPattern);
+    expect(secondId).toMatch(correlationIdPattern);
+    expect(firstId).not.toBe(secondId);
+    expect(firstId).not.toBe(headers['x-request-id']);
+    expect(firstId).not.toBe(headers['x-aegis-correlation-id']);
+    expect(analyze.mock.calls.map((call) => call[2])).toEqual([firstId, secondId]);
+
+    const failedEvents: Array<{ event: string; provider: string; outcome: string; correlationId?: string }> = [];
+    const failed = await appFor(fakePool().pool, { analyze: vi.fn(async (stored, signal, correlationId) => {
+      expect(stored.synthetic_case_id).toBe('SYNTHETIC-LOGIN-001');
+      expect(signal.aborted).toBe(false);
+      failedEvents.push({ event: 'ai_case_analysis', provider: 'ollama', outcome: 'failure', correlationId });
+      throw new Error('private provider detail');
+    }) })
+      .inject({ method: 'POST', url: analysisPath, headers });
+    expect(failed.statusCode).toBe(503);
+    expect(failed.json()).toEqual({ error: 'AI analysis is unavailable. Check the local development provider and retry.', code: 'ai_analysis_unavailable' });
+    expect(failed.headers['x-aegis-correlation-id']).toMatch(correlationIdPattern);
+    expect(failedEvents).toEqual([{ event: 'ai_case_analysis', provider: 'ollama', outcome: 'failure',
+      correlationId: failed.headers['x-aegis-correlation-id'] }]);
+    expect(failed.body).not.toContain('correlationId');
   });
 
   it('does not invoke inference for missing bearer, scope, membership, invalid, or unknown cases', async () => {
     const analyze = vi.fn(async () => analysisResult);
     const authorization = await bearer();
     const app = appFor(fakePool().pool, { analyze });
-    expect((await app.inject({ method: 'POST', url: analysisPath })).statusCode).toBe(401);
-    expect((await app.inject({ method: 'POST', url: analysisPath, headers: { authorization: await bearer(claims({ scope: 'write:cases' })) } })).statusCode).toBe(403);
+    const unauthenticated = await app.inject({ method: 'POST', url: analysisPath });
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.headers['x-aegis-correlation-id']).toBeUndefined();
+    const insufficientScope = await app.inject({ method: 'POST', url: analysisPath, headers: { authorization: await bearer(claims({ scope: 'write:cases' })) } });
+    expect(insufficientScope.statusCode).toBe(403);
+    expect(insufficientScope.headers['x-aegis-correlation-id']).toBeUndefined();
     const noMembership = appFor(fakePool('').pool, { analyze });
-    expect((await noMembership.inject({ method: 'POST', url: analysisPath, headers: { authorization: await bearer(claims({ sub: 'no-membership' })) } })).statusCode).toBe(403);
+    const deniedMembership = await noMembership.inject({ method: 'POST', url: analysisPath, headers: { authorization: await bearer(claims({ sub: 'no-membership' })) } });
+    expect(deniedMembership.statusCode).toBe(403);
+    expect(deniedMembership.headers['x-aegis-correlation-id']).toBeUndefined();
+    const foreignTenant = await appFor(fakePool('').pool, { analyze }).inject({ method: 'POST',
+      url: `/api/tenants/20000000-0000-4000-8000-000000000002/cases/${id}/ai-analysis`, headers: { authorization } });
+    expect(foreignTenant.statusCode).toBe(403);
+    expect(foreignTenant.headers['x-aegis-correlation-id']).toBeUndefined();
     expect((await app.inject({ method: 'POST', url: `/api/tenants/${tenant}/cases/not-a-uuid/ai-analysis`, headers: { authorization } })).statusCode).toBe(400);
     const missingCaseApp = appFor(fakePool('operator', []).pool, { analyze });
-    expect((await missingCaseApp.inject({ method: 'POST', url: analysisPath, headers: { authorization } })).statusCode).toBe(404);
+    const missingCase = await missingCaseApp.inject({ method: 'POST', url: analysisPath, headers: { authorization } });
+    expect(missingCase.statusCode).toBe(404);
+    expect(missingCase.headers['x-aegis-correlation-id']).toBeUndefined();
     expect(analyze).not.toHaveBeenCalled();
   });
 
@@ -317,6 +382,7 @@ describe('authenticated AI case analysis boundary', () => {
     const disabled = await appFor(fakePool().pool).inject({ method: 'POST', url: analysisPath, headers: { authorization } });
     expect(disabled.statusCode).toBe(503);
     expect(disabled.json()).toEqual({ error: 'AI analysis is disabled for this development server.', code: 'ai_analysis_disabled' });
+    expect(disabled.headers['x-aegis-correlation-id']).toBeUndefined();
 
     const failed = appFor(fakePool().pool, { analyze: vi.fn(async () => { throw new Error('private token and prompt'); }) });
     const reply = await failed.inject({ method: 'POST', url: analysisPath, headers: { authorization } });

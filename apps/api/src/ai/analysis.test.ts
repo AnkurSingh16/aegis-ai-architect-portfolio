@@ -10,6 +10,7 @@ const storedCase: StoredCase = {
   synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
   created_at: new Date('2026-01-01T00:00:00Z'), updated_at: new Date('2026-01-01T00:00:00Z'),
 };
+const correlationId = '7b3d0df8-e18b-4fb4-a7b7-4a31d0f8f6d1';
 const validOutput = {
   category: 'incident', priority: 'high', recommendedTeam: 'Platform support',
   rationale: 'The stored synthetic case identifier maps to the login outage fixture; status is open.',
@@ -40,10 +41,10 @@ function ollamaTextResponse(text: string, extra: Record<string, unknown> = {}) {
 }
 type FailureLog = Record<string, string | number | null>;
 async function expectFailureStage(fetchImpl: typeof fetch, failureStage: string,
-  options: { signal?: AbortSignal; timeoutMs?: number; schemaReason?: string; evidenceReason?: string } = {}) {
+  options: { signal?: AbortSignal; timeoutMs?: number; schemaReason?: string; evidenceReason?: string; correlationId?: string } = {}) {
   const log = vi.fn<(event: FailureLog) => void>();
   await expect(createOllamaProvider({ model: 'synthetic-model:1b', timeoutMs: options.timeoutMs ?? 5000, maxConcurrent: 1 },
-    { fetchImpl, log }).analyze(storedCase, options.signal ?? new AbortController().signal))
+    { fetchImpl, log }).analyze(storedCase, options.signal ?? new AbortController().signal, options.correlationId))
     .rejects.toThrow('AI analysis is unavailable');
   expect(log).toHaveBeenCalledTimes(1);
   const event = log.mock.calls[0]?.[0];
@@ -269,7 +270,8 @@ describe('optional fixed-loopback Ollama provider', () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ollamaResponse());
     const log = vi.fn();
     const result = await createOllamaProvider({ model: 'synthetic-model:1b', timeoutMs: 5000, maxConcurrent: 1 },
-      { fetchImpl, log, now: vi.fn().mockReturnValueOnce(10).mockReturnValueOnce(28) }).analyze(storedCase, new AbortController().signal);
+      { fetchImpl, log, now: vi.fn().mockReturnValueOnce(10).mockReturnValueOnce(28) })
+      .analyze(storedCase, new AbortController().signal, correlationId);
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, options] = fetchImpl.mock.calls[0];
     expect(url).toBe(ollamaEndpointForTests);
@@ -282,9 +284,29 @@ describe('optional fixed-loopback Ollama provider', () => {
     expect(result.metrics).toEqual({ latencyMs: 18, promptTokens: 20, generatedTokens: 35 });
     expect(log).toHaveBeenCalledOnce();
     expect(Object.keys(log.mock.calls[0]?.[0] ?? {}).sort()).toEqual([
-      'event', 'provider', 'model', 'outcome', 'latencyMs', 'promptTokens', 'generatedTokens',
+      'event', 'provider', 'model', 'outcome', 'latencyMs', 'promptTokens', 'generatedTokens', 'correlationId',
     ].sort());
+    expect(log.mock.calls[0]?.[0]).toMatchObject({ correlationId });
     expect(JSON.stringify(log.mock.calls)).not.toContain(request.prompt);
+  });
+
+  it('includes a canonical correlation ID in provider failure events', async () => {
+    const event = await expectFailureStage(vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('private provider failure', { status: 503 })), 'provider_http', { correlationId });
+    expect(event.correlationId).toBe(correlationId);
+  });
+
+  it.each([undefined, 'not-a-uuid', correlationId.toUpperCase()])('omits absent or noncanonical correlation IDs from provider events', async (id) => {
+    for (const failing of [false, true]) {
+      const log = vi.fn();
+      const response = failing ? new Response('private provider failure', { status: 503 }) : ollamaResponse();
+      const provider = createOllamaProvider({ model: 'synthetic-model:1b', timeoutMs: 5000, maxConcurrent: 1 },
+        { fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(response), log });
+      if (failing) await expect(provider.analyze(storedCase, new AbortController().signal, id)).rejects.toThrow('AI analysis is unavailable');
+      else await expect(provider.analyze(storedCase, new AbortController().signal, id)).resolves.toMatchObject({ caseId: storedCase.id });
+      expect(log).toHaveBeenCalledOnce();
+      expect(log.mock.calls[0]?.[0]).not.toHaveProperty('correlationId');
+    }
   });
 
   it.each([

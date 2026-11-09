@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { answerDemoQuestion } from './demo.js';
 import { triageRequestSchema, triageResponseSchema, type TriageRequest } from './contracts/triage.js';
 import { triageCase } from './triage.js';
@@ -22,7 +23,8 @@ export function createApp(options: AppOptions = {}) {
   const aiConfig = resolveOllamaConfig(process.env);
   if (aiConfig && !authConfig) throw new Error('AI analysis requires the authenticated case API.');
   const analysisProvider = options.testDependencies?.analysisProvider ?? (aiConfig ? createOllamaProvider(aiConfig) : undefined);
-  const app = Fastify({ logger: false, ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
+  const app = Fastify({ logger: false, requestIdHeader: false, genReqId: () => randomUUID(),
+    ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   app.get('/api/health', async () => ({ ok: true, service: 'aegis-api', mode: 'starter' }));
 
   if (authConfig) {
