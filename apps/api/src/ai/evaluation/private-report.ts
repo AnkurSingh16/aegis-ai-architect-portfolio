@@ -21,7 +21,16 @@ export async function reservePrivateReport(path: string): Promise<FileHandle> {
 
 /** Only callers with an already-sanitized report should use this private writer. */
 export async function writePrivateReport(handle: FileHandle, report: unknown): Promise<void> {
-  await handle.truncate(0);
-  await handle.writeFile(`${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8' });
+  const contents = Buffer.from(`${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  let written = 0;
+  while (written < contents.byteLength) {
+    const result = await handle.write(contents, written, contents.byteLength - written, written);
+    if (!Number.isSafeInteger(result.bytesWritten) || result.bytesWritten <= 0 ||
+        result.bytesWritten > contents.byteLength - written) {
+      throw new Error('Evaluation report write did not make safe progress.');
+    }
+    written += result.bytesWritten;
+  }
+  await handle.truncate(contents.byteLength);
   await handle.sync();
 }
