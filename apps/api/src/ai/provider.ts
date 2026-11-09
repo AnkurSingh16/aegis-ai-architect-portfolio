@@ -1,5 +1,5 @@
 import type { StoredCase } from '../storage/models.js';
-import { analysisOutputFailureReason, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult, parseAnalysisOutput,
+import { analysisOutputFailureReason, analysisOutputJsonSchema, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult, parseAnalysisOutput,
   type AnalysisOutputFailureReason, type AnalysisResult, type EvidenceReferenceFailureReason } from './analysis.js';
 
 const endpoint = 'http://127.0.0.1:11434/api/generate';
@@ -140,7 +140,7 @@ export function createOllamaProvider(config: OllamaConfig, options: {
           response = await fetchImpl(endpoint, {
             method: 'POST', redirect: 'error', signal: controller.signal,
             headers: { 'content-type': 'application/json', accept: 'application/json' },
-            body: JSON.stringify({ model: config.model, prompt, stream: false, format: 'json',
+            body: JSON.stringify({ model: config.model, prompt, stream: false, format: analysisOutputJsonSchema,
               options: { temperature: 0.1, num_predict: 256 }, keep_alive: '5m' }),
           });
         } catch {

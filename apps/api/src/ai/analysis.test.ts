@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { syntheticCases } from '../contracts/triage.js';
-import { analysisOutputFailureReason, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult, evidenceFields,
+import { categories, priorities, suggestedTeams, syntheticCases } from '../contracts/triage.js';
+import { analysisOutputFailureReason, analysisOutputJsonSchema, AnalysisOutputValidationError, buildAnalysisPrompt, createAnalysisResult, evidenceFields,
   isAnalysisResult, parseAnalysisOutput, recommendedActions } from './analysis.js';
 import { createOllamaProvider, ollamaEndpointForTests, resolveOllamaConfig } from './provider.js';
 import type { StoredCase } from '../storage/models.js';
@@ -99,6 +99,28 @@ describe('AI case analysis output contract', () => {
     }
     expect(parseAnalysisOutput({ ...validOutput, evidenceReferences: ['synthetic_case_id', 'status', 'created_at', 'updated_at'] })
       .evidenceReferences).toHaveLength(4);
+  });
+
+  it('defines a fixed JSON Schema from the existing analysis contract', () => {
+    expect(analysisOutputJsonSchema.type).toBe('object');
+    expect(analysisOutputJsonSchema.additionalProperties).toBe(false);
+    expect(analysisOutputJsonSchema.required).toEqual([
+      'category', 'priority', 'recommendedTeam', 'rationale', 'nextAction',
+      'confidence', 'uncertainty', 'evidenceReferences', 'humanReviewRequired',
+    ]);
+    expect(analysisOutputJsonSchema.required).toHaveLength(9);
+    expect(analysisOutputJsonSchema.properties.category.enum).toEqual(categories);
+    expect(analysisOutputJsonSchema.properties.priority.enum).toEqual(priorities);
+    expect(analysisOutputJsonSchema.properties.recommendedTeam.enum).toEqual(suggestedTeams);
+    expect(analysisOutputJsonSchema.properties.nextAction.enum).toEqual(recommendedActions);
+    expect(analysisOutputJsonSchema.properties.uncertainty.enum).toEqual(['low', 'moderate', 'high']);
+    expect(analysisOutputJsonSchema.properties.confidence).toMatchObject({ type: 'number', minimum: 0, maximum: 1 });
+    expect(analysisOutputJsonSchema.properties.rationale).toMatchObject({ type: 'string', minLength: 1, maxLength: 700 });
+    expect(analysisOutputJsonSchema.properties.humanReviewRequired).toEqual({ type: 'boolean', enum: [true] });
+    expect(analysisOutputJsonSchema.properties.evidenceReferences).toEqual({
+      type: 'array', minItems: 1, maxItems: 4, items: { type: 'string', enum: evidenceFields },
+    });
+    expect(analysisOutputJsonSchema.properties.evidenceReferences).not.toHaveProperty('uniqueItems');
   });
 
   it.each([
@@ -253,7 +275,8 @@ describe('optional fixed-loopback Ollama provider', () => {
     expect(url).toBe(ollamaEndpointForTests);
     expect(options).toMatchObject({ method: 'POST', redirect: 'error' });
     const request = JSON.parse(String(options?.body));
-    expect(request).toMatchObject({ model: 'synthetic-model:1b', stream: false, format: 'json', options: { temperature: 0.1, num_predict: 256 } });
+    expect(request).toMatchObject({ model: 'synthetic-model:1b', stream: false, format: analysisOutputJsonSchema,
+      options: { temperature: 0.1, num_predict: 256 } });
     expect(request.prompt).toContain(storedCase.synthetic_case_id);
     expect(request.prompt).not.toContain(storedCase.tenant_id);
     expect(result.metrics).toEqual({ latencyMs: 18, promptTokens: 20, generatedTokens: 35 });
@@ -262,6 +285,30 @@ describe('optional fixed-loopback Ollama provider', () => {
       'event', 'provider', 'model', 'outcome', 'latencyMs', 'promptTokens', 'generatedTokens',
     ].sort());
     expect(JSON.stringify(log.mock.calls)).not.toContain(request.prompt);
+  });
+
+  it.each([
+    ['unknown evidence', { ...validOutput, evidenceReferences: ['private-evidence-marker'] }, 'invalid_evidence_references', 'invalid_identifier'],
+    ['duplicate evidence', { ...validOutput, evidenceReferences: ['status', 'status'] }, 'invalid_evidence_references', 'duplicate_identifier'],
+    ['empty evidence', { ...validOutput, evidenceReferences: [] }, 'invalid_evidence_references', 'empty_array'],
+    ['oversized evidence', { ...validOutput, evidenceReferences: [...evidenceFields, 'status'] }, 'invalid_evidence_references', 'too_many_items'],
+    ['unknown output field', { ...validOutput, privateExtraKey: 'private-extra-marker' }, 'invalid_keys', undefined],
+    ['invalid category', { ...validOutput, category: 'private-category-marker' }, 'invalid_category', undefined],
+    ['invalid priority', { ...validOutput, priority: 'private-priority-marker' }, 'invalid_priority', undefined],
+    ['invalid team', { ...validOutput, recommendedTeam: 'private-team-marker' }, 'invalid_team', undefined],
+    ['invalid action', { ...validOutput, nextAction: 'private-action-marker' }, 'invalid_next_action', undefined],
+  ] as const)('keeps server validation authoritative for %s', async (_name, output, schemaReason, evidenceReason) => {
+    const log = vi.fn();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ollamaResponse(output));
+    await expect(createOllamaProvider({ model: 'synthetic-model:1b', timeoutMs: 5000, maxConcurrent: 1 },
+      { fetchImpl, log }).analyze(storedCase, new AbortController().signal))
+      .rejects.toThrow('AI analysis is unavailable. Check the local development provider and retry.');
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledOnce();
+    expect(log.mock.calls[0]?.[0]).toMatchObject({ failureStage: 'output_schema', schemaReason });
+    if (evidenceReason !== undefined) expect(log.mock.calls[0]?.[0]).toHaveProperty('evidenceReason', evidenceReason);
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-');
   });
 
   it.each([
