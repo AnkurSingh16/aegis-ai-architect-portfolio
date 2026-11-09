@@ -104,6 +104,15 @@ describe('transaction and failure handling', () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ safe: false }] });
     const pool = { query } as unknown as Pool;
     await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe');
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("('documents'), ('document_chunks')"));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("n.nspname = 'aegis' AND c.relkind IN ('r', 'p', 'f')"));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("'aegis.documents', 'SELECT'"));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("'aegis.document_chunks', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'"));
+    query.mockClear();
+    query.mockResolvedValue({ rows: [{ safe: false }] });
+    await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe');
+    query.mockClear();
+    await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe');
     query.mockResolvedValue({ rows: [] });
     await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe');
     query.mockResolvedValue({ rows: [{ safe: true }] });
