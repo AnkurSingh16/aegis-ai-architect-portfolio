@@ -4,6 +4,7 @@ dist/
 **/dist/
 coverage/
 **/coverage/
+.local/evaluations/
 *.log
 .DS_Store
 .env
