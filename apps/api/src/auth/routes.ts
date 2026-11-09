@@ -82,13 +82,14 @@ export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Po
       const stored = await run(request, request.params.tenantId, 'read:cases',
         (client) => readCase(client, request.params.caseId));
       if (!analysisProvider) throw new AnalysisDisabledError();
+      reply.header('X-Aegis-Correlation-Id', request.id);
 
       const controller = new AbortController();
       const cancelIfDisconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
       request.raw.once('aborted', cancelIfDisconnected);
       reply.raw.once('close', cancelIfDisconnected);
       try {
-        const result = await analysisProvider.analyze(stored, controller.signal);
+        const result = await analysisProvider.analyze(stored, controller.signal, request.id);
         if (controller.signal.aborted) return;
         return result;
       } catch (error) {
