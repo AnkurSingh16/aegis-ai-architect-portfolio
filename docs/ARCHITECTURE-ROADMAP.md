@@ -50,16 +50,33 @@ See [ADR 004](adr/004-auth0-terraform-foundation.md) and [the Auth0 security run
 
 See [ADR 006](adr/006-local-ai-case-intelligence.md), the [README local inference guide](../README.md#ai-assisted-case-intelligence-milestone-3a), and [security runbook](SECURITY-RUNBOOK.md).
 
-## Vertical slice 1 — actual product foundations
-- PostgreSQL tables for tenants, users, documents, audit events; deny cross-tenant queries.
-- Measured AI and retrieval, building on the local Auth0/JWT and tenant-membership foundation in Milestone 2B.
-- Tests for unauthorized access, incorrect audiences, expired tokens and cross-tenant IDs.
+### Milestone 3B — bounded local-model evaluation and reliability
 
-## Vertical slice 2 — measured AI
-- OpenAI Responses API server-side only (key in environment/secret manager).
-- Retrieval from pgvector with signed source/document ownership checks.
-- Citation validation, groundedness eval dataset (synthetic only), cost/latency measurement.
-- Prompt-injection guards and refusal for data outside authorized tenant.
+- A versioned, source-controlled synthetic evaluation corpus separates three canonical case types, predeclared engineering-reviewed expected labels, fixed UTC timestamp variants, and deterministic output-contract probes. It is not a production fixture catalog and its labels are not human-approved.
+- A deterministic scorer reports schema/evidence contract outcomes, label agreement by field, human-review enforcement, rejection reasons, latency and available token metrics with explicit denominators. Contract compliance is not model accuracy; six provider-level observations are a reproducible smoke evaluation, not a statistically reliable estimate.
+- The optional local evaluation runner uses only the existing bounded Ollama provider and in-memory synthetic `StoredCase` values. It has six statically declared sequential slots (two per case type), no retry or replacement path, sanitized one-time reporting, and no database or authenticated HTTP access. Ordinary tests and CI remain provider-mocked and offline.
+- Reliability work is limited to defects demonstrated by the evaluation; existing Auth0, membership, forced RLS, request correlation, schema validation and human-review boundaries remain authoritative.
+
+**Execution status (2026-11-09):** The deterministic framework and private report protections are implemented. After fixing a preflight false rejection of the harness's own loopback health socket, one separately authorized bounded run completed **6/6 planned provider-level attempts** with 6 successes, no failures and no unattempted slots. JSON parsing, strict schema acceptance, evidence-reference compliance, category, team, action, human-review and provider-event correlation each measured 6/6. Priority exact-match was 2/6: both billing observations were high rather than the predeclared medium, and both guidance observations were medium rather than the predeclared low. These labels are engineering-reviewed, not human-approved. The timestamp pairs are not independent cases; six calls over three synthetic types are not production accuracy evidence. See the [sanitized evaluation summary](AI-EVALUATION-3B.16.md). Milestone 3B.16 is **completed as a bounded smoke evaluation**, not as model qualification or production readiness.
+
+See [ADR 007](adr/007-tenant-scoped-grounded-case-intelligence.md) for the proposed Milestone 4 architecture. Milestone 4 is design-only until its entry criteria and a separate implementation approval are met.
+
+## Milestone 4 — tenant-scoped, evidence-grounded case intelligence (proposed)
+
+**Status: architecture entry only; not implemented.** The preferred path remains local-first. No cloud provider, paid service, model, data egress, or infrastructure is approved by this roadmap.
+
+1. Define a synthetic document catalog, versioned metadata, immutable source identity and tenant ownership. Keep evaluation documents separate from production case fixtures.
+2. Design tenant-owned document/chunk storage with forced RLS and ownership checks. Start with bounded PostgreSQL full-text retrieval as a transparent baseline; consider pgvector only after a separate embedding-model and resource review.
+3. Retrieve only after existing Auth0 scope, membership and transaction-local RLS checks. Keep retrieval on the same authorized data boundary; release the transaction before inference. The model never chooses a tenant, issues SQL, or authorizes source access.
+4. Assign request-scoped opaque citation IDs to server-selected chunks. Validate returned IDs against the retrieved set and re-read source text only through an authenticated, ownership-checked endpoint. A valid citation ID proves source association, not claim correctness.
+5. Introduce a versioned grounded-answer contract with explicit insufficient-evidence abstention, untrusted-document prompt-injection handling, strict output validation, and human-review-only recommendations.
+6. Add synthetic retrieval relevance, citation validity, unsupported-claim, abstention, malicious-document, tenant-isolation and revocation tests before any model-quality evaluation.
+7. Measure retrieval recall/precision on reviewed labels, groundedness review outcomes, latency, resource usage and—only if a future provider is separately approved—cost and data egress. Report denominators and limitations.
+8. Define failure, timeout, cancellation, stale-source, reindex and rollback behavior before implementation. No recommendation executes an action.
+
+**Entry criteria:** approved ADR and threat model; synthetic corpus with engineering-reviewed labels; schema/RLS and migration review; local-first provider decision; explicit prompt/data-boundary design; deterministic isolated PostgreSQL tests; reviewed evaluation rubric and resource limits. Any cloud provider requires separate approval for data egress, retention, regional processing, secrets and cost.
+
+**Dependencies and risks:** document ownership and lifecycle, migration design, RLS policy correctness, retrieval relevance, citation spoofing, malicious source text, stale chunks, model hallucination and local resource limits. Implement in order: corpus/labels → storage/RLS → retrieval baseline → citation contract/validator → deterministic security and groundedness evaluation → separately authorized local inference. Milestone 4 remains NOT STARTED until implementation is separately approved and begins.
 
 ## Vertical slice 3 — human approved actions
 - Proposed support escalation action; approval policy; idempotency and audit trail.
