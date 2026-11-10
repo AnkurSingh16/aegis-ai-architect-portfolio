@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { GroundedAnalysisProvider, GroundedProviderOutput, GroundedSource } from '../grounded-analysis.js';
 import { groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
-import { runGroundedProviderEvaluation } from './grounded-runner.js';
+import { groundedEvaluationCliResult, runGroundedProviderEvaluation } from './grounded-runner.js';
+import { sanitizedCliFailure } from './run-grounded-local-evaluation.js';
 
 const secretText = 'SYNTHETIC-PRIVATE-RAW-RESPONSE-DO-NOT-REPORT';
 function sourcesFor(caseType: string): GroundedSource[] {
@@ -108,5 +109,30 @@ describe('bounded grounded provider evaluation runner', () => {
     expect(scoreGroundedEvaluation(run.observations).metrics.validationReasons).toMatchObject({ counts: { unknown_citation: 1 }, denominator: 1 });
     expect(run.attempts.slice(1).every((attempt) => attempt.status === 'success')).toBe(true);
     expect(JSON.stringify(run)).not.toContain(secretText);
+  });
+
+  it('marks six fully attempted schema failures completed and returns the normal CLI success code', async () => {
+    let calls = 0;
+    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+      model: 'synthetic', async analyze(_input, _signal, correlationId) {
+        calls += 1;
+        log({ event: 'ai_grounded_analysis', outcome: 'failure', failureStage: 'output_schema', schemaReason: 'invalid_output',
+          validationReason: calls === 1 ? 'invalid_field_type' : 'invalid_state_combination', correlationId, latencyMs: 7 });
+        throw new Error(secretText);
+      },
+    });
+    const run = await runGroundedProviderEvaluation({ providerFactory, sourcesFor, healthCheck: async () => true });
+    const score = scoreGroundedEvaluation(run.observations);
+    expect(calls).toBe(6);
+    expect(score).toMatchObject({ attempted: 6, succeeded: 0, failed: 6, notAttempted: 0 });
+    expect(groundedEvaluationCliResult(run, score.notAttempted)).toEqual({ status: 'completed', exitCode: 0 });
+    expect(groundedEvaluationCliResult({ ...run, stopped: true }, 0)).toEqual({ status: 'stopped', exitCode: 1 });
+    expect(groundedEvaluationCliResult(run, 1)).toEqual({ status: 'stopped', exitCode: 1 });
+  });
+
+  it('reports only a fixed CLI lifecycle stage when finalization fails', () => {
+    expect(sanitizedCliFailure('report_close')).toBe('{"event":"grounded_evaluation_cli_failure","failureStage":"report_close"}');
+    expect(sanitizedCliFailure(secretText)).not.toContain(secretText);
+    expect(sanitizedCliFailure(secretText)).toContain('"failureStage":"unknown"');
   });
 });

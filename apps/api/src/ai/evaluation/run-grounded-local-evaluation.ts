@@ -11,7 +11,7 @@ import { groundedAnalysisSchema, parseGroundedProviderOutput, type GroundedSourc
 import { createGroundedOllamaProvider } from '../grounded-provider.js';
 import { resolveOllamaConfig } from '../provider.js';
 import { groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
-import { runGroundedProviderEvaluation } from './grounded-runner.js';
+import { groundedEvaluationCliResult, runGroundedProviderEvaluation } from './grounded-runner.js';
 import { verifyGroundedEvaluationSource } from './source-identity.js';
 import { reservePrivateReport, writePrivateReport } from './private-report.js';
 import { assertSafeOllamaTcpRecords, parseOllamaTcpRecords } from './ollama-socket-preflight.js';
@@ -20,6 +20,15 @@ const expectedModel = 'qwen2.5:3b-instruct';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../');
 const reportPath = resolve(root, '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json');
 const localOrigin = 'http://127.0.0.1:11434';
+const cliFailureStages = ['source_preflight', 'runtime_preflight', 'model_preflight', 'operator_confirmation', 'report_reservation',
+  'initial_report_write', 'provider_evaluation', 'progress_report_write', 'final_report_write', 'summary_output', 'report_close', 'unknown'] as const;
+type CliFailureStage = typeof cliFailureStages[number];
+let cliFailureStage: CliFailureStage = 'source_preflight';
+
+export function sanitizedCliFailure(stage: string): string {
+  const failureStage = cliFailureStages.includes(stage as CliFailureStage) ? stage as CliFailureStage : 'unknown';
+  return JSON.stringify({ event: 'grounded_evaluation_cli_failure', failureStage });
+}
 
 function assertNoActiveClient(): void {
   const records = execFileSync('/usr/sbin/lsof', ['-nP', '-FpcnT', '-iTCP:11434'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -73,20 +82,23 @@ async function main(): Promise<void> {
   if (process.argv.length !== 2) throw new Error('Grounded evaluation accepts no command-line arguments.');
   const source = verifyGroundedEvaluationSource((args) => execFileSync('git', [...args],
     { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+  cliFailureStage = 'runtime_preflight';
   if (process.env.NODE_ENV !== 'development' || process.env.AEGIS_AI_ENABLED !== 'true' || process.env.AEGIS_GROUNDED_AI_ENABLED !== 'true') {
     throw new Error('Grounded evaluation requires explicit local development opt-in.');
   }
   const config = resolveOllamaConfig(process.env);
   if (!config || config.model !== expectedModel || config.timeoutMs !== 15000 || config.maxConcurrent !== 1 ||
       groundedEvaluationSlots.length !== 6 || new Set(groundedEvaluationSlots.map((slot) => slot.slotId)).size !== 6 ||
-      groundedAnalysisSchema.properties.humanReviewRequired.enum[0] !== true || typeof parseGroundedProviderOutput !== 'function') {
+      groundedAnalysisSchema.oneOf.some((branch) => branch.properties.humanReviewRequired.enum[0] !== true) ||
+      typeof parseGroundedProviderOutput !== 'function') {
     throw new Error('Grounded evaluation contract or approved limits are unavailable.');
   }
   for (const item of syntheticCases) if (!groundedEvaluationSlots.some((slot) => slot.caseType === item.id)) throw new Error('Grounded evaluation case plan is incomplete.');
+  cliFailureStage = 'model_preflight';
   await assertModelReady();
+  cliFailureStage = 'operator_confirmation';
   if (!await confirmRun()) { stdout.write('Grounded evaluation cancelled before any model request.\n'); return; }
 
-  const handle = await reservePrivateReport(reportPath);
   const timestamp = new Date().toISOString();
   const base = { datasetVersion: 'aegis-grounded-provider-v2', ...source, model: expectedModel, evaluationTimestamp: timestamp,
     testMode: 'provider-level-in-memory-synthetic-not-authenticated-http-e2e', plannedSlots: 6,
@@ -96,24 +108,40 @@ async function main(): Promise<void> {
       'Citation identity and evidence coverage are deterministic checks, not proof that claims are semantically entailed.',
       'Groundedness review agreement is not measured until an independent reviewer supplies that assessment.',
       'No prompts, rationales, raw responses, credentials, or rejected model output are stored.'] };
+  cliFailureStage = 'report_reservation';
+  const handle = await reservePrivateReport(reportPath);
+  let failed = false;
   try {
+    cliFailureStage = 'initial_report_write';
     await writePrivateReport(handle, { ...base, attempts: [], score: scoreGroundedEvaluation([]) });
+    cliFailureStage = 'provider_evaluation';
     const run = await runGroundedProviderEvaluation({
       providerFactory: (log) => createGroundedOllamaProvider(config, { log }),
       healthCheck: async () => { try { await assertModelReady(); return true; } catch { return false; } },
       sourcesFor: inMemorySources,
-      onProgress: async (attempts, observations) => { await writePrivateReport(handle, { ...base, status: 'in_progress', attempts,
-        score: scoreGroundedEvaluation(observations) }); },
+      onProgress: async (attempts, observations) => {
+        cliFailureStage = 'progress_report_write';
+        await writePrivateReport(handle, { ...base, status: 'in_progress', attempts, score: scoreGroundedEvaluation(observations) });
+        cliFailureStage = 'provider_evaluation';
+      },
     });
     const score = scoreGroundedEvaluation(run.observations);
-    const status = run.stopped || score.notAttempted > 0 ? 'stopped' : 'completed';
+    const { status, exitCode } = groundedEvaluationCliResult(run, score.notAttempted);
+    cliFailureStage = 'final_report_write';
     await writePrivateReport(handle, { ...base, status, attempts: run.attempts, score });
+    cliFailureStage = 'summary_output';
     stdout.write(`${JSON.stringify({ status, model: expectedModel, ...source, planned: 6, attempted: score.attempted,
       succeeded: score.succeeded, failed: score.failed, notAttempted: score.notAttempted, reportPath: '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json' })}\n`);
-    if (status !== 'completed') process.exitCode = 1;
-  } finally { await handle.close(); }
+    process.exitCode = exitCode;
+  } catch { failed = true; }
+  try { await handle.close(); }
+  catch {
+    if (!failed) cliFailureStage = 'report_close';
+    failed = true;
+  }
+  if (failed) throw new Error('evaluation_failed');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(() => { console.error('Grounded evaluation stopped safely. No retry was performed. Inspect only its sanitized private report if created.'); process.exitCode = 1; });
+  main().catch(() => { console.error(sanitizedCliFailure(cliFailureStage)); process.exitCode = 1; });
 }
