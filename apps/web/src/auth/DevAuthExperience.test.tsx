@@ -386,6 +386,23 @@ describe('development Auth0 case experience', () => {
     await waitFor(() => expect(screen.queryByText('Insufficient evidence')).toBeNull());
   });
 
+  it('distinguishes validation failure from local provider unavailability using fixed safe codes', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'grounded_analysis_validation_failed' }) })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'grounded_analysis_provider_unavailable' }) });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with grounded documents' }));
+    expect(await screen.findByText(/did not pass the required validation contract/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze with grounded documents' }));
+    expect(await screen.findByText(/local grounded analysis provider is unavailable/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('failureStage');
+    expect(document.body.textContent).not.toContain('schemaReason');
+  });
+
   it('offers recovery after token acquisition fails without showing provider details', async () => {
     authMocks.state = { isAuthenticated: true, isLoading: false };
     authMocks.getAccessTokenSilently.mockRejectedValue(new Error('private provider detail'));

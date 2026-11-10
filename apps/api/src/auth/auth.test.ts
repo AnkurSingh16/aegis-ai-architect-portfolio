@@ -9,7 +9,7 @@ import { withAuthenticatedTransaction } from './transaction.js';
 import { parseMembershipCommand, provisionMembership } from './memberships.js';
 import type { AnalysisProvider } from '../ai/provider.js';
 import type { AnalysisResult } from '../ai/analysis.js';
-import type { GroundedAnalysisProvider } from '../ai/grounded-analysis.js';
+import { GroundedAnalysisFailureError, type GroundedAnalysisProvider } from '../ai/grounded-analysis.js';
 
 const issuer = 'https://synthetic.auth0.example/';
 const audience = 'https://aegis.synthetic.example/api';
@@ -503,7 +503,7 @@ describe('authenticated grounded document analysis boundary', () => {
     expect(fixture.query.mock.calls.some(([sql]) => String(sql).includes('WITH parsed') || String(sql).includes('SELECT *'))).toBe(false);
   });
 
-  it('maps a provider failure or a citation outside the request set to the existing generic unavailable response', async () => {
+  it('uses fixed safe outcome codes for provider and validation failure without exposing diagnostics', async () => {
     const fixture = fakePool();
     fixture.query.mockImplementation(async (sql: string) => sql.includes('FROM aegis.memberships') ? { rows: [{ role: 'reader' }] }
       : sql.includes('SELECT *') ? { rows: [{ id, tenant_id: tenant, synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
@@ -515,16 +515,18 @@ describe('authenticated grounded document analysis boundary', () => {
     const failed = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
     expect(failed.statusCode).toBe(503);
     expect(failingProvider.analyze).toHaveBeenCalledOnce();
-    expect(failed.json()).toEqual({ error: 'AI analysis is unavailable. Check the local development provider and retry.', code: 'ai_analysis_unavailable' });
+    expect(failed.json()).toEqual({ error: 'Grounded analysis could not be completed. Check the local development provider and retry.',
+      code: 'grounded_analysis_provider_unavailable' });
     expect(failed.headers['x-aegis-correlation-id']).toMatch(correlationIdPattern);
     expect(failed.body).not.toContain('secret prompt');
 
-    const forgedProvider = { model: 'synthetic-model:1b', analyze: vi.fn(async () => ({ output: { ...output,
-      groundingState: 'SUPPORTED' as const, citations: [randomUUID()] }, metrics: { latencyMs: 1, promptTokens: null, generatedTokens: null } })) };
+    const forgedProvider = { model: 'synthetic-model:1b', analyze: vi.fn(async () => { throw new GroundedAnalysisFailureError('VALIDATION_FAILED'); }) };
     const forged = await appForGrounded(fixture.pool, forgedProvider).inject({ method: 'POST', url: path,
       headers: { authorization: await bearer() } });
     expect(forged.statusCode).toBe(503);
-    expect(forged.json()).toEqual({ error: 'AI analysis is unavailable. Check the local development provider and retry.', code: 'ai_analysis_unavailable' });
+    expect(forged.json()).toEqual({ error: 'Grounded analysis could not be completed. Check the local development provider and retry.',
+      code: 'grounded_analysis_validation_failed' });
+    expect(forged.body).not.toMatch(/failureStage|schemaReason|response|prompt|tenant|secret/i);
     expect(forgedProvider.analyze).toHaveBeenCalledOnce();
   });
 });

@@ -1,7 +1,7 @@
 import { acquireOllamaSlot, AnalysisUnavailableError, localOllamaGenerateEndpoint, releaseOllamaSlot,
   type OllamaConfig } from './provider.js';
 import { groundedAnalysisSchema, GroundedOutputError, parseGroundedProviderOutput,
-  type GroundedAnalysisProvider, type GroundedProviderOutput } from './grounded-analysis.js';
+  GroundedAnalysisFailureError, type GroundedAnalysisProvider, type GroundedProviderOutput } from './grounded-analysis.js';
 
 const maxGroundedPromptBytes = 16 * 1024;
 const maxEnvelopeBytes = 8192;
@@ -139,7 +139,8 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
         failureStage, latencyMs: Math.max(0, Math.round(now() - started)), ...(responseBytes === undefined ? {} : { responseBytes }),
         ...(schemaReason !== undefined ? { schemaReason } : {}),
         ...(correlation ? { correlationId: correlation } : {}) });
-      throw new AnalysisUnavailableError();
+      throw new GroundedAnalysisFailureError(['model_json_parse', 'output_schema', 'input_validation'].includes(failureStage)
+        ? 'VALIDATION_FAILED' : 'PROVIDER_UNAVAILABLE');
     } finally { clearTimeout(timeout); callerSignal.removeEventListener('abort', cancel); releaseOllamaSlot(); }
   } };
 }

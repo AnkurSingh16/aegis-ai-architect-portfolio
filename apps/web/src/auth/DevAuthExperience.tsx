@@ -21,7 +21,8 @@ type StoredCase = {
 
 type ViewState = { kind: 'idle' | 'loading' | 'ready' | 'unauthenticated' | 'forbidden' | 'unavailable'; cases: StoredCase[]; message?: string };
 type AnalysisState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'unauthenticated' | 'forbidden' | 'failed'; caseId?: string; result?: AnalysisResult };
-type GroundedState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'insufficient' | 'unauthenticated' | 'forbidden' | 'failed'; caseId?: string; result?: GroundedAnalysisResult };
+type GroundedState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'insufficient' | 'unauthenticated' | 'forbidden' |
+  'validationFailed' | 'providerUnavailable' | 'failed'; caseId?: string; result?: GroundedAnalysisResult };
 
 function isStoredCase(value: unknown, tenantId: string): value is StoredCase {
   if (!value || typeof value !== 'object') return false;
@@ -181,7 +182,10 @@ function CaseAccessPanel() {
       if (response.status === 503) {
         const body = await response.json().catch(() => undefined) as { code?: unknown } | undefined;
         if (!stillCurrent()) return;
-        setGrounded({ kind: body?.code === 'ai_analysis_disabled' ? 'disabled' : 'failed', caseId });
+        const kind = body?.code === 'ai_analysis_disabled' ? 'disabled'
+          : body?.code === 'grounded_analysis_validation_failed' ? 'validationFailed'
+            : body?.code === 'grounded_analysis_provider_unavailable' ? 'providerUnavailable' : 'failed';
+        setGrounded({ kind, caseId });
         return;
       }
       if (!response.ok) { setGrounded({ kind: 'failed', caseId }); return; }
@@ -277,6 +281,8 @@ function CaseAccessPanel() {
                 {grounded.caseId === item.id && grounded.kind === 'disabled' && <p role="status">Grounded local analysis is disabled for this development server.</p>}
                 {grounded.caseId === item.id && grounded.kind === 'unauthenticated' && <p role="alert">Your session is no longer authorized. Sign in again to continue.</p>}
                 {grounded.caseId === item.id && grounded.kind === 'forbidden' && <p role="alert">Grounded analysis was denied because the required case permission or tenant membership is unavailable.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'validationFailed' && <p role="alert">Grounded analysis output did not pass the required validation contract. No recommendation was returned.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'providerUnavailable' && <p role="alert">The local grounded analysis provider is unavailable. No recommendation was returned.</p>}
                 {grounded.caseId === item.id && grounded.kind === 'failed' && <p role="alert">Grounded analysis could not be completed. Check the local provider and retry.</p>}
                 {grounded.caseId === item.id && grounded.kind === 'insufficient' && <section className="analysis-result" aria-labelledby={`grounded-${item.id}`}>
                   <h4 id={`grounded-${item.id}`}>Insufficient evidence</h4>

@@ -54,6 +54,13 @@ export class GroundedOutputError extends Error {
   constructor(readonly reason: 'invalid_output' | 'invalid_citations') { super('Grounded analysis output is invalid.'); }
 }
 
+/** Stable, non-sensitive outcome classification for the authenticated route error contract. */
+export class GroundedAnalysisFailureError extends Error {
+  constructor(readonly state: 'VALIDATION_FAILED' | 'PROVIDER_UNAVAILABLE') {
+    super('AI analysis is unavailable. Check the local development provider and retry.');
+  }
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

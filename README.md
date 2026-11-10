@@ -104,6 +104,8 @@ Grounded inference is off by default. In local development it requires the exist
 
 The retrieval evaluation set and nine severity regression labels are engineering-reviewed synthetic fixtures, not independent ground truth. Fixture-contract tests measure deterministic behavior, not model accuracy. The prior Milestone 3B local Qwen sample matched priority labels in only 2/6 observations; this limitation remains relevant and has not been retuned away. No claim of production readiness or statistically reliable quality is made. See [ADR 007](docs/adr/007-tenant-scoped-grounded-case-intelligence.md), [ADR 008](docs/adr/008-grounded-document-ingestion-and-retrieval.md), and the [security runbook](docs/SECURITY-RUNBOOK.md).
 
+The fixed six-slot grounded provider evaluation is separately described in [the Milestone 4 evaluation guide](docs/AI-EVALUATION-M4.md). Its local runner is TTY-gated and has not been executed as part of this implementation.
+
 ### Real PostgreSQL integration tests
 
 Create the dedicated test database once without resetting the persistent demonstration database:
