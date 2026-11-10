@@ -4,7 +4,7 @@ export const retrievalDatasetVersion = 'aegis-synthetic-doc-retrieval-v1';
 export const retrievalEvaluationCases = [
   { id: 'login-triage', tenant: 'north', query: 'user-visible error', relevantSources: ['SYNTHETIC-NORTH-LOGIN-INCIDENT'] },
   { id: 'mfa-challenge', tenant: 'north', query: 'challenge', relevantSources: ['SYNTHETIC-NORTH-MFA-GUIDANCE'] },
-  { id: 'recovery-identity', tenant: 'north', query: 'identity', relevantSources: ['SYNTHETIC-NORTH-ACCOUNT-RECOVERY'] },
+  { id: 'recovery-identity', tenant: 'north', query: 'bearer', relevantSources: ['SYNTHETIC-NORTH-ACCOUNT-RECOVERY'] },
   { id: 'network-loopback', tenant: 'north', query: 'loopback', relevantSources: ['SYNTHETIC-NORTH-NETWORK-DIAGNOSTICS'] },
   { id: 'billing-invoice', tenant: 'south', query: 'invoice', relevantSources: ['SYNTHETIC-SOUTH-BILLING-DISCREPANCY'] },
   { id: 'service-impact', tenant: 'south', query: 'degradation', relevantSources: ['SYNTHETIC-SOUTH-SERVICE-DEGRADATION'] },
