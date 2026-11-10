@@ -77,7 +77,7 @@ export async function verifyLocalIngestionTarget(adminPool: Pool, adminUrl: URL,
   try {
     await client.query('BEGIN READ ONLY');
     const result = await client.query<{ database: string; role: string; serverAddress: string | null; serverPort: number;
-      systemIdentifier: string }>(`SELECT current_database() AS database,current_user AS role,inet_server_addr()::text AS "serverAddress",
+      systemIdentifier: string }>(`SELECT current_database() AS database,current_user AS role,host(inet_server_addr()) AS "serverAddress",
       inet_server_port() AS "serverPort",(SELECT system_identifier::text FROM pg_control_system()) AS "systemIdentifier"`);
     const identity = result.rows[0];
     if (!identity || identity.database !== 'aegis_local' || identity.role !== adminUrl.username || identity.role === ingestUrl.username ||
@@ -183,7 +183,7 @@ async function ingestCatalog(pool: Pool, expectedDatabase: 'aegis_test' | 'aegis
         WHERE c.relkind IN ('r','p','v','m') AND n.nspname NOT IN ('pg_catalog','information_schema')
           AND c.oid NOT IN ('aegis.documents'::regclass,'aegis.document_chunks'::regclass)
           AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS "otherTablePrivileges"
-      ,inet_server_addr()::text AS "serverAddress",inet_server_port() AS "serverPort"
+      ,host(inet_server_addr()) AS "serverAddress",inet_server_port() AS "serverPort"
       FROM pg_roles r WHERE r.rolname=current_user`);
     const row = identity.rows[0];
     if (row?.database !== expectedDatabase) throw new DocumentIngestionError('unsafe_target');

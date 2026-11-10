@@ -63,6 +63,26 @@ afterAll(async () => {
 });
 
 describe('isolated PostgreSQL tenant document boundary', () => {
+  it('returns a canonical host address for inet values and the connected PostgreSQL server without changing data', async () => {
+    const client = await admin.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      const result = await client.query<{ canonical: string; serverAddress: string | null; serverNetwork: string | null; serverPort: number }>(`
+        SELECT host(inet '172.18.0.2/32') AS canonical,
+          host(inet_server_addr()) AS "serverAddress",inet_server_addr()::text AS "serverNetwork",
+          inet_server_port() AS "serverPort"`);
+      const identity = result.rows[0];
+      expect(identity?.canonical).toBe('172.18.0.2');
+      expect(identity?.serverAddress).toBeTruthy();
+      expect(identity?.serverNetwork).toBeTruthy();
+      expect(identity?.serverPort).toBe(5432);
+      expect(identity?.serverAddress).not.toContain('/');
+      expect(await client.query('SELECT host($1::inet) AS address', [identity?.serverNetwork])).toMatchObject({
+        rows: [{ address: identity?.serverAddress }],
+      });
+    } finally { await client.query('ROLLBACK').catch(() => {}); client.release(); }
+  });
+
   it('refuses the isolated aegis_test target through the local writer before any transaction or data change', async () => {
     expect(() => validateLocalIngestionConnection(ingestionUrl)).toThrow();
     const before = await admin.query(`SELECT (SELECT count(*) FROM aegis.documents)::int AS documents,

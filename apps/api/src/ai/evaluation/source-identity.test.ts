@@ -1,43 +1,94 @@
 import { describe, expect, it } from 'vitest';
-import { groundedEvaluationBaseCommit, verifyGroundedEvaluationSource, type GitRead } from './source-identity.js';
+import { groundedEvaluationBaseCommit, groundedEvaluationCorrectionBaseCommit,
+  groundedEvaluationCorrectionBranch, groundedEvaluationFeatureBranch,
+  verifyGroundedEvaluationSource, type GitRead } from './source-identity.js';
 
-const commit = 'a'.repeat(40);
-const remoteCommit = 'b'.repeat(40);
-const tree = 'c'.repeat(40);
-const remoteTree = 'd'.repeat(40);
-const feature = 'feat/m4-grounded-ai-intelligence';
+const originalCommit = 'a'.repeat(40);
+const originalTree = 'b'.repeat(40);
+const correctionCommit = 'c'.repeat(40);
+const correctionTree = 'd'.repeat(40);
+const mainCommit = 'e'.repeat(40);
+const unreviewedTree = 'f'.repeat(40);
 
-function readGit(overrides: Record<string, string | Error> = {}, branch = feature): GitRead {
+interface Source {
+  branch: string;
+  commit: string;
+  tree: string;
+  mainCommit: string;
+  mainTree: string;
+  dirty?: string;
+  noAncestry?: string;
+}
+
+function readGit(source: Source): GitRead {
   return (args) => {
     const key = args.join(' ');
-    if (overrides[key] instanceof Error) throw overrides[key];
-    if (typeof overrides[key] === 'string') return overrides[key] as string;
-    if (key === 'branch --show-current') return branch;
-    if (key === 'status --porcelain=v1') return '';
-    if (key === 'rev-parse HEAD') return remoteCommit;
-    if (key === 'rev-parse HEAD^{tree}') return remoteTree;
-    if (key === 'rev-parse origin/feat/m4-grounded-ai-intelligence') return remoteCommit;
-    if (key === 'rev-parse origin/feat/m4-grounded-ai-intelligence^{tree}') return remoteTree;
-    if (key.startsWith('merge-base --is-ancestor')) return '';
-    return overrides[key] as string ?? '';
+    if (key === 'branch --show-current') return source.branch;
+    if (key === 'status --porcelain=v1') return source.dirty ?? '';
+    if (key === 'rev-parse HEAD') return source.commit;
+    if (key === 'rev-parse HEAD^{tree}') return source.tree;
+    if (key === 'rev-parse origin/main') return source.mainCommit;
+    if (key === 'rev-parse origin/main^{tree}') return source.mainTree;
+    if (key === `rev-parse origin/${groundedEvaluationFeatureBranch}`) return originalCommit;
+    if (key === `rev-parse origin/${groundedEvaluationFeatureBranch}^{tree}`) return originalTree;
+    if (key === `rev-parse origin/${groundedEvaluationCorrectionBranch}`) return correctionCommit;
+    if (key === `rev-parse origin/${groundedEvaluationCorrectionBranch}^{tree}`) return correctionTree;
+    if (key.startsWith('merge-base --is-ancestor')) {
+      if (source.noAncestry === key) throw new Error('not an ancestor');
+      return '';
+    }
+    throw new Error(`Unexpected git query: ${key}`);
   };
 }
 
+const source = (branch: string, commit: string, tree: string, mainTree = correctionTree): Source => ({
+  branch, commit, tree, mainCommit, mainTree,
+});
+
 describe('grounded evaluation source identity', () => {
-  it('accepts only the clean local feature branch at the exact remote feature head', () => {
-    expect(verifyGroundedEvaluationSource(readGit())).toEqual({ codeCommit: remoteCommit, treeHash: remoteTree });
-    expect(() => verifyGroundedEvaluationSource(readGit({ 'rev-parse HEAD': commit }))).toThrow(/remote head/);
+  it('accepts the original preserved, clean Milestone 4 feature source', () => {
+    expect(verifyGroundedEvaluationSource(readGit(source(groundedEvaluationFeatureBranch, originalCommit, originalTree))))
+      .toEqual({ codeCommit: originalCommit, treeHash: originalTree,
+        sourceRef: `origin/${groundedEvaluationFeatureBranch}`, reviewedRefCommit: originalCommit });
   });
 
-  it('allows post-merge main only when its clean tree equals the preserved feature tree', () => {
-    expect(verifyGroundedEvaluationSource(readGit({}, 'main'))).toEqual({ codeCommit: remoteCommit, treeHash: remoteTree });
-    expect(() => verifyGroundedEvaluationSource(readGit({ 'rev-parse HEAD^{tree}': tree }, 'main'))).toThrow(/does not match/);
+  it('accepts the corrective source only at its exact preserved remote head and base ancestry', () => {
+    expect(verifyGroundedEvaluationSource(readGit(source(groundedEvaluationCorrectionBranch, correctionCommit, correctionTree))))
+      .toEqual({ codeCommit: correctionCommit, treeHash: correctionTree,
+        sourceRef: `origin/${groundedEvaluationCorrectionBranch}`, reviewedRefCommit: correctionCommit });
+    expect(() => verifyGroundedEvaluationSource(readGit({ ...source(groundedEvaluationCorrectionBranch, correctionCommit, correctionTree),
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationCorrectionBaseCommit} ${correctionCommit}` })))
+      .toThrow(/not an ancestor/);
+    expect(() => verifyGroundedEvaluationSource(readGit({ ...source(groundedEvaluationFeatureBranch, originalCommit, originalTree),
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationBaseCommit} ${originalCommit}` })))
+      .toThrow(/not an ancestor/);
   });
 
-  it('rejects dirty trees, unexpected branches, and sources without the expected base ancestor', () => {
-    expect(() => verifyGroundedEvaluationSource(readGit({ 'status --porcelain=v1': ' M source.ts' }))).toThrow(/clean/);
-    expect(() => verifyGroundedEvaluationSource(readGit({}, 'other-branch'))).toThrow(/approved feature branch/);
-    expect(() => verifyGroundedEvaluationSource(readGit({ [`merge-base --is-ancestor ${groundedEvaluationBaseCommit} HEAD`]: new Error('not ancestor') })))
-      .toThrow(/not ancestor/);
+  it('accepts post-squash main only when clean, current with origin, and tree-equal to a preserved reviewed ref', () => {
+    expect(verifyGroundedEvaluationSource(readGit(source('main', mainCommit, correctionTree))))
+      .toEqual({ codeCommit: mainCommit, treeHash: correctionTree,
+        sourceRef: 'origin/main', reviewedRefCommit: correctionCommit });
+    expect(verifyGroundedEvaluationSource(readGit(source('main', mainCommit, originalTree, originalTree))))
+      .toEqual({ codeCommit: mainCommit, treeHash: originalTree,
+        sourceRef: 'origin/main', reviewedRefCommit: originalCommit });
+  });
+
+  it('rejects dirty trees, arbitrary branches, unreviewed changes, stale main and invalid base ancestry', () => {
+    expect(() => verifyGroundedEvaluationSource(readGit({ ...source(groundedEvaluationCorrectionBranch, correctionCommit, correctionTree),
+      dirty: ' M source.ts' }))).toThrow(/clean/);
+    expect(() => verifyGroundedEvaluationSource(readGit(source('unreviewed/topic', correctionCommit, correctionTree))))
+      .toThrow(/approved source branch/);
+    expect(() => verifyGroundedEvaluationSource(readGit(source(groundedEvaluationCorrectionBranch, correctionCommit, unreviewedTree))))
+      .toThrow(/preserved reviewed remote head/);
+    expect(() => verifyGroundedEvaluationSource(readGit(source('main', mainCommit, correctionTree, unreviewedTree))))
+      .toThrow(/origin\/main/);
+    expect(() => verifyGroundedEvaluationSource(readGit(source('main', originalCommit, correctionTree))))
+      .toThrow(/origin\/main/);
+    expect(() => verifyGroundedEvaluationSource(readGit({ ...source('main', mainCommit, correctionTree),
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationCorrectionBaseCommit} ${mainCommit}` })))
+      .toThrow(/not an ancestor/);
+    expect(() => verifyGroundedEvaluationSource(readGit({ ...source(groundedEvaluationCorrectionBranch, correctionCommit, correctionTree),
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationCorrectionBaseCommit} ${correctionCommit}` })))
+      .toThrow(/not an ancestor/);
   });
 });
