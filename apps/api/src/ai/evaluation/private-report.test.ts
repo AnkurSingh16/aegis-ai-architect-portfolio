@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -30,6 +30,29 @@ describe('private one-time evaluation report storage', () => {
       const { chmod } = await import('node:fs/promises');
       await chmod(directory, 0o755);
       await expect(reservePrivateReport(report)).rejects.toThrow('permissions are unsafe');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('preserves an existing one-time report and rejects a symlink report path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aegis-eval-report-'));
+    const directory = join(root, 'private');
+    const existingPath = join(directory, 'existing.json');
+    const targetPath = join(directory, 'target.json');
+    const linkPath = join(directory, 'linked.json');
+    const original = '{"status":"completed","synthetic":true}\n';
+    try {
+      const reservation = await reservePrivateReport(existingPath);
+      await reservation.close();
+      await writeFile(existingPath, original, { mode: 0o600 });
+      await writeFile(targetPath, original, { mode: 0o600 });
+      await symlink(targetPath, linkPath);
+
+      await expect(reservePrivateReport(existingPath)).rejects.toMatchObject({ code: 'EEXIST' });
+      await expect(reservePrivateReport(linkPath)).rejects.toMatchObject({ code: 'EEXIST' });
+      expect(await readFile(existingPath, 'utf8')).toBe(original);
+      expect(await readFile(targetPath, 'utf8')).toBe(original);
+      expect((await stat(existingPath)).mode & 0o777).toBe(0o600);
+      expect((await stat(targetPath)).mode & 0o777).toBe(0o600);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

@@ -10,15 +10,18 @@ import { syntheticCases } from '../../contracts/triage.js';
 import { groundedAnalysisSchema, parseGroundedProviderOutput, type GroundedSource } from '../grounded-analysis.js';
 import { createGroundedOllamaProvider } from '../grounded-provider.js';
 import { resolveOllamaConfig } from '../provider.js';
-import { groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
+import { groundedEvaluationDatasetVersion, groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
 import { groundedEvaluationCliResult, runGroundedProviderEvaluation } from './grounded-runner.js';
-import { verifyGroundedEvaluationSource } from './source-identity.js';
+import { verifyGroundedEvaluationV3Source } from './source-identity.js';
 import { reservePrivateReport, writePrivateReport } from './private-report.js';
 import { assertSafeOllamaTcpRecords, parseOllamaTcpRecords } from './ollama-socket-preflight.js';
 
 const expectedModel = 'qwen2.5:3b-instruct';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../');
-const reportPath = resolve(root, '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json');
+export const groundedEvaluationV3ReportRelativePath = '.local/evaluations/milestone-4.8-grounded-qwen2.5-3b-instruct-v3.json';
+export const groundedEvaluationV1ReportRelativePath = '.local/evaluations/milestone-4-grounded-qwen2.5-3b-instruct.json';
+export const groundedEvaluationV2ReportRelativePath = '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json';
+const reportPath = resolve(root, groundedEvaluationV3ReportRelativePath);
 const localOrigin = 'http://127.0.0.1:11434';
 const cliFailureStages = ['source_preflight', 'runtime_preflight', 'model_preflight', 'operator_confirmation', 'report_reservation',
   'initial_report_write', 'provider_evaluation', 'progress_report_write', 'final_report_write', 'summary_output', 'report_close', 'unknown'] as const;
@@ -80,7 +83,7 @@ function inMemorySources(caseType: string): GroundedSource[] {
 
 async function main(): Promise<void> {
   if (process.argv.length !== 2) throw new Error('Grounded evaluation accepts no command-line arguments.');
-  const source = verifyGroundedEvaluationSource((args) => execFileSync('git', [...args],
+  const source = verifyGroundedEvaluationV3Source((args) => execFileSync('git', [...args],
     { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
   cliFailureStage = 'runtime_preflight';
   if (process.env.NODE_ENV !== 'development' || process.env.AEGIS_AI_ENABLED !== 'true' || process.env.AEGIS_GROUNDED_AI_ENABLED !== 'true') {
@@ -100,7 +103,7 @@ async function main(): Promise<void> {
   if (!await confirmRun()) { stdout.write('Grounded evaluation cancelled before any model request.\n'); return; }
 
   const timestamp = new Date().toISOString();
-  const base = { datasetVersion: 'aegis-grounded-provider-v2', ...source, model: expectedModel, evaluationTimestamp: timestamp,
+  const base = { datasetVersion: groundedEvaluationDatasetVersion, ...source, model: expectedModel, evaluationTimestamp: timestamp,
     testMode: 'provider-level-in-memory-synthetic-not-authenticated-http-e2e', plannedSlots: 6,
     labelStatus: 'engineering-reviewed-not-human-approved', status: 'in_progress' as const,
     limitations: ['Three synthetic case types with paired observations are a smoke test, not production accuracy evidence.',
@@ -131,7 +134,7 @@ async function main(): Promise<void> {
     await writePrivateReport(handle, { ...base, status, attempts: run.attempts, score });
     cliFailureStage = 'summary_output';
     stdout.write(`${JSON.stringify({ status, model: expectedModel, ...source, planned: 6, attempted: score.attempted,
-      succeeded: score.succeeded, failed: score.failed, notAttempted: score.notAttempted, reportPath: '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json' })}\n`);
+      succeeded: score.succeeded, failed: score.failed, notAttempted: score.notAttempted, reportPath: groundedEvaluationV3ReportRelativePath })}\n`);
     process.exitCode = exitCode;
   } catch { failed = true; }
   try { await handle.close(); }

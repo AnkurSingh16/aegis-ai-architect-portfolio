@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { groundedEvaluationBaseCommit, groundedEvaluationCorrectionBaseCommit,
   groundedEvaluationCorrectionBranch, groundedEvaluationFeatureBranch, groundedEvaluationSchemaQualityBaseCommit,
-  groundedEvaluationSchemaQualityBranch,
-  verifyGroundedEvaluationSource, type GitRead } from './source-identity.js';
+  groundedEvaluationSchemaQualityBranch, groundedEvaluationV3Branch, groundedEvaluationV3ReleaseBaseCommit,
+  verifyGroundedEvaluationSource, verifyGroundedEvaluationV3Source, type GitRead } from './source-identity.js';
 
 const originalCommit = 'a'.repeat(40);
 const originalTree = 'b'.repeat(40);
@@ -12,6 +12,8 @@ const mainCommit = 'e'.repeat(40);
 const unreviewedTree = 'f'.repeat(40);
 const schemaQualityCommit = '1'.repeat(40);
 const schemaQualityTree = '2'.repeat(40);
+const v3Commit = '3'.repeat(40);
+const v3Tree = '4'.repeat(40);
 
 interface Source {
   branch: string;
@@ -106,5 +108,55 @@ describe('grounded evaluation source identity', () => {
     expect(() => verifyGroundedEvaluationSource(readGit({ ...source(groundedEvaluationCorrectionBranch, correctionCommit, correctionTree),
       noAncestry: `merge-base --is-ancestor ${groundedEvaluationCorrectionBaseCommit} ${correctionCommit}` })))
       .toThrow(/not an ancestor/);
+  });
+
+  it('accepts v3 only on clean main after the PR #46 release base with the preserved v3 branch tree', () => {
+    const readV3Git: GitRead = (args) => {
+      const key = args.join(' ');
+      if (key === 'branch --show-current') return 'main';
+      if (key === 'status --porcelain=v1') return '';
+      if (key === 'rev-parse HEAD') return mainCommit;
+      if (key === 'rev-parse HEAD^{tree}') return v3Tree;
+      if (key === 'rev-parse origin/main') return mainCommit;
+      if (key === 'rev-parse origin/main^{tree}') return v3Tree;
+      if (key === `rev-parse origin/${groundedEvaluationV3Branch}`) return v3Commit;
+      if (key === `rev-parse origin/${groundedEvaluationV3Branch}^{tree}`) return v3Tree;
+      if (key === `merge-base --is-ancestor ${groundedEvaluationV3ReleaseBaseCommit} ${mainCommit}` ||
+          key === `merge-base --is-ancestor ${groundedEvaluationV3ReleaseBaseCommit} ${v3Commit}`) return '';
+      throw new Error(`Unexpected git query: ${key}`);
+    };
+    expect(verifyGroundedEvaluationV3Source(readV3Git)).toEqual({ codeCommit: mainCommit, treeHash: v3Tree,
+      sourceRef: 'origin/main', reviewedRefCommit: v3Commit });
+  });
+
+  it('rejects v3 feature-branch execution, dirty trees, stale main, changed reviewed trees and missing release ancestry', () => {
+    const makeReadV3Git = (options: { branch?: string; dirty?: string; mainCommit?: string; mainTree?: string;
+      reviewedTree?: string; noAncestry?: string } = {}): GitRead => (args) => {
+      const key = args.join(' ');
+      if (key === 'branch --show-current') return options.branch ?? 'main';
+      if (key === 'status --porcelain=v1') return options.dirty ?? '';
+      if (key === 'rev-parse HEAD') return mainCommit;
+      if (key === 'rev-parse HEAD^{tree}') return v3Tree;
+      if (key === 'rev-parse origin/main') return options.mainCommit ?? mainCommit;
+      if (key === 'rev-parse origin/main^{tree}') return options.mainTree ?? v3Tree;
+      if (key === `rev-parse origin/${groundedEvaluationV3Branch}`) return v3Commit;
+      if (key === `rev-parse origin/${groundedEvaluationV3Branch}^{tree}`) return options.reviewedTree ?? v3Tree;
+      if (key.startsWith('merge-base --is-ancestor')) {
+        if (options.noAncestry === key) throw new Error('not an ancestor');
+        return '';
+      }
+      throw new Error(`Unexpected git query: ${key}`);
+    };
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({ branch: groundedEvaluationV3Branch }))).toThrow(/merged main/);
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({ dirty: ' M source.ts' }))).toThrow(/clean/);
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({ mainCommit: originalCommit }))).toThrow(/origin\/main/);
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({ mainTree: unreviewedTree }))).toThrow(/origin\/main/);
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({ reviewedTree: unreviewedTree }))).toThrow(/preserved reviewed source tree/);
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationV3ReleaseBaseCommit} ${mainCommit}`,
+    }))).toThrow(/not an ancestor/);
+    expect(() => verifyGroundedEvaluationV3Source(makeReadV3Git({
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationV3ReleaseBaseCommit} ${v3Commit}`,
+    }))).toThrow(/not an ancestor/);
   });
 });
