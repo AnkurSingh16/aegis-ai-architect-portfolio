@@ -18,7 +18,7 @@ import { assertSafeOllamaTcpRecords, parseOllamaTcpRecords } from './ollama-sock
 
 const expectedModel = 'qwen2.5:3b-instruct';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../');
-const reportPath = resolve(root, '.local/evaluations/milestone-4-grounded-qwen2.5-3b-instruct.json');
+const reportPath = resolve(root, '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json');
 const localOrigin = 'http://127.0.0.1:11434';
 
 function assertNoActiveClient(): void {
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
 
   const handle = await reservePrivateReport(reportPath);
   const timestamp = new Date().toISOString();
-  const base = { datasetVersion: 'aegis-grounded-provider-v1', ...source, model: expectedModel, evaluationTimestamp: timestamp,
+  const base = { datasetVersion: 'aegis-grounded-provider-v2', ...source, model: expectedModel, evaluationTimestamp: timestamp,
     testMode: 'provider-level-in-memory-synthetic-not-authenticated-http-e2e', plannedSlots: 6,
     labelStatus: 'engineering-reviewed-not-human-approved', status: 'in_progress' as const,
     limitations: ['Three synthetic case types with paired observations are a smoke test, not production accuracy evidence.',
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
     const status = run.stopped || score.notAttempted > 0 ? 'stopped' : 'completed';
     await writePrivateReport(handle, { ...base, status, attempts: run.attempts, score });
     stdout.write(`${JSON.stringify({ status, model: expectedModel, ...source, planned: 6, attempted: score.attempted,
-      succeeded: score.succeeded, failed: score.failed, notAttempted: score.notAttempted, reportPath: '.local/evaluations/milestone-4-grounded-qwen2.5-3b-instruct.json' })}\n`);
+      succeeded: score.succeeded, failed: score.failed, notAttempted: score.notAttempted, reportPath: '.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json' })}\n`);
     if (status !== 'completed') process.exitCode = 1;
   } finally { await handle.close(); }
 }

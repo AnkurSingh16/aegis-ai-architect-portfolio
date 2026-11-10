@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted architecture direction; implementation is under review on `feat/m4-grounded-ai-intelligence`. The implementation branch adds synthetic-only ingestion and grounded retrieval. It is not merged or operationally deployed.
+Accepted architecture direction; implementation is merged. The local synthetic operational rollout is recorded in the private rollout report. Actual Auth0 browser-authenticated HTTP evidence and successful grounded model output remain unverified; this is not production readiness.
 
 ## Context
 
@@ -80,10 +80,10 @@ Retrieval remains a read-only capability behind a development feature flag. On a
 
 ## Consequences
 
-This proposal favors explainable retrieval and strict ownership over early vector-search complexity. It establishes a measurable baseline and a path to embeddings without approving model downloads, external services, cloud inference, production data use, or automated support actions. Milestone 4 remains proposed until implementation and acceptance evidence exist.
+This architecture favors explainable retrieval and strict ownership over early vector-search complexity. It establishes a measurable baseline without approving model downloads, external services, cloud inference, production data use, or automated support actions. The source and local synthetic rollout are complete; model quality and authenticated browser acceptance remain incomplete.
 
 ## Implementation status (Milestone 4 branch)
 
-The current Milestone 4 branch implements the source-controlled synthetic catalog, a guarded `aegis_ingest` role, additive ingestion/search migrations, English full-text retrieval, Auth0/RLS-backed grounded analysis, citation-ID validation/abstention contracts, and a development UI. This status describes source only: it is not merged, the new migrations have not been applied to `aegis_local`, the ingestion CLI has not been run, and no model inference has been authorized or performed in this milestone. Provider behavior is covered by mocks. The migration and integration suite are intended for the explicitly isolated `aegis_test` database and GitHub CI.
+The merged Milestone 4 implementation includes the source-controlled synthetic catalog, a guarded `aegis_ingest` role, additive ingestion/search migrations, English full-text retrieval, Auth0/RLS-backed grounded analysis, citation-ID validation/abstention contracts, and a development UI. The private local rollout report records migrations 004/005 and eight synthetic documents/eight chunks applied to `aegis_local` under operator authorization. Isolated integration and GitHub CI passed. The grounded provider v1 report records 0/6 strict-schema acceptance; actual Auth0 browser HTTP and successful model behavior remain unverified.
 
-The project road map names Milestone 4 but does not define separate normative 4.2–4.6 acceptance boundaries. The branch groups the proposed sequence as catalog/ingestion, retrieval, citations/abstention, evaluation/security, and local orchestration/UI. That grouping is an implementation decomposition, not a claim that each sub-number was previously approved as a separately defined product requirement. See [ADR 008](008-grounded-document-ingestion-and-retrieval.md) for the implementation choices and limits.
+The project road map names Milestone 4 but does not define separate normative 4.2–4.6 acceptance boundaries. The implementation groups the sequence as catalog/ingestion, retrieval, citations/abstention, evaluation/security, and local orchestration/UI. That grouping is an implementation decomposition, not a claim that each sub-number was previously approved as a separately defined product requirement. See [ADR 008](008-grounded-document-ingestion-and-retrieval.md) for implementation choices and limits.

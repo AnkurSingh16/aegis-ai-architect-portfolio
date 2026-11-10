@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { parseGroundedProviderOutput, type GroundedAnalysisProvider, type GroundedSource } from '../grounded-analysis.js';
+import { groundedValidationReasons, parseGroundedProviderOutput, type GroundedAnalysisProvider, type GroundedSource,
+  type GroundedValidationReason } from '../grounded-analysis.js';
 import { groundedEvaluationSlots, type GroundedEvaluationObservation, type GroundedFailureStage } from './grounded-scoring.js';
 
 type SafeEvent = Record<string, string | number | null>;
@@ -20,6 +21,7 @@ export interface GroundedEvaluationAttempt {
   humanReviewRequired?: true;
   failureStage?: GroundedFailureStage;
   schemaReason?: 'invalid_output' | 'invalid_citations';
+  validationReason?: GroundedValidationReason;
   latencyMs?: number | null;
   promptTokens?: number | null;
   generatedTokens?: number | null;
@@ -42,6 +44,10 @@ function safeMetric(value: unknown): number | null {
 function safeReason(value: unknown): 'invalid_output' | 'invalid_citations' | undefined {
   return value === 'invalid_output' || value === 'invalid_citations' ? value : undefined;
 }
+function safeValidationReason(value: unknown): GroundedValidationReason | undefined {
+  return typeof value === 'string' && groundedValidationReasons.includes(value as GroundedValidationReason)
+    ? value as GroundedValidationReason : undefined;
+}
 function emptyObservation(slot: typeof groundedEvaluationSlots[number], status: 'failure' | 'not_attempted',
   stage?: GroundedFailureStage, correlationComplete: boolean | null = false): GroundedEvaluationObservation {
   return { slotId: slot.slotId, caseType: slot.caseType, expected: slot.expected, expectedGroundingState: slot.expectedGroundingState,
@@ -56,11 +62,14 @@ function attemptFromFailure(slot: typeof groundedEvaluationSlots[number], attemp
   const parsedJson = failureStage === 'output_schema' ? true : failureStage === 'model_json_parse' ? false : null;
   const schemaAccepted = failureStage === 'output_schema' ? false : null;
   const schemaReason = safeReason(event?.schemaReason);
+  const validationReason = safeValidationReason(event?.validationReason);
   const citationsValid = schemaReason === 'invalid_citations' ? false : null;
   const observation = { ...emptyObservation(slot, 'failure', failureStage, correlated), parsedJson, schemaAccepted, citationsValid,
+    ...(validationReason ? { validationReason } : {}),
     latencyMs: safeMetric(event?.latencyMs) };
   return { observation, attempt: { attemptId, slotId: slot.slotId, caseType: slot.caseType, status: 'failure', failureStage,
-    ...(schemaReason ? { schemaReason } : {}), latencyMs: observation.latencyMs, correlationComplete: correlated } };
+    ...(schemaReason ? { schemaReason } : {}), ...(validationReason ? { validationReason } : {}),
+    latencyMs: observation.latencyMs, correlationComplete: correlated } };
 }
 
 /** Runs only the fixed six provider slots. One call per slot, no retries and no HTTP/database access. */

@@ -1,7 +1,7 @@
 import { acquireOllamaSlot, AnalysisUnavailableError, localOllamaGenerateEndpoint, releaseOllamaSlot,
   type OllamaConfig } from './provider.js';
 import { groundedAnalysisSchema, GroundedOutputError, parseGroundedProviderOutput,
-  GroundedAnalysisFailureError, type GroundedAnalysisProvider, type GroundedProviderOutput } from './grounded-analysis.js';
+  GroundedAnalysisFailureError, type GroundedAnalysisProvider, type GroundedProviderOutput, type GroundedValidationReason } from './grounded-analysis.js';
 
 const maxGroundedPromptBytes = 16 * 1024;
 const maxEnvelopeBytes = 8192;
@@ -70,6 +70,7 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
     callerSignal.addEventListener('abort', cancel, { once: true });
     let stage: FailureStage = 'unknown';
     let schemaReason: 'invalid_output' | 'invalid_citations' | undefined;
+    let validationReason: GroundedValidationReason | undefined;
     let responseBytes: number | undefined;
     try {
       if (callerSignal.aborted) cancel();
@@ -125,7 +126,9 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
       catch (error) {
         stage = 'output_schema';
         schemaReason = error instanceof GroundedOutputError ? error.reason : 'invalid_output';
-        throw new GroundedOutputError(schemaReason);
+        validationReason = error instanceof GroundedOutputError ? error.validationReason : 'invalid_field_type';
+        if (error instanceof GroundedOutputError) throw error;
+        throw new GroundedOutputError(schemaReason, validationReason);
       }
       throwIfAborted();
       const metrics = { latencyMs: Math.max(0, Math.round(now() - started)), promptTokens: safeTokenCount(body.prompt_eval_count),
@@ -138,6 +141,7 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
       logSafely(log, { event: 'ai_grounded_analysis', provider: 'ollama', model: config.model, outcome: 'failure',
         failureStage, latencyMs: Math.max(0, Math.round(now() - started)), ...(responseBytes === undefined ? {} : { responseBytes }),
         ...(schemaReason !== undefined ? { schemaReason } : {}),
+        ...(validationReason !== undefined ? { validationReason } : {}),
         ...(correlation ? { correlationId: correlation } : {}) });
       throw new GroundedAnalysisFailureError(['model_json_parse', 'output_schema', 'input_validation'].includes(failureStage)
         ? 'VALIDATION_FAILED' : 'PROVIDER_UNAVAILABLE');
