@@ -128,10 +128,12 @@ describe('protected synthetic ingestion command and transaction', () => {
     const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool;
     await expect(verifyLocalIngestionTarget(pool, adminUrl, localUrl, evidence)).resolves.toBe('172.19.0.2');
     expect(query).toHaveBeenNthCalledWith(1, 'BEGIN READ ONLY');
+    expect(String(query.mock.calls[1]?.[0])).toContain('host(inet_server_addr()) AS "serverAddress"');
     expect(query).toHaveBeenLastCalledWith('ROLLBACK');
     for (const mismatch of [{ ...identity, database: 'aegis_test' }, { ...identity, role: 'aegis_ingest' },
       { ...identity, systemIdentifier: '7701562929516937253' }, { ...identity, serverAddress: '172.19.0.99' },
-      { ...identity, serverPort: 5433 }]) {
+      { ...identity, serverAddress: '172.19.0.2/32' }, { ...identity, serverAddress: 'not-an-ip' },
+      { ...identity, serverAddress: null }, { ...identity, serverAddress: undefined }, { ...identity, serverPort: 5433 }]) {
       const mismatchQuery = vi.fn(async (sql: string) => sql === 'BEGIN READ ONLY' || sql === 'ROLLBACK' ? { rows: [] } : { rows: [mismatch] });
       const mismatchClient = { query: mismatchQuery, release: vi.fn() } as unknown as PoolClient;
       await expect(verifyLocalIngestionTarget({ connect: vi.fn().mockResolvedValue(mismatchClient) } as unknown as Pool,
@@ -139,6 +141,7 @@ describe('protected synthetic ingestion command and transaction', () => {
       expect(mismatchQuery).not.toHaveBeenCalledWith('BEGIN');
       expect(mismatchQuery).toHaveBeenCalledWith('BEGIN READ ONLY');
       expect(mismatchQuery).toHaveBeenCalledWith('ROLLBACK');
+      expect(mismatchQuery.mock.calls.some(([sql]) => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/iu.test(String(sql)))).toBe(false);
     }
   });
   it('writes one catalog transaction with parameterized statements and no update/delete fallback', async () => {
@@ -208,6 +211,31 @@ describe('protected synthetic ingestion command and transaction', () => {
       '172.19.0.2', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
     expect(query).not.toHaveBeenCalledWith('BEGIN');
     expect(query.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(String(sql)))).toBe(false);
+  });
+  it('checks the restricted local writer against the canonical expected host and port before writing', async () => {
+    const identity = { ...safeIngestIdentity, database: 'aegis_local', serverAddress: '172.19.0.2', serverPort: 5432 };
+    const id = randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('current_database()')) return { rows: [identity] };
+      if (sql.includes('FROM aegis.documents WHERE')) return { rows: [] };
+      if (sql.includes('INSERT INTO aegis.documents')) return { rows: [{ id }] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() } as unknown as PoolClient;
+    const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool;
+    await expect(ingestSyntheticCatalogLocal(pool, '172.19.0.2', [syntheticDocuments[0]])).resolves.toMatchObject({
+      documentsInserted: 1, chunksInserted: 1,
+    });
+    const identitySql = String(query.mock.calls[0]?.[0]);
+    expect(identitySql).toContain('host(inet_server_addr()) AS "serverAddress"');
+    expect(query).toHaveBeenCalledWith('BEGIN');
+    expect(query).toHaveBeenCalledWith('COMMIT');
+    const slashAddress = vi.fn().mockResolvedValue({ rows: [{ ...identity, serverAddress: '172.19.0.2/32' }] });
+    const slashClient = { query: slashAddress, release: vi.fn() } as unknown as PoolClient;
+    await expect(ingestSyntheticCatalogLocal({ connect: vi.fn().mockResolvedValue(slashClient) } as unknown as Pool,
+      '172.19.0.2', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
+    expect(slashAddress).not.toHaveBeenCalledWith('BEGIN');
+    expect(slashAddress.mock.calls.some(([sql]) => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(String(sql)))).toBe(false);
   });
 });
 
