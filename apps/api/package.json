@@ -24,6 +24,7 @@
     "jose": "^6.1.0"
   },
   "devDependencies": {
+    "ajv": "^6.15.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.0",

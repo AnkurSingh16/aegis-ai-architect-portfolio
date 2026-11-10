@@ -33,6 +33,14 @@ export interface GroundedEvaluationRun {
   stopped: boolean;
 }
 
+/** A completed evaluation means every planned slot reached an outcome, even if all outputs failed validation. */
+export function groundedEvaluationCliResult(run: GroundedEvaluationRun, notAttempted: number): {
+  status: 'completed' | 'stopped'; exitCode: 0 | 1;
+} {
+  const status = run.stopped || notAttempted > 0 ? 'stopped' : 'completed';
+  return { status, exitCode: status === 'completed' ? 0 : 1 };
+}
+
 const stages: readonly GroundedFailureStage[] = ['provider_connection', 'provider_http', 'response_size', 'response_decode',
   'response_envelope', 'model_json_parse', 'output_schema', 'generation_timeout', 'request_cancelled', 'input_validation', 'unknown'];
 function safeStage(value: unknown): GroundedFailureStage {

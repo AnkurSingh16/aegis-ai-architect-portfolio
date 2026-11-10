@@ -1,22 +1,45 @@
 import { categories, priorities, suggestedTeams } from '../contracts/triage.js';
 import { recommendedActions, uncertaintyLevels } from './analysis.js';
 
+const requiredGroundedFields = ['groundingState', 'category', 'priority', 'recommendedTeam', 'rationale', 'nextAction', 'citations',
+  'confidence', 'uncertainty', 'humanReviewRequired'] as const;
+
+const supportedGroundedProperties = {
+  groundingState: { type: 'string', enum: ['SUPPORTED'] },
+  category: { type: 'string', enum: categories },
+  priority: { type: 'string', enum: priorities },
+  recommendedTeam: { type: 'string', enum: suggestedTeams },
+  rationale: { type: 'string', minLength: 1, maxLength: 700 },
+  nextAction: { type: 'string', enum: recommendedActions },
+  citations: { type: 'array', minItems: 1, maxItems: 5, items: { type: 'string' } },
+  confidence: { type: 'number', minimum: 0, maximum: 1 },
+  uncertainty: { type: 'string', enum: uncertaintyLevels },
+  humanReviewRequired: { type: 'boolean', enum: [true] },
+} as const;
+
+const insufficientEvidenceProperties = {
+  groundingState: { type: 'string', enum: ['INSUFFICIENT_EVIDENCE'] },
+  category: { type: 'null' },
+  priority: { type: 'null' },
+  recommendedTeam: { type: 'null' },
+  rationale: { type: 'null' },
+  nextAction: { type: 'null' },
+  citations: { type: 'array', maxItems: 0, items: { type: 'string' } },
+  confidence: { type: 'null' },
+  uncertainty: { type: 'string', enum: ['high'] },
+  humanReviewRequired: { type: 'boolean', enum: [true] },
+} as const;
+
+/**
+ * The alternatives mirror the parser's two accepted states. Ollama documents JSON Schema
+ * structured output; llama.cpp's schema converter handles oneOf as a grammar alternative.
+ * The server parser remains authoritative for dynamic citation membership and safe rationale.
+ */
 export const groundedAnalysisSchema = {
-  type: 'object',
-  required: ['groundingState', 'category', 'priority', 'recommendedTeam', 'rationale', 'nextAction', 'citations', 'confidence', 'uncertainty', 'humanReviewRequired'],
-  additionalProperties: false,
-  properties: {
-    groundingState: { type: 'string', enum: ['SUPPORTED', 'INSUFFICIENT_EVIDENCE'] },
-    category: { type: ['string', 'null'], enum: [...categories, null] },
-    priority: { type: ['string', 'null'], enum: [...priorities, null] },
-    recommendedTeam: { type: ['string', 'null'], enum: [...suggestedTeams, null] },
-    rationale: { type: ['string', 'null'], minLength: 1, maxLength: 700 },
-    nextAction: { type: ['string', 'null'], enum: [...recommendedActions, null] },
-    citations: { type: 'array', maxItems: 5, items: { type: 'string' } },
-    confidence: { type: ['number', 'null'], minimum: 0, maximum: 1 },
-    uncertainty: { type: ['string', 'null'], enum: [...uncertaintyLevels, null] },
-    humanReviewRequired: { type: 'boolean', enum: [true] },
-  },
+  oneOf: [
+    { type: 'object', required: requiredGroundedFields, additionalProperties: false, properties: supportedGroundedProperties },
+    { type: 'object', required: requiredGroundedFields, additionalProperties: false, properties: insufficientEvidenceProperties },
+  ],
 } as const;
 
 export type GroundedProviderOutput = {

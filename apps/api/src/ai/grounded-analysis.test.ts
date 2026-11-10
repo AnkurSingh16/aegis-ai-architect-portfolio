@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import Ajv from 'ajv';
+import { categories, priorities, suggestedTeams } from '../contracts/triage.js';
 import { groundedAnalysisSchema, groundedValidationReasons, parseGroundedProviderOutput, GroundedOutputError, isGroundedAnalysisResult,
   type GroundedSource } from './grounded-analysis.js';
+import { recommendedActions, uncertaintyLevels } from './analysis.js';
 import { createGroundedOllamaProvider } from './grounded-provider.js';
 
 const model = 'synthetic-grounded-model:1b';
@@ -14,6 +17,22 @@ const supported = { groundingState: 'SUPPORTED', category: 'incident', priority:
 const insufficient = { groundingState: 'INSUFFICIENT_EVIDENCE', category: null, priority: null, recommendedTeam: null,
   rationale: null, nextAction: null, citations: [], confidence: null, uncertainty: 'high', humanReviewRequired: true };
 const config = { model, timeoutMs: 1000, maxConcurrent: 1 };
+const legacyLooseSchema = {
+  type: 'object', required: ['groundingState', 'category', 'priority', 'recommendedTeam', 'rationale', 'nextAction', 'citations',
+    'confidence', 'uncertainty', 'humanReviewRequired'], additionalProperties: false,
+  properties: {
+    groundingState: { type: 'string', enum: ['SUPPORTED', 'INSUFFICIENT_EVIDENCE'] },
+    category: { type: ['string', 'null'], enum: [...categories, null] },
+    priority: { type: ['string', 'null'], enum: [...priorities, null] },
+    recommendedTeam: { type: ['string', 'null'], enum: [...suggestedTeams, null] },
+    rationale: { type: ['string', 'null'], minLength: 1, maxLength: 700 },
+    nextAction: { type: ['string', 'null'], enum: [...recommendedActions, null] },
+    citations: { type: 'array', maxItems: 5, items: { type: 'string' } },
+    confidence: { type: ['number', 'null'], minimum: 0, maximum: 1 },
+    uncertainty: { type: ['string', 'null'], enum: [...uncertaintyLevels, null] },
+    humanReviewRequired: { type: 'boolean', enum: [true] },
+  },
+};
 
 function response(output: unknown, extra: Record<string, unknown> = {}) {
   return new Response(JSON.stringify({ done: true, model, response: JSON.stringify(output), prompt_eval_count: 42, eval_count: 18, ...extra }),
@@ -37,12 +56,38 @@ async function expectOneSanitizedFailure(fetchImpl: typeof fetch, expectedStage:
 
 describe('grounded answer contract', () => {
   it('requires a bounded response with an explicit supported or abstention state', () => {
-    expect(groundedAnalysisSchema.required).toEqual(['groundingState', 'category', 'priority', 'recommendedTeam', 'rationale',
+    expect(groundedAnalysisSchema.oneOf).toHaveLength(2);
+    const [supportedBranch, abstentionBranch] = groundedAnalysisSchema.oneOf;
+    expect(supportedBranch?.required).toEqual(['groundingState', 'category', 'priority', 'recommendedTeam', 'rationale',
       'nextAction', 'citations', 'confidence', 'uncertainty', 'humanReviewRequired']);
-    expect(groundedAnalysisSchema.additionalProperties).toBe(false);
-    expect(groundedAnalysisSchema.properties.groundingState.enum).toEqual(['SUPPORTED', 'INSUFFICIENT_EVIDENCE']);
+    expect(abstentionBranch?.required).toEqual(supportedBranch?.required);
+    expect(supportedBranch?.additionalProperties).toBe(false);
+    expect(abstentionBranch?.additionalProperties).toBe(false);
+    expect(supportedBranch?.properties.groundingState.enum).toEqual(['SUPPORTED']);
+    expect(abstentionBranch?.properties.groundingState.enum).toEqual(['INSUFFICIENT_EVIDENCE']);
+    expect(supportedBranch?.properties.category.type).toBe('string');
+    expect(abstentionBranch?.properties.category.type).toBe('null');
+    expect(supportedBranch?.properties.citations.minItems).toBe(1);
+    expect(abstentionBranch?.properties.citations.maxItems).toBe(0);
+    expect(supportedBranch?.properties.humanReviewRequired.enum).toEqual([true]);
+    expect(abstentionBranch?.properties.humanReviewRequired.enum).toEqual([true]);
     expect(parseGroundedProviderOutput(supported, [source])).toEqual(supported);
     expect(parseGroundedProviderOutput(insufficient, [source])).toEqual(insufficient);
+  });
+  it('reproduces old schema-valid mixed states and excludes them from the corrected generation branches', () => {
+    const ajv = new Ajv();
+    const acceptedByOldSchema = ajv.compile(legacyLooseSchema);
+    const acceptedByCurrentSchema = ajv.compile(groundedAnalysisSchema);
+    const partialAbstention = { ...insufficient, category: 'incident' };
+    const partialSupported = { ...supported, category: null };
+    const supportedWithoutCitation = { ...supported, citations: [] };
+    for (const value of [partialAbstention, partialSupported, supportedWithoutCitation]) {
+      expect(acceptedByOldSchema(value)).toBe(true);
+      expect(acceptedByCurrentSchema(value)).toBe(false);
+      expect(() => parseGroundedProviderOutput(value, [source])).toThrow(GroundedOutputError);
+    }
+    expect(acceptedByCurrentSchema(supported)).toBe(true);
+    expect(acceptedByCurrentSchema(insufficient)).toBe(true);
   });
   it.each([
     ['unknown citation', { ...supported, citations: [randomUUID()] }],
@@ -73,6 +118,8 @@ describe('grounded answer contract', () => {
   it('accepts only exact insufficiency form with no fabricated classification or citation', () => {
     expect(() => parseGroundedProviderOutput({ ...insufficient, category: 'incident' }, [source])).toThrow(GroundedOutputError);
     expect(() => parseGroundedProviderOutput({ ...insufficient, citations: [source.citationId] }, [source])).toThrow(GroundedOutputError);
+    expect(() => parseGroundedProviderOutput({ ...insufficient, rationale: 'Some answer.' }, [source])).toThrow(GroundedOutputError);
+    expect(() => parseGroundedProviderOutput({ ...supported, category: null }, [source])).toThrow(GroundedOutputError);
   });
   it.each([
     ['missing_required_field', Object.fromEntries(Object.entries(supported).filter(([key]) => key !== 'uncertainty'))],
@@ -121,6 +168,8 @@ describe('mocked local structured provider', () => {
     expect(init.redirect).toBe('error');
     const body = JSON.parse(String(init.body));
     expect(body.format).toEqual(groundedAnalysisSchema);
+    expect(body.prompt).toContain('Never return a partial SUPPORTED object.');
+    expect(body.prompt).toContain('For INSUFFICIENT_EVIDENCE, use the exact abstention shape');
     expect(body.options).toEqual({ temperature: 0.1, num_predict: 256 });
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({ event: 'ai_grounded_analysis', outcome: 'success', model });
