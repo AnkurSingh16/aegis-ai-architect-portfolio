@@ -60,8 +60,10 @@ function fakePool(query = vi.fn().mockResolvedValue({ rows: [] })) {
 describe('transaction and failure handling', () => {
   it('rejects invalid migration credentials before connecting', async () => {
     for (const password of ['', 'short', 'x'.repeat(257)]) {
-      await expect(migrateDatabase('postgres://localhost/aegis_test', password)).rejects.toThrow('16–256');
+      await expect(migrateDatabase('postgres://localhost/aegis_test', password, 'synthetic-ingest-password')).rejects.toThrow('16–256');
     }
+    await expect(migrateDatabase('postgres://localhost/aegis_test', 'synthetic-app-password', 'synthetic-app-password'))
+      .rejects.toThrow('distinct ingestion password');
   });
   it('handles idle connection errors with a stable, secret-free event', async () => {
     const output = vi.spyOn(console, 'error').mockImplementation(() => {});

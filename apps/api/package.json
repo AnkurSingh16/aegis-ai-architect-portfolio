@@ -13,6 +13,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "ai:evaluate:local": "tsx src/ai/evaluation/run-local-evaluation.ts",
     "db:migrate": "tsx src/storage/migrate-cli.ts",
+    "documents:ingest": "tsx src/documents/ingest-cli.ts",
     "cases": "tsx src/storage/cli.ts",
     "memberships": "tsx src/auth/membership-cli.ts"
   },

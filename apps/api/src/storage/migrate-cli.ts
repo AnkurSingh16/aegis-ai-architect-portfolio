@@ -3,7 +3,8 @@ import { migrateDatabase } from './migrations.js';
 
 try {
   requireDevelopment();
-  const count = await migrateDatabase(localDatabaseUrl(process.env.DATABASE_ADMIN_URL), process.env.DATABASE_APP_PASSWORD ?? '');
+  const count = await migrateDatabase(localDatabaseUrl(process.env.DATABASE_ADMIN_URL), process.env.DATABASE_APP_PASSWORD ?? '',
+    process.env.DATABASE_INGEST_PASSWORD ?? '');
   console.info(JSON.stringify({ event: 'database.migrated', applied: count }));
 } catch {
   console.error(JSON.stringify({ event: 'database.migration_failed',
