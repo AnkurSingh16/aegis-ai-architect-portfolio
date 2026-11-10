@@ -5,6 +5,7 @@ import { analysisOutputFailureReason, analysisOutputJsonSchema, AnalysisOutputVa
 const endpoint = 'http://127.0.0.1:11434/api/generate';
 const maxResponseBytes = 8192;
 const maxPromptBytes = 4096;
+let activeOllamaRequests = 0;
 const allowedModel = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 type FailureStage = 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
@@ -25,6 +26,15 @@ export class AnalysisDisabledError extends Error {
 }
 export interface AnalysisProvider { analyze(stored: StoredCase, signal: AbortSignal, correlationId?: string): Promise<AnalysisResult> }
 export interface OllamaConfig { model: string; timeoutMs: number; maxConcurrent: number }
+
+/** One process-wide provider limit shared by case and grounded analysis paths. */
+export function acquireOllamaSlot(maxConcurrent: number): boolean {
+  if (activeOllamaRequests >= maxConcurrent) return false;
+  activeOllamaRequests++;
+  return true;
+}
+export function releaseOllamaSlot(): void { activeOllamaRequests = Math.max(0, activeOllamaRequests - 1); }
+export const localOllamaGenerateEndpoint = endpoint;
 
 const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function safeCorrelationId(value: unknown): string | undefined {
@@ -110,14 +120,12 @@ export function createOllamaProvider(config: OllamaConfig, options: {
   log?: (event: Record<string, string | number | null>) => void;
   now?: () => number;
 } = {}): AnalysisProvider {
-  let active = 0;
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
   const log = options.log ?? ((event) => console.info(JSON.stringify(event)));
   return {
     async analyze(stored, signal, correlationId) {
-      if (active >= config.maxConcurrent) throw new AnalysisUnavailableError();
-      active++;
+      if (!acquireOllamaSlot(config.maxConcurrent)) throw new AnalysisUnavailableError();
       const safeId = safeCorrelationId(correlationId);
       const started = now();
       const controller = new AbortController();
@@ -213,7 +221,7 @@ export function createOllamaProvider(config: OllamaConfig, options: {
       } finally {
         clearTimeout(timeout);
         signal.removeEventListener('abort', cancel);
-        active--;
+        releaseOllamaSlot();
       }
     },
   };

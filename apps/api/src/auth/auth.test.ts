@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey, type JWTPayload } from 'jose';
 import type { Pool, PoolClient } from 'pg';
 import { createApp } from '../app.js';
@@ -8,6 +9,7 @@ import { withAuthenticatedTransaction } from './transaction.js';
 import { parseMembershipCommand, provisionMembership } from './memberships.js';
 import type { AnalysisProvider } from '../ai/provider.js';
 import type { AnalysisResult } from '../ai/analysis.js';
+import type { GroundedAnalysisProvider } from '../ai/grounded-analysis.js';
 
 const issuer = 'https://synthetic.auth0.example/';
 const audience = 'https://aegis.synthetic.example/api';
@@ -176,6 +178,12 @@ function fakePool(role = 'operator', caseRows: Array<Record<string, unknown>> | 
 const principal: VerifiedPrincipal = { issuer, subject: 'synthetic|reader', scopes: new Set(['read:cases', 'write:cases']) };
 function appFor(pool: Pool, analysisProvider?: AnalysisProvider) { const app = createApp({ authConfig: config,
   testDependencies: { keyResolver: resolver, pool, analysisProvider } }); apps.push(app); return app; }
+
+function appForGrounded(pool: Pool, groundedAnalysisProvider: GroundedAnalysisProvider) {
+  const app = createApp({ authConfig: config, testDependencies: { keyResolver: resolver, pool, groundedAnalysisProvider } });
+  apps.push(app);
+  return app;
+}
 
 const analysisResult: AnalysisResult = {
   caseId: id, category: 'incident', priority: 'high', recommendedTeam: 'Platform support',
@@ -412,5 +420,111 @@ describe('authenticated AI case analysis boundary', () => {
     await expect(request).rejects.toThrow();
     await vi.waitFor(() => expect(aborted).toBe(true));
     expect(observedSignal?.aborted).toBe(true);
+  });
+});
+
+describe('authenticated grounded document analysis boundary', () => {
+  const path = `/api/tenants/${tenant}/cases/${id}/grounded-analysis`;
+  const output = { groundingState: 'SUPPORTED' as const, category: 'incident' as const, priority: 'medium' as const,
+    recommendedTeam: 'Platform support' as const, rationale: 'The synthetic procedure supports human review of the sign-in interruption.',
+    nextAction: 'Review the synthetic service impact and incident timeline.' as const, confidence: 0.6, uncertainty: 'moderate' as const,
+    humanReviewRequired: true as const };
+
+  it('retrieves only after Auth0 membership and RLS context, commits before local provider, and maps only request citations', async () => {
+    const fixture = fakePool();
+    const chunkId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    fixture.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM aegis.memberships')) return { rows: [{ role: 'reader' }] };
+      if (sql.includes('SELECT *')) return { rows: [{ id, tenant_id: tenant, synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
+        created_at: new Date('2026-01-01T00:00:00Z'), updated_at: new Date('2026-01-01T00:00:00Z') }] };
+      if (sql.includes('WITH parsed')) return { rows: [{ chunk_id: chunkId, source_identity: 'SYNTHETIC-NORTH-LOGIN', document_version: 1,
+        position: 0, title: 'Synthetic login guide', content: 'Use a human reviewer for a synthetic sign-in interruption.', rank: 0.5 }] };
+      return { rows: [] };
+    });
+    let citationId = '';
+    const analyze = vi.fn(async (input: Parameters<GroundedAnalysisProvider['analyze']>[0]) => {
+      expect(fixture.release).toHaveBeenCalledWith(false);
+      expect(input.caseType).toBe('SYNTHETIC-LOGIN-001');
+      expect(input.sources).toHaveLength(1);
+      citationId = input.sources[0].citationId;
+      return { output: { ...output, groundingState: 'SUPPORTED' as const, citations: [citationId] },
+        metrics: { latencyMs: 12, promptTokens: 21, generatedTokens: 14 } };
+    });
+    const provider = { model: 'synthetic-grounded-model:1b', analyze };
+    const reply = await appForGrounded(fixture.pool, provider).inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+    expect(reply.statusCode).toBe(200);
+    expect(reply.headers['x-aegis-correlation-id']).toMatch(correlationIdPattern);
+    expect(reply.json()).toMatchObject({ groundingState: 'SUPPORTED', caseId: id, humanReviewRequired: true,
+      citations: [{ citationId, sourceIdentity: 'SYNTHETIC-NORTH-LOGIN', version: 1, title: 'Synthetic login guide' }], metrics: { latencyMs: 12 } });
+    expect(reply.json().citations[0]).not.toHaveProperty('chunkId');
+    expect(fixture.query.mock.calls.findIndex(([sql]) => String(sql).includes('WITH parsed')))
+      .toBeLessThan(fixture.query.mock.calls.findIndex(([sql]) => sql === 'COMMIT'));
+    expect(analyze).toHaveBeenCalledOnce();
+  });
+
+  it('returns a safe abstention without inference when retrieval is empty', async () => {
+    const fixture = fakePool();
+    fixture.query.mockImplementation(async (sql: string) => sql.includes('FROM aegis.memberships') ? { rows: [{ role: 'reader' }] }
+      : sql.includes('SELECT *') ? { rows: [{ id, tenant_id: tenant, synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
+        created_at: new Date(), updated_at: new Date() }] } : { rows: [] });
+    const analyze = vi.fn();
+    const provider = { model: 'synthetic-model:1b', analyze } as unknown as GroundedAnalysisProvider;
+    const reply = await appForGrounded(fixture.pool, provider).inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toMatchObject({ groundingState: 'INSUFFICIENT_EVIDENCE', citations: [], humanReviewRequired: true });
+    expect(analyze).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke retrieval or inference for unauthenticated or unmembered requests', async () => {
+    const fixture = fakePool();
+    const analyze = vi.fn();
+    const provider = { model: 'synthetic-model:1b', analyze } as unknown as GroundedAnalysisProvider;
+    const app = appForGrounded(fixture.pool, provider);
+    expect((await app.inject({ method: 'POST', url: path })).statusCode).toBe(401);
+    fixture.query.mockImplementation(async () => ({ rows: [] }));
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } })).statusCode).toBe(403);
+    expect(analyze).not.toHaveBeenCalled();
+    expect(fixture.query.mock.calls.some(([sql]) => String(sql).includes('WITH parsed'))).toBe(false);
+  });
+
+  it('checks scope and membership before returning the grounded-provider disabled response', async () => {
+    const fixture = fakePool();
+    const app = createApp({ authConfig: config, testDependencies: { keyResolver: resolver, pool: fixture.pool } });
+    apps.push(app);
+    expect((await app.inject({ method: 'POST', url: path })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: path,
+      headers: { authorization: await bearer(claims({ scope: 'write:cases' })) } })).statusCode).toBe(403);
+    fixture.query.mockImplementation(async () => ({ rows: [] }));
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } })).statusCode).toBe(403);
+    fixture.query.mockImplementation(async (sql: string) => sql.includes('FROM aegis.memberships') ? { rows: [{ role: 'reader' }] } : { rows: [] });
+    const disabled = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+    expect(disabled.statusCode).toBe(503);
+    expect(disabled.json()).toMatchObject({ code: 'ai_analysis_disabled' });
+    expect(fixture.query.mock.calls.some(([sql]) => String(sql).includes('WITH parsed') || String(sql).includes('SELECT *'))).toBe(false);
+  });
+
+  it('maps a provider failure or a citation outside the request set to the existing generic unavailable response', async () => {
+    const fixture = fakePool();
+    fixture.query.mockImplementation(async (sql: string) => sql.includes('FROM aegis.memberships') ? { rows: [{ role: 'reader' }] }
+      : sql.includes('SELECT *') ? { rows: [{ id, tenant_id: tenant, synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
+        created_at: new Date(), updated_at: new Date() }] }
+        : sql.includes('WITH parsed') ? { rows: [{ chunk_id: randomUUID(), source_identity: 'SYNTHETIC-NORTH-LOGIN', document_version: 1,
+          position: 0, title: 'Synthetic login guide', content: 'A human reviews the synthetic report.', rank: 0.5 }] } : { rows: [] });
+    const failingProvider = { model: 'synthetic-model:1b', analyze: vi.fn(async () => { throw new Error('secret prompt and database detail'); }) };
+    const app = appForGrounded(fixture.pool, failingProvider);
+    const failed = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+    expect(failed.statusCode).toBe(503);
+    expect(failingProvider.analyze).toHaveBeenCalledOnce();
+    expect(failed.json()).toEqual({ error: 'AI analysis is unavailable. Check the local development provider and retry.', code: 'ai_analysis_unavailable' });
+    expect(failed.headers['x-aegis-correlation-id']).toMatch(correlationIdPattern);
+    expect(failed.body).not.toContain('secret prompt');
+
+    const forgedProvider = { model: 'synthetic-model:1b', analyze: vi.fn(async () => ({ output: { ...output,
+      groundingState: 'SUPPORTED' as const, citations: [randomUUID()] }, metrics: { latencyMs: 1, promptTokens: null, generatedTokens: null } })) };
+    const forged = await appForGrounded(fixture.pool, forgedProvider).inject({ method: 'POST', url: path,
+      headers: { authorization: await bearer() } });
+    expect(forged.statusCode).toBe(503);
+    expect(forged.json()).toEqual({ error: 'AI analysis is unavailable. Check the local development provider and retry.', code: 'ai_analysis_unavailable' });
+    expect(forgedProvider.analyze).toHaveBeenCalledOnce();
   });
 });
