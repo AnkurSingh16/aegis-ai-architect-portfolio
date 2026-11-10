@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { GroundedAnalysisProvider, GroundedProviderOutput, GroundedSource } from '../grounded-analysis.js';
-import { groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
+import { groundedEvaluationDatasetVersion, groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
 import { groundedEvaluationCliResult, runGroundedProviderEvaluation } from './grounded-runner.js';
-import { sanitizedCliFailure } from './run-grounded-local-evaluation.js';
+import { groundedEvaluationV1ReportRelativePath, groundedEvaluationV2ReportRelativePath,
+  groundedEvaluationV3ReportRelativePath, sanitizedCliFailure } from './run-grounded-local-evaluation.js';
 
 const secretText = 'SYNTHETIC-PRIVATE-RAW-RESPONSE-DO-NOT-REPORT';
 function sourcesFor(caseType: string): GroundedSource[] {
@@ -25,13 +26,23 @@ const successProvider = (calls: string[]) => (log: (event: Record<string, string
 });
 
 describe('bounded grounded provider evaluation runner', () => {
+  it('uses a fresh v3 report identity without reusing historical report paths', () => {
+    expect(groundedEvaluationDatasetVersion).toBe('aegis-grounded-provider-v3');
+    expect(groundedEvaluationV3ReportRelativePath).toBe('.local/evaluations/milestone-4.8-grounded-qwen2.5-3b-instruct-v3.json');
+    expect(groundedEvaluationV3ReportRelativePath).not.toBe(groundedEvaluationV1ReportRelativePath);
+    expect(groundedEvaluationV3ReportRelativePath).not.toBe(groundedEvaluationV2ReportRelativePath);
+    expect(groundedEvaluationV1ReportRelativePath).toBe('.local/evaluations/milestone-4-grounded-qwen2.5-3b-instruct.json');
+    expect(groundedEvaluationV2ReportRelativePath).toBe('.local/evaluations/milestone-4.7-grounded-qwen2.5-3b-instruct-v2.json');
+  });
+
   it('uses exactly the six fixed slots once each and strips prompt/response text from reports', async () => {
     const calls: string[] = [];
     const run = await runGroundedProviderEvaluation({ providerFactory: successProvider(calls), sourcesFor,
       healthCheck: async () => true });
     expect(groundedEvaluationSlots).toHaveLength(6);
     expect(calls).toHaveLength(6);
-    expect(run.attempts).toHaveLength(6);
+    expect(new Set(calls).size).toBe(3);
+    expect(run.attempts.map((attempt) => attempt.slotId)).toEqual(groundedEvaluationSlots.map((slot) => slot.slotId));
     expect(run.attempts.every((attempt) => attempt.status === 'success' && attempt.correlationComplete)).toBe(true);
     expect(run.attempts[0]).toMatchObject({ confidence: 0.72, uncertainty: 'moderate', humanReviewRequired: true });
     const safeReport = JSON.stringify({ attempts: run.attempts, observations: run.observations, score: scoreGroundedEvaluation(run.observations) });
@@ -107,6 +118,7 @@ describe('bounded grounded provider evaluation runner', () => {
     expect(run.attempts[0]).toMatchObject({ status: 'failure', failureStage: 'output_schema', schemaReason: 'invalid_citations',
       validationReason: 'unknown_citation' });
     expect(scoreGroundedEvaluation(run.observations).metrics.validationReasons).toMatchObject({ counts: { unknown_citation: 1 }, denominator: 1 });
+    expect(run.attempts.map((attempt) => attempt.slotId)).toEqual(groundedEvaluationSlots.map((slot) => slot.slotId));
     expect(run.attempts.slice(1).every((attempt) => attempt.status === 'success')).toBe(true);
     expect(JSON.stringify(run)).not.toContain(secretText);
   });

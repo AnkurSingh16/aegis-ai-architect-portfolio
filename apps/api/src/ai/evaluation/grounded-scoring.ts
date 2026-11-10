@@ -1,7 +1,7 @@
 import { evaluationCases, evaluationLabelStatus, type ExpectedCaseLabels } from './dataset.js';
 import { groundedValidationReasons, type GroundedValidationReason } from '../grounded-analysis.js';
 
-export const groundedEvaluationDatasetVersion = 'aegis-grounded-provider-v2';
+export const groundedEvaluationDatasetVersion = 'aegis-grounded-provider-v3';
 export const groundedEvaluationLabelStatus = evaluationLabelStatus;
 const sourceByCase: Record<string, string> = {
   'SYNTHETIC-LOGIN-001': 'SYNTHETIC-NORTH-LOGIN-INCIDENT',

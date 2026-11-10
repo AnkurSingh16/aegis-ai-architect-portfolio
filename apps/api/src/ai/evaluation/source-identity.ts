@@ -1,9 +1,11 @@
 export const groundedEvaluationBaseCommit = '4690bb305f959f89ca2090a56982891158e77fe5';
 export const groundedEvaluationCorrectionBaseCommit = 'bd24e5bb366ed0147da08978009520c2f9c97ca4';
 export const groundedEvaluationSchemaQualityBaseCommit = 'ca1a62aecf3ecd388afbbe4515d1dfcbe30d0105';
+export const groundedEvaluationV3ReleaseBaseCommit = 'c9ce3085d19ab75128c841bc8d9f5066042bdff3';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
 export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
+export const groundedEvaluationV3Branch = 'feat/m4-grounded-evaluation-v3';
 
 const approvedSources = [
   { branch: groundedEvaluationFeatureBranch, ref: `origin/${groundedEvaluationFeatureBranch}`, base: groundedEvaluationBaseCommit, allowBranchEvaluation: true },
@@ -70,4 +72,29 @@ export function verifyGroundedEvaluationSource(readGit: GitRead): EvaluationSour
     throw new Error('Grounded evaluation source does not equal its preserved reviewed remote head.');
   }
   return { codeCommit, treeHash, sourceRef: approved.ref, reviewedRefCommit: reviewed.commit };
+}
+
+/**
+ * V3 is release-only: the evaluator runs on clean main after PR #46, and only when
+ * main's reviewed tree exactly matches the preserved v3 source branch. Git checks
+ * prove source identity and ancestry; exact-head CI and GitHub merge state remain
+ * separate release gates verified before the operator starts evaluation.
+ */
+export function verifyGroundedEvaluationV3Source(readGit: GitRead): EvaluationSourceIdentity {
+  const branch = readGit(['branch', '--show-current']);
+  if (branch !== 'main') throw new Error('V3 grounded evaluation requires merged main.');
+  assertClean(readGit);
+  const codeCommit = readGit(['rev-parse', 'HEAD']);
+  const treeHash = readGit(['rev-parse', 'HEAD^{tree}']);
+  const main = readRef(readGit, remoteMain);
+  if (codeCommit !== main.commit || treeHash !== main.tree) {
+    throw new Error('V3 grounded evaluation main must equal the fetched origin/main release.');
+  }
+  const reviewed = readRef(readGit, `origin/${groundedEvaluationV3Branch}`);
+  requireAncestry(readGit, groundedEvaluationV3ReleaseBaseCommit, codeCommit);
+  requireAncestry(readGit, groundedEvaluationV3ReleaseBaseCommit, reviewed.commit);
+  if (treeHash !== reviewed.tree) {
+    throw new Error('V3 grounded evaluation main does not match the preserved reviewed source tree.');
+  }
+  return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
 }

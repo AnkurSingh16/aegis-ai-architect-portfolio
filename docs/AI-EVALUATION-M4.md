@@ -26,15 +26,19 @@ Ollama's official API documentation specifies that structured output accepts a J
 
 The v2 artifact says `completed`, 6 attempted, and 0 unattempted; that status means every planned slot received an outcome, not that any model output passed validation. In the merged CLI, a completed six-failure run maps to exit code 0, while a stopped/incomplete run maps to exit code 1. A deterministic mocked runner reproduces this distinction. The saved report does not include the observed shell exit code or an exception stage, so the actual reason the operator saw exit code 1 cannot be identified from this evidence. A failure after final report persistence, such as summary output or file-handle close, is possible but unconfirmed. The CLI now emits only a fixed lifecycle stage on such exceptions to make a future run diagnosable without logging model content or raw errors.
 
-## V3 evaluation proposal
+## V3 evaluation preparation
 
-No v3 evaluation is authorized by this change. After review and merge, a separately approved v3 run should use a new private one-time report path, for example `.local/evaluations/milestone-4.8-grounded-qwen2.5-3b-instruct-v3.json`, and a new dataset/report version `aegis-grounded-provider-v3`. It must require clean `main` equal to `origin/main`, valid ancestry from the reviewed release base, and exact equality to the merged reviewed release tree; preserve v1 and v2 reports; use only the same local model and synthetic in-memory data; perform at most six sequential slots with one request per slot and no retries; require visible TTY confirmation; and store only sanitized aggregate/validated fields and fixed diagnostics.
+This change prepares, but does not run, v3. It uses the fresh private one-time path `.local/evaluations/milestone-4.8-grounded-qwen2.5-3b-instruct-v3.json` and report/dataset version `aegis-grounded-provider-v3`. Exclusive creation refuses an existing report. The private report directory and file remain mode 0700 and 0600, respectively; symlinked or unsafe paths fail closed. The v1 and v2 paths and artifacts are preserved.
 
-The first v3 acceptance gates are JSON parsing, strict schema acceptance, and reason-code counts with explicit denominators. Citation validity, evidence coverage, and classification metrics apply only to accepted outputs. Rejected output stays failed and is never repaired into a success. Run exact oneOf-shape unit tests and mocked provider tests in CI before operator evaluation. The evaluation remains a provider-level smoke test: it does not validate Auth0, membership, RLS, authenticated HTTP behavior, or semantic entailment. Six observations do not establish production accuracy or reliability.
+The v3-only source guard rejects feature-branch execution. It requires a clean `main`, exact equality between `HEAD` and fetched `origin/main`, ancestry from the PR #46 merge commit `c9ce3085d19ab75128c841bc8d9f5066042bdff3`, and tree equality with the preserved `origin/feat/m4-grounded-evaluation-v3` branch. This lets the source guard verify the reviewed source tree after squash merge without embedding an unknown future merge SHA. The guard proves Git source identity and ancestry; PR merge status and exact-head CI remain separate release checks that the operator must verify before a future run.
+
+The evaluator keeps the same local model, six fixed in-memory synthetic slots, one sequential provider request per slot, no retries, a 15-second timeout, concurrency one, and visible TTY confirmation. It has no persistent database path. The one-time report stores only sanitized measurements and validated output fields, never prompts, source text, rationale, rejected output, or credentials.
+
+The first v3 acceptance gates are JSON parsing, strict schema acceptance, and fixed validation-reason counts with explicit denominators. Citation validity, evidence coverage, and classification metrics apply only to accepted outputs. Rejected output stays failed and is never repaired into a success. Deterministic oneOf-shape and mocked-provider tests run in CI before any separately authorized operator evaluation. The evaluation remains a provider-level smoke test: it does not validate Auth0, membership, RLS, authenticated HTTP behavior, or semantic entailment. Six observations do not establish production accuracy or reliability. Historical v1 and v2 results remain 0/6 strict schema acceptance; prior Milestone 3B priority agreement remains 2/6. This preparation makes no claim that the model has improved.
 
 ## Operator gate
 
-The v2 report path is already reserved and must never be reused. After a future reviewed v3 release and separate authorization, the operator command should be:
+The v2 report path is already reserved and must never be reused. After this v3 PR is merged, exact-head CI is green, local main equals origin/main at the reviewed tree, and a separate inference authorization is provided, the operator command is:
 
 ```sh
 NODE_ENV=development \
@@ -44,6 +48,6 @@ AEGIS_OLLAMA_MODEL=qwen2.5:3b-instruct \
 npm run ai:evaluate:grounded:local -w apps/api
 ```
 
-The runner must independently require a visible TTY and the exact phrase `RUN SIX GROUNDED EVALUATIONS`. Do not bypass the prompt. Before v3, update the one-time report path and source identity to the exact merged release; neither is changed to permit reuse of the consumed v2 path.
+The runner independently requires a visible TTY and the exact phrase `RUN SIX GROUNDED EVALUATIONS`. Do not bypass the prompt. It reserves the v3 path only after source/runtime/model preflight and successful operator confirmation. A missing or invalid preflight must not consume the report path or start generation.
 
 Ordinary tests and CI use deterministic mocks only. They do not call Ollama, download models, access `aegis_local`, or require cloud services.
