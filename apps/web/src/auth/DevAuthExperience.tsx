@@ -3,6 +3,7 @@ import { Auth0Provider, useAuth0 } from '@auth0/auth0-react';
 import type { AuthConfig } from './config';
 import { isApprovedLoopbackOrigin } from './config';
 import { isAnalysisResult, type AnalysisResult } from '../../../api/src/ai/analysis.js';
+import { isGroundedAnalysisResult, type GroundedAnalysisResult } from '../../../api/src/ai/grounded-analysis.js';
 
 const tenants = [
   { id: '10000000-0000-4000-8000-000000000001', name: 'Synthetic North' },
@@ -20,6 +21,8 @@ type StoredCase = {
 
 type ViewState = { kind: 'idle' | 'loading' | 'ready' | 'unauthenticated' | 'forbidden' | 'unavailable'; cases: StoredCase[]; message?: string };
 type AnalysisState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'unauthenticated' | 'forbidden' | 'failed'; caseId?: string; result?: AnalysisResult };
+type GroundedState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'insufficient' | 'unauthenticated' | 'forbidden' |
+  'validationFailed' | 'providerUnavailable' | 'failed'; caseId?: string; result?: GroundedAnalysisResult };
 
 function isStoredCase(value: unknown, tenantId: string): value is StoredCase {
   if (!value || typeof value !== 'object') return false;
@@ -34,9 +37,11 @@ function CaseAccessPanel() {
   const [tenantId, setTenantId] = useState<string>(tenants[0].id);
   const [view, setView] = useState<ViewState>({ kind: 'idle', cases: [] });
   const [analysis, setAnalysis] = useState<AnalysisState>({ kind: 'idle' });
+  const [grounded, setGrounded] = useState<GroundedState>({ kind: 'idle' });
   const requestGeneration = useRef(0);
   const analysisGeneration = useRef(0);
   const analysisController = useRef<AbortController | undefined>(undefined);
+  const groundedController = useRef<AbortController | undefined>(undefined);
   const selectedTenant = tenants.find((tenant) => tenant.id === tenantId) ?? tenants[0];
 
   useEffect(() => {
@@ -44,7 +49,10 @@ function CaseAccessPanel() {
     analysisGeneration.current++;
     analysisController.current?.abort();
     analysisController.current = undefined;
+    groundedController.current?.abort();
+    groundedController.current = undefined;
     setAnalysis({ kind: 'idle' });
+    setGrounded({ kind: 'idle' });
     setView({ kind: 'idle', cases: [] });
     if (!isAuthenticated) return;
     let active = true;
@@ -93,6 +101,8 @@ function CaseAccessPanel() {
       analysisGeneration.current++;
       analysisController.current?.abort();
       analysisController.current = undefined;
+      groundedController.current?.abort();
+      groundedController.current = undefined;
     };
   }, [getAccessTokenSilently, isAuthenticated, tenantId, user?.sub]);
 
@@ -101,12 +111,18 @@ function CaseAccessPanel() {
     analysisGeneration.current += 1;
     analysisController.current?.abort();
     analysisController.current = undefined;
+    groundedController.current?.abort();
+    groundedController.current = undefined;
     setAnalysis({ kind: 'idle' });
+    setGrounded({ kind: 'idle' });
     setView({ kind: 'idle', cases: [] });
     setTenantId(nextTenant);
   }
 
   async function analyzeCase(caseId: string) {
+    groundedController.current?.abort();
+    groundedController.current = undefined;
+    setGrounded({ kind: 'idle' });
     analysisController.current?.abort();
     const generation = ++analysisGeneration.current;
     const controller = new AbortController();
@@ -142,12 +158,56 @@ function CaseAccessPanel() {
     }
   }
 
+  async function analyzeGroundedCase(caseId: string) {
+    analysisController.current?.abort();
+    analysisController.current = undefined;
+    setAnalysis({ kind: 'idle' });
+    groundedController.current?.abort();
+    const generation = ++analysisGeneration.current;
+    const controller = new AbortController();
+    groundedController.current = controller;
+    setGrounded({ kind: 'loading', caseId });
+    const stillCurrent = () => generation === analysisGeneration.current && !controller.signal.aborted;
+    try {
+      const token = await getAccessTokenSilently();
+      if (!stillCurrent()) return;
+      if (!token) { setGrounded({ kind: 'unauthenticated', caseId }); return; }
+      const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(caseId)}/grounded-analysis`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        credentials: 'omit', redirect: 'error', signal: controller.signal,
+      });
+      if (!stillCurrent()) return;
+      if (response.status === 401) { setGrounded({ kind: 'unauthenticated', caseId }); return; }
+      if (response.status === 403) { setGrounded({ kind: 'forbidden', caseId }); return; }
+      if (response.status === 503) {
+        const body = await response.json().catch(() => undefined) as { code?: unknown } | undefined;
+        if (!stillCurrent()) return;
+        const kind = body?.code === 'ai_analysis_disabled' ? 'disabled'
+          : body?.code === 'grounded_analysis_validation_failed' ? 'validationFailed'
+            : body?.code === 'grounded_analysis_provider_unavailable' ? 'providerUnavailable' : 'failed';
+        setGrounded({ kind, caseId });
+        return;
+      }
+      if (!response.ok) { setGrounded({ kind: 'failed', caseId }); return; }
+      const body: unknown = await response.json();
+      if (!stillCurrent() || !isGroundedAnalysisResult(body, caseId)) { if (stillCurrent()) setGrounded({ kind: 'failed', caseId }); return; }
+      setGrounded({ kind: body.groundingState === 'INSUFFICIENT_EVIDENCE' ? 'insufficient' : 'success', caseId, result: body });
+    } catch {
+      if (stillCurrent()) setGrounded({ kind: 'failed', caseId });
+    } finally {
+      if (groundedController.current === controller) groundedController.current = undefined;
+    }
+  }
+
   async function signOut() {
     requestGeneration.current += 1;
     analysisGeneration.current += 1;
     analysisController.current?.abort();
     analysisController.current = undefined;
+    groundedController.current?.abort();
+    groundedController.current = undefined;
     setAnalysis({ kind: 'idle' });
+    setGrounded({ kind: 'idle' });
     setView({ kind: 'idle', cases: [] });
     try {
       await logout({ logoutParams: { returnTo: 'http://127.0.0.1:5173' } });
@@ -191,8 +251,10 @@ function CaseAccessPanel() {
             <h3>{selectedTenant.name} cases</h3>
             {view.cases.length === 0 ? <p>No cases are available to this account.</p> : <ul className="case-list">
               {view.cases.map((item) => <li key={item.id} className="case-list-item"><div><strong>{item.synthetic_case_id}</strong><span>{item.status}</span></div>
-                <button type="button" className="auth-button secondary" disabled={analysis.kind === 'loading'}
+                <button type="button" className="auth-button secondary" disabled={analysis.kind === 'loading' || grounded.kind === 'loading'}
                   onClick={() => void analyzeCase(item.id)}>Analyze with local AI</button>
+                <button type="button" className="auth-button secondary" disabled={analysis.kind === 'loading' || grounded.kind === 'loading'}
+                  onClick={() => void analyzeGroundedCase(item.id)}>Analyze with grounded documents</button>
                 {analysis.caseId === item.id && analysis.kind === 'loading' && <p role="status">Analyzing this authorized synthetic case…</p>}
                 {analysis.caseId === item.id && analysis.kind === 'disabled' && <p role="status">Local AI analysis is disabled. It can be enabled explicitly in local server configuration.</p>}
                 {analysis.caseId === item.id && analysis.kind === 'unauthenticated' && <p role="alert">Your session is no longer authorized. Sign in again to continue.</p>}
@@ -213,6 +275,34 @@ function CaseAccessPanel() {
                       {analysis.result.metrics.generatedTokens === null ? '' : ` · ${analysis.result.metrics.generatedTokens} output tokens`}</dd></div>
                   </dl>
                   <p>{analysis.result.disclaimer}</p>
+                  <p className="analysis-warning">Human review is required. No recommendation is executed and no case is changed.</p>
+                </section>}
+                {grounded.caseId === item.id && grounded.kind === 'loading' && <p role="status">Searching authorized synthetic documents and preparing a grounded analysis…</p>}
+                {grounded.caseId === item.id && grounded.kind === 'disabled' && <p role="status">Grounded local analysis is disabled for this development server.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'unauthenticated' && <p role="alert">Your session is no longer authorized. Sign in again to continue.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'forbidden' && <p role="alert">Grounded analysis was denied because the required case permission or tenant membership is unavailable.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'validationFailed' && <p role="alert">Grounded analysis output did not pass the required validation contract. No recommendation was returned.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'providerUnavailable' && <p role="alert">The local grounded analysis provider is unavailable. No recommendation was returned.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'failed' && <p role="alert">Grounded analysis could not be completed. Check the local provider and retry.</p>}
+                {grounded.caseId === item.id && grounded.kind === 'insufficient' && <section className="analysis-result" aria-labelledby={`grounded-${item.id}`}>
+                  <h4 id={`grounded-${item.id}`}>Insufficient evidence</h4>
+                  <p>{grounded.result?.groundingState === 'INSUFFICIENT_EVIDENCE' ? grounded.result.message : 'Available synthetic documents did not provide sufficient evidence.'}</p>
+                  <p className="analysis-warning">Human review is required. No recommendation was executed and the case was not changed.</p>
+                </section>}
+                {grounded.caseId === item.id && grounded.kind === 'success' && grounded.result?.groundingState === 'SUPPORTED' && <section className="analysis-result" aria-labelledby={`grounded-${item.id}`}>
+                  <h4 id={`grounded-${item.id}`}>Grounded AI-assisted analysis</h4>
+                  <dl>
+                    <div><dt>Category</dt><dd>{grounded.result.category}</dd></div>
+                    <div><dt>Priority</dt><dd>{grounded.result.priority}</dd></div>
+                    <div><dt>Recommended team</dt><dd>{grounded.result.recommendedTeam}</dd></div>
+                    <div><dt>Rationale</dt><dd>{grounded.result.rationale}</dd></div>
+                    <div><dt>Suggested next action</dt><dd>{grounded.result.nextAction}</dd></div>
+                    <div><dt>Model-reported confidence (uncalibrated) / uncertainty</dt><dd>{Math.round(grounded.result.confidence * 100)}% · {grounded.result.uncertainty}</dd></div>
+                    <div><dt>Retrieved sources</dt><dd><ul>{grounded.result.citations.map((citation) => <li key={citation.citationId}>
+                      {citation.title} · {citation.sourceIdentity} · version {citation.version}: {citation.excerpt}</li>)}</ul></dd></div>
+                    <div><dt>Execution</dt><dd>{grounded.result.execution.provider} · {grounded.result.execution.model} · {grounded.result.metrics.latencyMs} ms</dd></div>
+                  </dl>
+                  <p>{grounded.result.disclaimer}</p>
                   <p className="analysis-warning">Human review is required. No recommendation is executed and no case is changed.</p>
                 </section>}
               </li>)}

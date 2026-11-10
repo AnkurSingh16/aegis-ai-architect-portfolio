@@ -22,7 +22,7 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
     SELECT current_user = 'aegis_app' AND session_user = 'aegis_app'
       AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole
       AND NOT r.rolcreatedb AND NOT r.rolinherit AND NOT r.rolreplication
-      AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid)
+      AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid OR roleid = r.oid)
       AND NOT has_schema_privilege(current_user, 'aegis', 'CREATE')
       AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
       AND NOT has_database_privilege(current_user, current_database(), 'CREATE')

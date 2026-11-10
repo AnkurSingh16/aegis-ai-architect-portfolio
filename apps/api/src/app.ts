@@ -10,10 +10,12 @@ import { createTokenVerifier } from './auth/token.js';
 import { registerProtectedCaseRoutes } from './auth/routes.js';
 import { createDatabasePool, verifyRuntimeRole } from './storage/database.js';
 import { createOllamaProvider, resolveOllamaConfig, type AnalysisProvider } from './ai/provider.js';
+import { createGroundedOllamaProvider } from './ai/grounded-provider.js';
+import type { GroundedAnalysisProvider } from './ai/grounded-analysis.js';
 
 export interface AppOptions {
   authConfig?: AuthConfig;
-  testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool; analysisProvider?: AnalysisProvider };
+  testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool; analysisProvider?: AnalysisProvider; groundedAnalysisProvider?: GroundedAnalysisProvider };
 }
 
 export function createApp(options: AppOptions = {}) {
@@ -23,6 +25,10 @@ export function createApp(options: AppOptions = {}) {
   const aiConfig = resolveOllamaConfig(process.env);
   if (aiConfig && !authConfig) throw new Error('AI analysis requires the authenticated case API.');
   const analysisProvider = options.testDependencies?.analysisProvider ?? (aiConfig ? createOllamaProvider(aiConfig) : undefined);
+  const groundedEnabled = process.env.NODE_ENV === 'development' && process.env.AEGIS_AI_ENABLED === 'true' &&
+    process.env.AEGIS_GROUNDED_AI_ENABLED === 'true';
+  const groundedAnalysisProvider = options.testDependencies?.groundedAnalysisProvider ??
+    (groundedEnabled && aiConfig ? createGroundedOllamaProvider(aiConfig) : undefined);
   const app = Fastify({ logger: false, requestIdHeader: false, genReqId: () => randomUUID(),
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   app.get('/api/health', async () => ({ ok: true, service: 'aegis-api', mode: 'starter' }));
@@ -39,7 +45,7 @@ export function createApp(options: AppOptions = {}) {
       catch { await closeDatabase(); throw new Error('Protected case storage initialization failed.'); }
     });
     app.addHook('onClose', closeDatabase);
-    app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider));
+    app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider, groundedAnalysisProvider));
   }
 
   // Do NOT enable unauthenticated demo routes in production.

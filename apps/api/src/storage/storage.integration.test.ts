@@ -16,7 +16,8 @@ import type { VerifiedPrincipal } from '../auth/token.js';
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
 const runtimeUrl = process.env.TEST_DATABASE_URL;
 const password = process.env.DATABASE_APP_PASSWORD;
-if (!adminUrl || !runtimeUrl || !password) throw new Error('Set TEST_DATABASE_ADMIN_URL, TEST_DATABASE_URL and DATABASE_APP_PASSWORD for real PostgreSQL tests.');
+const ingestionPassword = process.env.DATABASE_INGEST_PASSWORD;
+if (!adminUrl || !runtimeUrl || !password || !ingestionPassword) throw new Error('Set isolated PostgreSQL test URLs and role passwords for real PostgreSQL tests.');
 for (const [label, value] of [['admin', adminUrl], ['runtime', runtimeUrl]] as const) {
   const parsed = new URL(value);
   if (parsed.pathname !== '/aegis_test' || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) {
@@ -70,7 +71,7 @@ async function rawDocumentContext(context: { mode?: string; issuer?: string; sub
 }
 
 beforeAll(async () => {
-  await migrateDatabase(adminUrl, password);
+  await migrateDatabase(adminUrl, password, ingestionPassword);
   await verifyRuntimeRole(pool);
   await admin.query(`INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES
     ($1,$2,$3,'reader'), ($1,$4,$5,'reader')`,
@@ -101,7 +102,7 @@ afterAll(async () => {
 
 describe('real PostgreSQL persistence and role boundary', () => {
   it('replays migrations without changing the schema and rejects checksum changes', async () => {
-    expect(await migrateDatabase(adminUrl, password)).toBe(0);
+    expect(await migrateDatabase(adminUrl, password, ingestionPassword)).toBe(0);
     const migrationText = await readFile(new URL('003_tenant_documents.sql', migrationsDirectory), 'utf8');
     const migrationChecksum = createHash('sha256').update(migrationText).digest('hex');
     expect((await admin.query('SELECT checksum FROM aegis_migrations.versions WHERE version = $1',
@@ -113,28 +114,29 @@ describe('real PostgreSQL persistence and role boundary', () => {
       }
       const sql = await readFile(new URL('003_tenant_documents.sql', migrationsDirectory), 'utf8');
       await writeFile(join(directory, '003_tenant_documents.sql'), `${sql}\n-- modified migration\n`);
-      await expect(migrateDatabase(adminUrl, password, pathToFileURL(`${directory}/`))).rejects.toThrow('modified');
+      await expect(migrateDatabase(adminUrl, password, ingestionPassword, pathToFileURL(`${directory}/`))).rejects.toThrow('modified');
     } finally { await rm(directory, { recursive: true, force: true }); }
-    expect(await migrateDatabase(adminUrl, password)).toBe(0);
+    expect(await migrateDatabase(adminUrl, password, ingestionPassword)).toBe(0);
   });
 
   it('rejects missing, duplicate and out-of-order migration histories', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aegis-history-'));
     try {
       const url = pathToFileURL(`${directory}/`);
-      await expect(migrateDatabase(adminUrl, password, url)).rejects.toThrow('present and unique');
+      await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('present and unique');
       await writeFile(join(directory, '002_placeholder.sql'), 'SELECT 1;');
-      await expect(migrateDatabase(adminUrl, password, url)).rejects.toThrow('missing');
+      await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('missing');
+      for (const file of await readdir(migrationsDirectory)) {
+        await writeFile(join(directory, file), await readFile(new URL(file, migrationsDirectory), 'utf8'));
+      }
       const sql = await readFile(new URL('001_multitenant.sql', migrationsDirectory), 'utf8');
       await writeFile(join(directory, '001_multitenant.sql'), sql);
       await writeFile(join(directory, '001_duplicate.sql'), 'SELECT 1;');
-      await expect(migrateDatabase(adminUrl, password, url)).rejects.toThrow('present and unique');
+      await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('present and unique');
       await rm(join(directory, '001_duplicate.sql'));
       await rm(join(directory, '002_placeholder.sql'));
-      await writeFile(join(directory, '002_authenticated_memberships.sql'), await readFile(new URL('002_authenticated_memberships.sql', migrationsDirectory), 'utf8'));
-      await writeFile(join(directory, '003_tenant_documents.sql'), await readFile(new URL('003_tenant_documents.sql', migrationsDirectory), 'utf8'));
       await writeFile(join(directory, '000_earlier.sql'), 'SELECT 1;');
-      await expect(migrateDatabase(adminUrl, password, url)).rejects.toThrow('Out-of-order');
+      await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('Out-of-order');
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -154,7 +156,8 @@ describe('real PostgreSQL persistence and role boundary', () => {
     ]);
     for (const table of tables.rows) expect(table).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true, owned: false });
     expect((await pool.query(`SELECT count(*)::int AS count FROM pg_auth_members
-      WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)`)).rows[0].count).toBe(0);
+      WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+         OR roleid = (SELECT oid FROM pg_roles WHERE rolname = current_user)`)).rows[0].count).toBe(0);
     const administrator = (await admin.query('SELECT current_user')).rows[0].current_user as string;
     for (const sql of [`SET ROLE "${administrator.replaceAll('"', '""')}"`,
       'ALTER TABLE aegis.support_cases DISABLE ROW LEVEL SECURITY',
@@ -165,6 +168,25 @@ describe('real PostgreSQL persistence and role boundary', () => {
       'SELECT * FROM aegis_migrations.versions']) {
       await expect(pool.query(sql)).rejects.toMatchObject({ code: '42501' });
     }
+  });
+
+  it('rejects runtime-role membership whether aegis_app inherits a role or other roles inherit aegis_app', async () => {
+    const probeRole = `aegis_m4_role_probe_${randomUUID().replaceAll('-', '')}`;
+    await admin.query(`CREATE ROLE ${probeRole} NOLOGIN`);
+    try {
+      await admin.query(`GRANT ${probeRole} TO aegis_app`);
+      await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe application database role or schema.');
+      await admin.query(`REVOKE ${probeRole} FROM aegis_app`);
+
+      await admin.query(`GRANT aegis_app TO ${probeRole}`);
+      await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe application database role or schema.');
+      await admin.query(`REVOKE aegis_app FROM ${probeRole}`);
+    } finally {
+      await admin.query(`REVOKE ${probeRole} FROM aegis_app`).catch(() => {});
+      await admin.query(`REVOKE aegis_app FROM ${probeRole}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${probeRole}`);
+    }
+    await expect(verifyRuntimeRole(pool)).resolves.toBeUndefined();
   });
 
   it('persists synthetic cases across independent pools and retains deterministic triage', async () => {

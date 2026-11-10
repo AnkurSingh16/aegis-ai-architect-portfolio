@@ -31,6 +31,15 @@ const analysis = { caseId: 'case-1', category: 'incident', priority: 'high', rec
   execution: { provider: 'ollama', model: 'fixture-model:1b', mode: 'local-model' },
   metrics: { latencyMs: 25, promptTokens: 20, generatedTokens: 30 },
   disclaimer: 'Advisory analysis only. Evidence references identify case fields; they are not RAG citations or external source grounding.' };
+const groundedAnalysis = { groundingState: 'SUPPORTED', caseId: 'case-1', category: 'incident', priority: 'medium',
+  recommendedTeam: 'Platform support', rationale: 'The synthetic guide supports a human review of the reported sign-in issue.',
+  nextAction: 'Review the synthetic service impact and incident timeline.',
+  citations: [{ citationId: '12345678-1234-4234-8234-123456789abc', sourceIdentity: 'SYNTHETIC-NORTH-LOGIN', version: 1,
+    title: 'Synthetic login guide', excerpt: 'A human support agent verifies the sign-in impact.' }],
+  confidence: 0.62, uncertainty: 'moderate', humanReviewRequired: true,
+  execution: { provider: 'ollama', model: 'mock-local-model', mode: 'local-model' },
+  metrics: { latencyMs: 25, promptTokens: 20, generatedTokens: 30 },
+  disclaimer: 'Advisory only. Citations identify retrieved synthetic source chunks; they do not prove that a claim is entailed by a source.' };
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -334,6 +343,64 @@ describe('development Auth0 case experience', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign in with Auth0' }));
     expect(await screen.findByText(/Sign-in could not be started/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('token secret detail');
+  });
+
+  it('requests grounded analysis only for a loaded authorized case and renders validated citations', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => groundedAnalysis });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+    expect(await screen.findByText('SYN-NORTH-001')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze with grounded documents' }));
+    expect(await screen.findByText('Grounded AI-assisted analysis')).toBeTruthy();
+    expect(screen.getByText(/SYNTHETIC-NORTH-LOGIN/)).toBeTruthy();
+    expect(screen.getByText(/Model-reported confidence \(uncalibrated\)/)).toBeTruthy();
+    expect(screen.getByText(/do not prove that a claim is entailed/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/tenants/10000000-0000-4000-8000-000000000001/cases/case-1/grounded-analysis',
+      expect.objectContaining({ method: 'POST', credentials: 'omit', redirect: 'error',
+        headers: { Authorization: 'Bearer private-test-token', Accept: 'application/json' } }));
+    expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('body');
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+    expect(document.body.textContent).not.toContain('private-test-token');
+  });
+
+  it('shows explicit insufficient-evidence state and clears it when tenant changes', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const empty = { groundingState: 'INSUFFICIENT_EVIDENCE', caseId: 'case-1', citations: [], humanReviewRequired: true,
+      message: 'Available synthetic documents did not provide sufficient evidence.' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => empty })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+    expect(await screen.findByText('SYN-NORTH-001')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze with grounded documents' }));
+    expect(await screen.findByText('Insufficient evidence')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Requested tenant'), { target: { value: '20000000-0000-4000-8000-000000000002' } });
+    await waitFor(() => expect(screen.queryByText('Insufficient evidence')).toBeNull());
+  });
+
+  it('distinguishes validation failure from local provider unavailability using fixed safe codes', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'grounded_analysis_validation_failed' }) })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'grounded_analysis_provider_unavailable' }) });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Analyze with grounded documents' }));
+    expect(await screen.findByText(/did not pass the required validation contract/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze with grounded documents' }));
+    expect(await screen.findByText(/local grounded analysis provider is unavailable/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('failureStage');
+    expect(document.body.textContent).not.toContain('schemaReason');
   });
 
   it('offers recovery after token acquisition fails without showing provider details', async () => {

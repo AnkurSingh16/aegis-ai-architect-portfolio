@@ -7,10 +7,13 @@ export const migrationsDirectory = new URL('../../db/migrations/', import.meta.u
 
 /** Administrative command only. Never pass this pool to application operations. */
 export async function migrateDatabase(adminUrl: string, applicationPassword: string,
-  directory: URL = migrationsDirectory): Promise<number> {
+  ingestionPassword: string, directory: URL = migrationsDirectory): Promise<number> {
   localDatabaseUrl(adminUrl);
   if (applicationPassword.length < 16 || applicationPassword.length > 256) {
     throw new Error('Application password must contain 16–256 characters.');
+  }
+  if (ingestionPassword.length < 16 || ingestionPassword.length > 256 || ingestionPassword === applicationPassword) {
+    throw new Error('A distinct ingestion password of 16–256 characters is required.');
   }
   const pool = new Pool({ connectionString: adminUrl, max: 1, connectionTimeoutMillis: 5000 });
   try {
@@ -20,7 +23,7 @@ export async function migrateDatabase(adminUrl: string, applicationPassword: str
       await client.query('SELECT pg_advisory_xact_lock(73451002)');
       const role = await client.query<{ safe: boolean }>(`SELECT NOT rolsuper AND NOT rolbypassrls
         AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit AND NOT rolreplication
-        AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = pg_roles.oid) AS safe
+        AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = pg_roles.oid OR roleid = pg_roles.oid) AS safe
         FROM pg_roles WHERE rolname = 'aegis_app'`);
       if (role.rows[0] && role.rows[0].safe !== true) throw new Error('Existing application role has unsafe privileges.');
       if (!role.rows[0]) {
@@ -41,6 +44,40 @@ export async function migrateDatabase(adminUrl: string, applicationPassword: str
         throw new Error('Migration versions must be present and unique.');
       }
       if (applied.rows.some((entry) => !files.includes(entry.version))) throw new Error('An applied migration is missing.');
+      const pending = files.filter((file) => !applied.rows.some((entry) => entry.version === file));
+      if (pending.includes('004_synthetic_document_ingestion.sql')) {
+        const ingestionRole = await client.query<{ safe: boolean }>(`SELECT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls
+          AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit AND NOT rolreplication
+          AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = pg_roles.oid OR roleid = pg_roles.oid)
+          AND NOT has_schema_privilege(rolname, 'public', 'CREATE')
+          AND (to_regnamespace('aegis') IS NULL OR NOT has_schema_privilege(rolname, 'aegis', 'CREATE'))
+          AND (to_regnamespace('aegis_migrations') IS NULL OR NOT has_schema_privilege(rolname, 'aegis_migrations', 'CREATE'))
+          AND (to_regclass('aegis.documents') IS NULL OR NOT has_table_privilege(rolname, 'aegis.documents', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+          AND (to_regclass('aegis.document_chunks') IS NULL OR NOT has_table_privilege(rolname, 'aegis.document_chunks', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+          AND (to_regclass('aegis.documents') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass('aegis.documents') AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL))
+          AND (to_regclass('aegis.document_chunks') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass('aegis.document_chunks') AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL))
+          AND (to_regclass('aegis.documents') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) x WHERE c.oid=to_regclass('aegis.documents') AND x.grantee=0))
+          AND (to_regclass('aegis.document_chunks') IS NULL OR NOT EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) x WHERE c.oid=to_regclass('aegis.document_chunks') AND x.grantee=0))
+          AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE c.relkind IN ('r','p','v','m') AND n.nspname NOT IN ('pg_catalog','information_schema')
+              AND c.oid IS DISTINCT FROM to_regclass('aegis.documents') AND c.oid IS DISTINCT FROM to_regclass('aegis.document_chunks')
+              AND has_table_privilege(rolname,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+          AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+            WHERE c.relkind IN ('r','p','v','m') AND n.nspname NOT IN ('pg_catalog','information_schema')
+              AND c.oid IS DISTINCT FROM to_regclass('aegis.documents') AND c.oid IS DISTINCT FROM to_regclass('aegis.document_chunks')
+              AND has_column_privilege(rolname,c.oid,a.attnum,'SELECT,INSERT,UPDATE,REFERENCES')) AS safe
+          FROM pg_roles WHERE rolname = 'aegis_ingest'`);
+        if (ingestionRole.rows[0] && ingestionRole.rows[0].safe !== true) {
+          throw new Error('Existing document ingestion role has unsafe privileges.');
+        }
+        if (!ingestionRole.rows[0]) {
+          await client.query("SELECT set_config('aegis.bootstrap_ingestion_password', $1, true)", [ingestionPassword]);
+          await client.query(`DO $$ BEGIN EXECUTE format(
+            'CREATE ROLE aegis_ingest LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION PASSWORD %L',
+            current_setting('aegis.bootstrap_ingestion_password')); END $$`);
+        }
+      }
       let count = 0;
       for (const file of files) {
         const sql = await readFile(new URL(file, directory), 'utf8');

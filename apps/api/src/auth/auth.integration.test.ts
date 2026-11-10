@@ -16,8 +16,10 @@ import type { AnalysisResult } from '../ai/analysis.js';
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
 const runtimeUrl = process.env.TEST_DATABASE_URL;
 const password = process.env.DATABASE_APP_PASSWORD;
-if (!adminUrl || !runtimeUrl || !password) throw new Error('Explicit PostgreSQL integration configuration is required.');
-if (new URL(adminUrl).pathname !== '/aegis_test' || new URL(runtimeUrl).pathname !== '/aegis_test') {
+const ingestionPassword = process.env.DATABASE_INGEST_PASSWORD;
+if (!adminUrl || !runtimeUrl || !password || !ingestionPassword) throw new Error('Explicit PostgreSQL integration configuration is required.');
+if ([adminUrl, runtimeUrl].some((value) => new URL(value).pathname !== '/aegis_test' ||
+  !['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname))) {
   throw new Error('Authenticated integration tests require the isolated aegis_test database.');
 }
 const issuer = 'https://synthetic.auth0.example/';
@@ -63,7 +65,7 @@ async function membership(subject: string, tenant: string, role: string) {
 beforeAll(async () => {
   errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
   successLog = vi.spyOn(console, 'info').mockImplementation(() => {});
-  await migrateDatabase(adminUrl, password);
+  await migrateDatabase(adminUrl, password, ingestionPassword);
   await verifyRuntimeRole(pool);
   await membership(operator, north.tenantId, 'operator');
   await membership(reader, north.tenantId, 'reader');
