@@ -50,8 +50,17 @@ export interface GroundedAnalysisProvider {
     correlationId: string): Promise<{ output: GroundedProviderOutput; metrics: { latencyMs: number; promptTokens: number | null; generatedTokens: number | null } }>;
 }
 
+export const groundedValidationReasons = [
+  'missing_required_field', 'unexpected_field', 'invalid_field_type', 'unsupported_enum', 'invalid_grounding_state',
+  'invalid_state_combination', 'unsafe_rationale', 'missing_citation', 'invalid_citation_format', 'unknown_citation',
+  'duplicate_citation', 'invalid_confidence', 'invalid_human_review',
+] as const;
+export type GroundedValidationReason = typeof groundedValidationReasons[number];
+
 export class GroundedOutputError extends Error {
-  constructor(readonly reason: 'invalid_output' | 'invalid_citations') { super('Grounded analysis output is invalid.'); }
+  constructor(readonly reason: 'invalid_output' | 'invalid_citations', readonly validationReason: GroundedValidationReason) {
+    super('Grounded analysis output is invalid.');
+  }
 }
 
 /** Stable, non-sensitive outcome classification for the authenticated route error contract. */
@@ -78,30 +87,44 @@ const citationUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 
 /** Keeps generation output separate from authoritative request-scoped citation resolution. */
 export function parseGroundedProviderOutput(value: unknown, sources: readonly GroundedSource[]): GroundedProviderOutput {
-  if (!record(value)) throw new GroundedOutputError('invalid_output');
+  const invalidOutput = (reason: GroundedValidationReason): never => { throw new GroundedOutputError('invalid_output', reason); };
+  const invalidCitation = (reason: GroundedValidationReason): never => { throw new GroundedOutputError('invalid_citations', reason); };
+  if (!record(value)) invalidOutput('invalid_field_type');
+  const output = value as Record<string, unknown>;
   const keys = ['groundingState', 'category', 'priority', 'recommendedTeam', 'rationale', 'nextAction', 'citations', 'confidence', 'uncertainty', 'humanReviewRequired'];
-  if (Object.keys(value).length !== keys.length || !keys.every((key) => Object.hasOwn(value, key)) || value.humanReviewRequired !== true) {
-    throw new GroundedOutputError('invalid_output');
+  if (keys.some((key) => !Object.hasOwn(output, key))) invalidOutput('missing_required_field');
+  if (Object.keys(output).some((key) => !keys.includes(key))) invalidOutput('unexpected_field');
+  if (typeof output.humanReviewRequired !== 'boolean') invalidOutput('invalid_field_type');
+  if (output.humanReviewRequired !== true) invalidOutput('invalid_human_review');
+  if (typeof output.groundingState !== 'string') invalidOutput('invalid_field_type');
+  if (output.groundingState !== 'SUPPORTED' && output.groundingState !== 'INSUFFICIENT_EVIDENCE') invalidOutput('invalid_grounding_state');
+  if (output.groundingState === 'INSUFFICIENT_EVIDENCE' && output.category === null && output.priority === null &&
+      output.recommendedTeam === null && output.rationale === null && output.nextAction === null && Array.isArray(output.citations) &&
+      output.citations.length === 0 && output.confidence === null && output.uncertainty === 'high') {
+    return output as GroundedProviderOutput;
   }
-  if (value.groundingState === 'INSUFFICIENT_EVIDENCE' && value.category === null && value.priority === null &&
-      value.recommendedTeam === null && value.rationale === null && value.nextAction === null && Array.isArray(value.citations) &&
-      value.citations.length === 0 && value.confidence === null && value.uncertainty === 'high') {
-    return value as GroundedProviderOutput;
+  if (output.groundingState === 'INSUFFICIENT_EVIDENCE') invalidOutput('invalid_state_combination');
+  if (typeof output.category !== 'string' || typeof output.priority !== 'string' || typeof output.recommendedTeam !== 'string' ||
+      typeof output.rationale !== 'string' || typeof output.nextAction !== 'string' || typeof output.uncertainty !== 'string') {
+    invalidOutput('invalid_field_type');
   }
-  if (value.groundingState !== 'SUPPORTED' ||
-      !categories.includes(value.category as typeof categories[number]) || !priorities.includes(value.priority as typeof priorities[number]) ||
-      !suggestedTeams.includes(value.recommendedTeam as typeof suggestedTeams[number]) || !recommendedActions.includes(value.nextAction as typeof recommendedActions[number]) ||
-      !safeRationale(value.rationale) || !Number.isFinite(value.confidence) || typeof value.confidence !== 'number' || value.confidence < 0 || value.confidence > 1 ||
-      !uncertaintyLevels.includes(value.uncertainty as typeof uncertaintyLevels[number]) || value.humanReviewRequired !== true) {
-    throw new GroundedOutputError('invalid_output');
+  if (!categories.includes(output.category as typeof categories[number]) || !priorities.includes(output.priority as typeof priorities[number]) ||
+      !suggestedTeams.includes(output.recommendedTeam as typeof suggestedTeams[number]) || !recommendedActions.includes(output.nextAction as typeof recommendedActions[number]) ||
+      !uncertaintyLevels.includes(output.uncertainty as typeof uncertaintyLevels[number])) invalidOutput('unsupported_enum');
+  if (!safeRationale(output.rationale)) invalidOutput('unsafe_rationale');
+  if (typeof output.confidence !== 'number' || !Number.isFinite(output.confidence) || output.confidence < 0 || output.confidence > 1) {
+    invalidOutput('invalid_confidence');
   }
-  if (!Array.isArray(value.citations) || value.citations.length < 1 || value.citations.length > 5 ||
-      !value.citations.every((item) => typeof item === 'string' && citationUuid.test(item))) throw new GroundedOutputError('invalid_citations');
+  if (!Array.isArray(output.citations)) invalidCitation('invalid_field_type');
+  const citations = output.citations as unknown[];
+  if (citations.length === 0) invalidCitation('missing_citation');
+  if (citations.length > 5 || !citations.every((item) => typeof item === 'string' && citationUuid.test(item))) {
+    invalidCitation('invalid_citation_format');
+  }
+  if (new Set(citations).size !== citations.length) invalidCitation('duplicate_citation');
   const allowed = new Set(sources.map((source) => source.citationId));
-  if (new Set(value.citations).size !== value.citations.length || value.citations.some((citation) => !allowed.has(citation))) {
-    throw new GroundedOutputError('invalid_citations');
-  }
-  return value as GroundedProviderOutput;
+  if (citations.some((citation) => !allowed.has(citation as string))) invalidCitation('unknown_citation');
+  return output as unknown as GroundedProviderOutput;
 }
 
 export type GroundedAnalysisResult =

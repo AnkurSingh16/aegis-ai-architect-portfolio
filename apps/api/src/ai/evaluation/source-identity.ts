@@ -1,11 +1,15 @@
 export const groundedEvaluationBaseCommit = '4690bb305f959f89ca2090a56982891158e77fe5';
 export const groundedEvaluationCorrectionBaseCommit = 'bd24e5bb366ed0147da08978009520c2f9c97ca4';
+export const groundedEvaluationSchemaQualityBaseCommit = 'ca1a62aecf3ecd388afbbe4515d1dfcbe30d0105';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
+export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
 
 const approvedSources = [
-  { branch: groundedEvaluationFeatureBranch, ref: `origin/${groundedEvaluationFeatureBranch}`, base: groundedEvaluationBaseCommit },
-  { branch: groundedEvaluationCorrectionBranch, ref: `origin/${groundedEvaluationCorrectionBranch}`, base: groundedEvaluationCorrectionBaseCommit },
+  { branch: groundedEvaluationFeatureBranch, ref: `origin/${groundedEvaluationFeatureBranch}`, base: groundedEvaluationBaseCommit, allowBranchEvaluation: true },
+  { branch: groundedEvaluationCorrectionBranch, ref: `origin/${groundedEvaluationCorrectionBranch}`, base: groundedEvaluationCorrectionBaseCommit, allowBranchEvaluation: true },
+  { branch: groundedEvaluationSchemaQualityBranch, ref: `origin/${groundedEvaluationSchemaQualityBranch}`,
+    base: groundedEvaluationSchemaQualityBaseCommit, allowBranchEvaluation: false },
 ] as const;
 const remoteMain = 'origin/main';
 
@@ -57,7 +61,7 @@ export function verifyGroundedEvaluationSource(readGit: GitRead): EvaluationSour
     throw new Error('Grounded evaluation main tree does not match a preserved reviewed source ref.');
   }
 
-  const approved = approvedSources.find((item) => item.branch === branch);
+  const approved = approvedSources.find((item) => item.branch === branch && item.allowBranchEvaluation);
   if (!approved) throw new Error('Grounded evaluation requires an approved source branch or merged main.');
   const reviewed = readRef(readGit, approved.ref);
   requireAncestry(readGit, approved.base, codeCommit);

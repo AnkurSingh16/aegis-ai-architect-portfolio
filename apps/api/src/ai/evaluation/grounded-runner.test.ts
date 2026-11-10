@@ -36,7 +36,7 @@ describe('bounded grounded provider evaluation runner', () => {
     const safeReport = JSON.stringify({ attempts: run.attempts, observations: run.observations, score: scoreGroundedEvaluation(run.observations) });
     expect(safeReport).not.toContain(secretText);
     expect(safeReport).not.toContain('Synthetic source content');
-    expect(safeReport).not.toContain('rationale');
+    expect(run.attempts[0]).not.toHaveProperty('rationale');
     expect(run.observations[0]).toMatchObject({ groundingState: 'SUPPORTED', evidenceCoverage: true,
       groundednessReviewAgreement: null, expectedSourceIdentity: groundedEvaluationSlots[0]!.expectedSourceIdentity });
   });
@@ -94,7 +94,7 @@ describe('bounded grounded provider evaluation runner', () => {
         calls += 1;
         if (calls === 1) {
           log({ event: 'ai_grounded_analysis', outcome: 'failure', failureStage: 'output_schema', schemaReason: 'invalid_citations',
-            correlationId, latencyMs: 5 });
+            validationReason: 'unknown_citation', correlationId, latencyMs: 5 });
           throw new Error(secretText);
         }
         log({ event: 'ai_grounded_analysis', outcome: 'success', correlationId, latencyMs: 5 });
@@ -103,7 +103,9 @@ describe('bounded grounded provider evaluation runner', () => {
     });
     const run = await runGroundedProviderEvaluation({ providerFactory, sourcesFor, healthCheck: async () => true });
     expect(calls).toBe(6);
-    expect(run.attempts[0]).toMatchObject({ status: 'failure', failureStage: 'output_schema', schemaReason: 'invalid_citations' });
+    expect(run.attempts[0]).toMatchObject({ status: 'failure', failureStage: 'output_schema', schemaReason: 'invalid_citations',
+      validationReason: 'unknown_citation' });
+    expect(scoreGroundedEvaluation(run.observations).metrics.validationReasons).toMatchObject({ counts: { unknown_citation: 1 }, denominator: 1 });
     expect(run.attempts.slice(1).every((attempt) => attempt.status === 'success')).toBe(true);
     expect(JSON.stringify(run)).not.toContain(secretText);
   });

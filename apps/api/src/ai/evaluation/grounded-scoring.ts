@@ -1,6 +1,7 @@
 import { evaluationCases, evaluationLabelStatus, type ExpectedCaseLabels } from './dataset.js';
+import { groundedValidationReasons, type GroundedValidationReason } from '../grounded-analysis.js';
 
-export const groundedEvaluationDatasetVersion = 'aegis-grounded-provider-v1';
+export const groundedEvaluationDatasetVersion = 'aegis-grounded-provider-v2';
 export const groundedEvaluationLabelStatus = evaluationLabelStatus;
 const sourceByCase: Record<string, string> = {
   'SYNTHETIC-LOGIN-001': 'SYNTHETIC-NORTH-LOGIN-INCIDENT',
@@ -36,6 +37,7 @@ export interface GroundedEvaluationObservation {
   result?: { category: string; priority: string; recommendedTeam: string; nextAction: string; humanReviewRequired: boolean };
   correlationComplete: boolean | null;
   failureStage?: GroundedFailureStage;
+  validationReason?: GroundedValidationReason;
   latencyMs: number | null;
   promptTokens: number | null;
   generatedTokens: number | null;
@@ -109,6 +111,9 @@ export function scoreGroundedEvaluation(observations: readonly GroundedEvaluatio
       humanReviewEnforcement: rate(reviewChecked.filter((item) => item.humanReviewRequired === true).length, reviewChecked.length),
       correlationCompleteness: booleanRate('correlationComplete'),
       failureStages: { counts: stages, denominator: attempted.filter((item) => item.status === 'failure').length },
+      validationReasons: { counts: Object.fromEntries(groundedValidationReasons.map((reason) => [reason,
+        attempted.filter((item) => item.status === 'failure' && item.failureStage === 'output_schema' && item.validationReason === reason).length])),
+        denominator: attempted.filter((item) => item.status === 'failure' && item.failureStage === 'output_schema').length },
       latencyMs: { samples: latency.length, median: median(latency), p95: null as number | null,
         p95State: latency.length < 20 ? 'not_measured_sample_too_small' as const : 'not_implemented' as const },
       tokenUsage: { promptSamples: promptTokens.length, generatedSamples: generatedTokens.length, promptTokens, generatedTokens },

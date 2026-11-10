@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { groundedEvaluationBaseCommit, groundedEvaluationCorrectionBaseCommit,
-  groundedEvaluationCorrectionBranch, groundedEvaluationFeatureBranch,
+  groundedEvaluationCorrectionBranch, groundedEvaluationFeatureBranch, groundedEvaluationSchemaQualityBaseCommit,
+  groundedEvaluationSchemaQualityBranch,
   verifyGroundedEvaluationSource, type GitRead } from './source-identity.js';
 
 const originalCommit = 'a'.repeat(40);
@@ -9,6 +10,8 @@ const correctionCommit = 'c'.repeat(40);
 const correctionTree = 'd'.repeat(40);
 const mainCommit = 'e'.repeat(40);
 const unreviewedTree = 'f'.repeat(40);
+const schemaQualityCommit = '1'.repeat(40);
+const schemaQualityTree = '2'.repeat(40);
 
 interface Source {
   branch: string;
@@ -33,6 +36,8 @@ function readGit(source: Source): GitRead {
     if (key === `rev-parse origin/${groundedEvaluationFeatureBranch}^{tree}`) return originalTree;
     if (key === `rev-parse origin/${groundedEvaluationCorrectionBranch}`) return correctionCommit;
     if (key === `rev-parse origin/${groundedEvaluationCorrectionBranch}^{tree}`) return correctionTree;
+    if (key === `rev-parse origin/${groundedEvaluationSchemaQualityBranch}`) return schemaQualityCommit;
+    if (key === `rev-parse origin/${groundedEvaluationSchemaQualityBranch}^{tree}`) return schemaQualityTree;
     if (key.startsWith('merge-base --is-ancestor')) {
       if (source.noAncestry === key) throw new Error('not an ancestor');
       return '';
@@ -64,6 +69,11 @@ describe('grounded evaluation source identity', () => {
       .toThrow(/not an ancestor/);
   });
 
+  it('rejects pre-merge evaluation on the moving schema-quality branch', () => {
+    expect(() => verifyGroundedEvaluationSource(readGit(source(groundedEvaluationSchemaQualityBranch, schemaQualityCommit, schemaQualityTree))))
+      .toThrow(/approved source branch/);
+  });
+
   it('accepts post-squash main only when clean, current with origin, and tree-equal to a preserved reviewed ref', () => {
     expect(verifyGroundedEvaluationSource(readGit(source('main', mainCommit, correctionTree))))
       .toEqual({ codeCommit: mainCommit, treeHash: correctionTree,
@@ -71,6 +81,12 @@ describe('grounded evaluation source identity', () => {
     expect(verifyGroundedEvaluationSource(readGit(source('main', mainCommit, originalTree, originalTree))))
       .toEqual({ codeCommit: mainCommit, treeHash: originalTree,
         sourceRef: 'origin/main', reviewedRefCommit: originalCommit });
+    expect(verifyGroundedEvaluationSource(readGit(source('main', mainCommit, schemaQualityTree, schemaQualityTree))))
+      .toEqual({ codeCommit: mainCommit, treeHash: schemaQualityTree,
+        sourceRef: 'origin/main', reviewedRefCommit: schemaQualityCommit });
+    expect(() => verifyGroundedEvaluationSource(readGit({ ...source('main', mainCommit, schemaQualityTree, schemaQualityTree),
+      noAncestry: `merge-base --is-ancestor ${groundedEvaluationSchemaQualityBaseCommit} ${mainCommit}` })))
+      .toThrow(/not an ancestor/);
   });
 
   it('rejects dirty trees, arbitrary branches, unreviewed changes, stale main and invalid base ancestry', () => {
