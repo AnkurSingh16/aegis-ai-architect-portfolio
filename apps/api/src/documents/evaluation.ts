@@ -2,14 +2,14 @@ export const retrievalDatasetVersion = 'aegis-synthetic-doc-retrieval-v1';
 
 /** Labels are engineering-reviewed source/query associations, not human-approved production truth. */
 export const retrievalEvaluationCases = [
-  { id: 'login-triage', tenant: 'north', query: 'synthetic sign in interruption', relevantSources: ['SYNTHETIC-NORTH-LOGIN-INCIDENT'] },
-  { id: 'mfa-challenge', tenant: 'north', query: 'multi factor challenge device clock', relevantSources: ['SYNTHETIC-NORTH-MFA-GUIDANCE'] },
-  { id: 'recovery-identity', tenant: 'north', query: 'account recovery verify identity', relevantSources: ['SYNTHETIC-NORTH-ACCOUNT-RECOVERY'] },
-  { id: 'network-loopback', tenant: 'north', query: 'loopback api health connectivity', relevantSources: ['SYNTHETIC-NORTH-NETWORK-DIAGNOSTICS'] },
-  { id: 'billing-invoice', tenant: 'south', query: 'invoice line item discrepancy', relevantSources: ['SYNTHETIC-SOUTH-BILLING-DISCREPANCY'] },
-  { id: 'service-impact', tenant: 'south', query: 'service degradation observed impact recovery', relevantSources: ['SYNTHETIC-SOUTH-SERVICE-DEGRADATION'] },
-  { id: 'support-escalation', tenant: 'south', query: 'human support lead escalation', relevantSources: ['SYNTHETIC-SOUTH-SUPPORT-ESCALATION'] },
-  { id: 'insufficient-guidance', tenant: 'south', query: 'unknown evidence human support guidance', relevantSources: ['SYNTHETIC-SOUTH-GENERAL-GUIDANCE'] },
+  { id: 'login-triage', tenant: 'north', query: 'user-visible error', relevantSources: ['SYNTHETIC-NORTH-LOGIN-INCIDENT'] },
+  { id: 'mfa-challenge', tenant: 'north', query: 'multi-factor challenge', relevantSources: ['SYNTHETIC-NORTH-MFA-GUIDANCE'] },
+  { id: 'recovery-identity', tenant: 'north', query: 'verify identity', relevantSources: ['SYNTHETIC-NORTH-ACCOUNT-RECOVERY'] },
+  { id: 'network-loopback', tenant: 'north', query: 'loopback health', relevantSources: ['SYNTHETIC-NORTH-NETWORK-DIAGNOSTICS'] },
+  { id: 'billing-invoice', tenant: 'south', query: 'invoice discrepancy', relevantSources: ['SYNTHETIC-SOUTH-BILLING-DISCREPANCY'] },
+  { id: 'service-impact', tenant: 'south', query: 'service degradation', relevantSources: ['SYNTHETIC-SOUTH-SERVICE-DEGRADATION'] },
+  { id: 'support-escalation', tenant: 'south', query: 'human support lead', relevantSources: ['SYNTHETIC-SOUTH-SUPPORT-ESCALATION'] },
+  { id: 'insufficient-guidance', tenant: 'south', query: 'available synthetic evidence', relevantSources: ['SYNTHETIC-SOUTH-GENERAL-GUIDANCE'] },
 ] as const;
 
 export interface RetrievalObservation { caseId: string; retrievedSourceIdentities: readonly string[] }

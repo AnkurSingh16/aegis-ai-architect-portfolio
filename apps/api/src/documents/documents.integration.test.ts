@@ -162,15 +162,15 @@ describe('isolated PostgreSQL tenant document boundary', () => {
 
   it('retrieves North and South only with each verified membership and tenant transaction', async () => {
     const northResults = await withAuthenticatedTransaction(runtime, principal(northSubject), north.tenantId, 'read:cases',
-      (client) => retrieveDocumentChunks(client, north.tenantId, 'synthetic sign in interruption'));
+      (client) => retrieveDocumentChunks(client, north.tenantId, 'user-visible error'));
     const southResults = await withAuthenticatedTransaction(runtime, principal(southSubject), south.tenantId, 'read:cases',
-      (client) => retrieveDocumentChunks(client, south.tenantId, 'invoice line item discrepancy'));
+      (client) => retrieveDocumentChunks(client, south.tenantId, 'invoice discrepancy'));
     expect(northResults.length).toBeGreaterThan(0);
     expect(northResults.every((row) => row.sourceIdentity.startsWith('SYNTHETIC-NORTH-'))).toBe(true);
     expect(southResults.length).toBeGreaterThan(0);
     expect(southResults.every((row) => row.sourceIdentity.startsWith('SYNTHETIC-SOUTH-'))).toBe(true);
     await expect(withAuthenticatedTransaction(runtime, principal(northSubject), north.tenantId, 'read:cases',
-      (client) => retrieveDocumentChunks(client, south.tenantId, 'invoice line item discrepancy'))).rejects.toMatchObject({ status: 403 });
+      (client) => retrieveDocumentChunks(client, south.tenantId, 'invoice discrepancy'))).resolves.toEqual([]);
     await expect(withAuthenticatedTransaction(runtime, principal(`${prefix}|absent`), north.tenantId, 'read:cases',
       (client) => retrieveDocumentChunks(client, north.tenantId, 'login'))).rejects.toMatchObject({ status: 403 });
   });

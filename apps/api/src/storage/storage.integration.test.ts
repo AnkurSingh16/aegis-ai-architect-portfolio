@@ -126,14 +126,15 @@ describe('real PostgreSQL persistence and role boundary', () => {
       await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('present and unique');
       await writeFile(join(directory, '002_placeholder.sql'), 'SELECT 1;');
       await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('missing');
+      for (const file of await readdir(migrationsDirectory)) {
+        await writeFile(join(directory, file), await readFile(new URL(file, migrationsDirectory), 'utf8'));
+      }
       const sql = await readFile(new URL('001_multitenant.sql', migrationsDirectory), 'utf8');
       await writeFile(join(directory, '001_multitenant.sql'), sql);
       await writeFile(join(directory, '001_duplicate.sql'), 'SELECT 1;');
       await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('present and unique');
       await rm(join(directory, '001_duplicate.sql'));
       await rm(join(directory, '002_placeholder.sql'));
-      await writeFile(join(directory, '002_authenticated_memberships.sql'), await readFile(new URL('002_authenticated_memberships.sql', migrationsDirectory), 'utf8'));
-      await writeFile(join(directory, '003_tenant_documents.sql'), await readFile(new URL('003_tenant_documents.sql', migrationsDirectory), 'utf8'));
       await writeFile(join(directory, '000_earlier.sql'), 'SELECT 1;');
       await expect(migrateDatabase(adminUrl, password, ingestionPassword, url)).rejects.toThrow('Out-of-order');
     } finally { await rm(directory, { recursive: true, force: true }); }
