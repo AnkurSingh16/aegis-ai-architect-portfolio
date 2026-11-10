@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Pool, PoolClient } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { localDatabaseUrl, requireDevelopment, resolveFixture } from './config.js';
 import { CaseRepository, CaseStorageError, validateCaseId, validateStatus, validateSyntheticCase } from './cases.js';
 import { executeCaseCommand, parseCaseCommand } from './commands.js';
@@ -58,6 +58,30 @@ function fakePool(query = vi.fn().mockResolvedValue({ rows: [] })) {
 }
 
 describe('transaction and failure handling', () => {
+  it('uses runtime regclass lookups before document tables exist during migration preflight', async () => {
+    const queries: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql);
+      if (sql.includes("FROM pg_roles WHERE rolname = 'aegis_app'")) return { rows: [{ safe: true }] };
+      if (sql.includes('SELECT version, checksum FROM aegis_migrations.versions')) return { rows: [] };
+      if (sql.includes("FROM pg_roles WHERE rolname = 'aegis_ingest'")) return { rows: [{ safe: true }] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() } as unknown as PoolClient;
+    const connect = vi.spyOn(Pool.prototype, 'connect').mockResolvedValue(client as never);
+    const end = vi.spyOn(Pool.prototype, 'end').mockResolvedValue(undefined);
+    try {
+      await expect(migrateDatabase('postgres://localhost/aegis_test', 'synthetic-app-password', 'synthetic-ingest-password'))
+        .resolves.toBe(5);
+      const ingestionSafetyQuery = queries.find((sql) => sql.includes("FROM pg_roles WHERE rolname = 'aegis_ingest'"));
+      expect(ingestionSafetyQuery).toContain("to_regclass('aegis.documents')");
+      expect(ingestionSafetyQuery).toContain("to_regclass('aegis.document_chunks')");
+      expect(ingestionSafetyQuery).not.toMatch(/'aegis\.(?:documents|document_chunks)'::regclass/);
+    } finally {
+      connect.mockRestore();
+      end.mockRestore();
+    }
+  });
   it('rejects invalid migration credentials before connecting', async () => {
     for (const password of ['', 'short', 'x'.repeat(257)]) {
       await expect(migrateDatabase('postgres://localhost/aegis_test', password, 'synthetic-ingest-password')).rejects.toThrow('16–256');
