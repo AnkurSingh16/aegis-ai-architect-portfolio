@@ -183,6 +183,8 @@ describe('isolated PostgreSQL tenant document boundary', () => {
       const rows = await withAuthenticatedTransaction(runtime, principal(subject), fixture.tenantId, 'read:cases',
         (client) => retrieveDocumentChunks(client, fixture.tenantId, item.query));
       expect(rows.every((row) => row.sourceIdentity.startsWith(`SYNTHETIC-${item.tenant.toUpperCase()}-`))).toBe(true);
+      expect(rows.map((row) => row.sourceIdentity), `retrieval query ${item.id} must find its predeclared source`)
+        .toContain(item.relevantSources[0]);
       observations.push({ caseId: item.id, retrievedSourceIdentities: rows.map((row) => row.sourceIdentity) });
     }
     const score = scoreRetrieval(observations);
