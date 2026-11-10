@@ -7,7 +7,7 @@ import { resolveFixture } from '../storage/config.js';
 import { withAuthenticatedTransaction } from '../auth/transaction.js';
 import type { VerifiedPrincipal } from '../auth/token.js';
 import { syntheticDocuments } from './catalog.js';
-import { ingestSyntheticCatalog, validateIngestionConnection } from './ingestion.js';
+import { ingestSyntheticCatalog, ingestSyntheticCatalogLocal, validateIngestionConnection, validateLocalIngestionConnection } from './ingestion.js';
 import { retrieveDocumentChunks } from './retrieval.js';
 import { retrievalEvaluationCases, scoreRetrieval } from './evaluation.js';
 
@@ -63,6 +63,16 @@ afterAll(async () => {
 });
 
 describe('isolated PostgreSQL tenant document boundary', () => {
+  it('refuses the isolated aegis_test target through the local writer before any transaction or data change', async () => {
+    expect(() => validateLocalIngestionConnection(ingestionUrl)).toThrow();
+    const before = await admin.query(`SELECT (SELECT count(*) FROM aegis.documents)::int AS documents,
+      (SELECT count(*) FROM aegis.document_chunks)::int AS chunks`);
+    await expect(ingestSyntheticCatalogLocal(ingestion, '127.0.0.1')).rejects.toMatchObject({ code: 'unsafe_target' });
+    const after = await admin.query(`SELECT (SELECT count(*) FROM aegis.documents)::int AS documents,
+      (SELECT count(*) FROM aegis.document_chunks)::int AS chunks`);
+    expect(after.rows).toEqual(before.rows);
+  });
+
   it('rejects an allowlisted parent without its complete chunk set at commit and then replays the full catalog', async () => {
     const document = syntheticDocuments[0];
     const tenantId = north.tenantId;

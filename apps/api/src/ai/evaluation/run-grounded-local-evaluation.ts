@@ -12,25 +12,15 @@ import { createGroundedOllamaProvider } from '../grounded-provider.js';
 import { resolveOllamaConfig } from '../provider.js';
 import { groundedEvaluationSlots, scoreGroundedEvaluation } from './grounded-scoring.js';
 import { runGroundedProviderEvaluation } from './grounded-runner.js';
+import { verifyGroundedEvaluationSource } from './source-identity.js';
 import { reservePrivateReport, writePrivateReport } from './private-report.js';
 import { assertSafeOllamaTcpRecords, parseOllamaTcpRecords } from './ollama-socket-preflight.js';
 
 const expectedModel = 'qwen2.5:3b-instruct';
-const expectedBaseCommit = '4690bb305f959f89ca2090a56982891158e77fe5';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../');
 const reportPath = resolve(root, '.local/evaluations/milestone-4-grounded-qwen2.5-3b-instruct.json');
 const localOrigin = 'http://127.0.0.1:11434';
 
-function git(args: string[]): string {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-}
-function sourceIdentity(): string {
-  if (git(['branch', '--show-current']) !== 'feat/m4-grounded-ai-intelligence' || git(['status', '--porcelain=v1']) !== '') {
-    throw new Error('Grounded evaluation requires the clean reviewed feature branch.');
-  }
-  git(['merge-base', '--is-ancestor', expectedBaseCommit, 'HEAD']);
-  return git(['rev-parse', 'HEAD']);
-}
 function assertNoActiveClient(): void {
   const records = execFileSync('/usr/sbin/lsof', ['-nP', '-FpcnT', '-iTCP:11434'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   assertSafeOllamaTcpRecords(parseOllamaTcpRecords(records), process.pid);
@@ -81,7 +71,8 @@ function inMemorySources(caseType: string): GroundedSource[] {
 
 async function main(): Promise<void> {
   if (process.argv.length !== 2) throw new Error('Grounded evaluation accepts no command-line arguments.');
-  const codeCommit = sourceIdentity();
+  const source = verifyGroundedEvaluationSource((args) => execFileSync('git', [...args],
+    { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
   if (process.env.NODE_ENV !== 'development' || process.env.AEGIS_AI_ENABLED !== 'true' || process.env.AEGIS_GROUNDED_AI_ENABLED !== 'true') {
     throw new Error('Grounded evaluation requires explicit local development opt-in.');
   }
@@ -97,7 +88,7 @@ async function main(): Promise<void> {
 
   const handle = await reservePrivateReport(reportPath);
   const timestamp = new Date().toISOString();
-  const base = { datasetVersion: 'aegis-grounded-provider-v1', codeCommit, model: expectedModel, evaluationTimestamp: timestamp,
+  const base = { datasetVersion: 'aegis-grounded-provider-v1', ...source, model: expectedModel, evaluationTimestamp: timestamp,
     testMode: 'provider-level-in-memory-synthetic-not-authenticated-http-e2e', plannedSlots: 6,
     labelStatus: 'engineering-reviewed-not-human-approved', status: 'in_progress' as const,
     limitations: ['Three synthetic case types with paired observations are a smoke test, not production accuracy evidence.',
@@ -117,7 +108,7 @@ async function main(): Promise<void> {
     const score = scoreGroundedEvaluation(run.observations);
     const status = run.stopped || score.notAttempted > 0 ? 'stopped' : 'completed';
     await writePrivateReport(handle, { ...base, status, attempts: run.attempts, score });
-    stdout.write(`${JSON.stringify({ status, model: expectedModel, codeCommit, planned: 6, attempted: score.attempted,
+    stdout.write(`${JSON.stringify({ status, model: expectedModel, ...source, planned: 6, attempted: score.attempted,
       succeeded: score.succeeded, failed: score.failed, notAttempted: score.notAttempted, reportPath: '.local/evaluations/milestone-4-grounded-qwen2.5-3b-instruct.json' })}\n`);
     if (status !== 'completed') process.exitCode = 1;
   } finally { await handle.close(); }

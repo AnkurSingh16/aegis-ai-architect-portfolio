@@ -459,7 +459,39 @@ describe('authenticated grounded document analysis boundary', () => {
     expect(reply.json().citations[0]).not.toHaveProperty('chunkId');
     expect(fixture.query.mock.calls.findIndex(([sql]) => String(sql).includes('WITH parsed')))
       .toBeLessThan(fixture.query.mock.calls.findIndex(([sql]) => sql === 'COMMIT'));
+    expect(fixture.query.mock.calls.every(([sql]) => !/^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(String(sql)))).toBe(true);
     expect(analyze).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a citation ID replayed from a prior request and performs no case or document DML', async () => {
+    const fixture = fakePool();
+    const chunkId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    fixture.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM aegis.memberships')) return { rows: [{ role: 'reader' }] };
+      if (sql.includes('SELECT *')) return { rows: [{ id, tenant_id: tenant, synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
+        created_at: new Date('2026-01-01T00:00:00Z'), updated_at: new Date('2026-01-01T00:00:00Z') }] };
+      if (sql.includes('WITH parsed')) return { rows: [{ chunk_id: chunkId, source_identity: 'SYNTHETIC-NORTH-LOGIN', document_version: 1,
+        position: 0, title: 'Synthetic login guide', content: 'A human reviews the synthetic sign-in interruption.', rank: 0.5 }] };
+      return { rows: [] };
+    });
+    let firstRequestCitation = '';
+    let callCount = 0;
+    const provider: GroundedAnalysisProvider = { model: 'synthetic-grounded-model:1b', async analyze(input) {
+      callCount += 1;
+      const citationId = callCount === 1 ? input.sources[0]!.citationId : firstRequestCitation;
+      if (callCount === 1) firstRequestCitation = citationId;
+      return { output: { ...output, groundingState: 'SUPPORTED', citations: [citationId] },
+        metrics: { latencyMs: 10, promptTokens: 10, generatedTokens: 10 } };
+    } };
+    const app = appForGrounded(fixture.pool, provider);
+    const first = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+    expect(first.statusCode).toBe(200);
+    const replayed = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+    expect(replayed.statusCode).toBe(503);
+    expect(replayed.json()).toEqual({ error: 'Grounded analysis could not be completed. Check the local development provider and retry.',
+      code: 'grounded_analysis_validation_failed' });
+    expect(callCount).toBe(2);
+    expect(fixture.query.mock.calls.every(([sql]) => !/^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(String(sql)))).toBe(true);
   });
 
   it('returns a safe abstention without inference when retrieval is empty', async () => {

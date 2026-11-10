@@ -66,8 +66,12 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function safeRationale(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 700 &&
-    !/<\/?[a-z][^>]*>|https?:\/\/|\b(?:bearer|api[_ -]?key|password|secret)\b|\bignore (?:all )?(?:prior|previous|system)|\bignore human review|\bexecute\b|\bescalate\b|\bsend (?:a )?(?:customer )?message|\bchange (?:the )?case status|\breveal (?:the )?(?:system )?prompt\b/i.test(value);
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 700) return false;
+  // Only complete, unqualified prohibitions are exempt from the credential-term filter.
+  const credentials = '(?:passwords?|recovery codes?|access tokens?|bearer tokens?|secrets?|api keys?)';
+  const safeCredentialAdvice = new RegExp(`^(?:never|do not|don't|must not|should not)\\s+(?:request|ask|collect)(?:\\s+(?:users?\\s+to\\s+provide\\s+)?)?${credentials}(?:\\s+(?:and|or)\\s+${credentials})*[.!]?$`, 'i');
+  const textToInspect = safeCredentialAdvice.test(value.trim()) ? '' : value;
+  return !/<\/?[a-z][^>]*>|https?:\/\/|\b(?:bearer|api[_ -]?keys?|passwords?|secrets?|recovery codes?|access tokens?)\b|\bignore (?:all )?(?:prior|previous|system)|\bignore human review|\bexecute\b|\bescalate\b|\bsend (?:a )?(?:customer )?message|\bchange (?:the )?case status|\breveal (?:the )?(?:system )?prompt\b/i.test(textToInspect);
 }
 
 const citationUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
