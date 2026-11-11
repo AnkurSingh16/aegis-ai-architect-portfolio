@@ -5,7 +5,8 @@ import { categories, priorities, suggestedTeams } from '../contracts/triage.js';
 import { groundedAnalysisSchema, groundedValidationReasons, parseGroundedProviderOutput, GroundedOutputError, isGroundedAnalysisResult,
   type GroundedSource } from './grounded-analysis.js';
 import { recommendedActions, uncertaintyLevels } from './analysis.js';
-import { createGroundedOllamaProvider, createGroundedOllamaTokenBudgetEvaluationProvider } from './grounded-provider.js';
+import { createGroundedOllamaProvider, createGroundedOllamaTokenBudgetEvaluationProvider,
+  createGroundedOllamaConfidenceContractEvaluationProvider } from './grounded-provider.js';
 import type { SafeProviderEvent } from './evaluation/grounded-provider-diagnostics.js';
 
 const model = 'synthetic-grounded-model:1b';
@@ -145,6 +146,24 @@ describe('grounded answer contract', () => {
       expect((error as Error).message).toBe('Grounded analysis output is invalid.');
     }
   });
+  it.each([0, 0.5, 1])('accepts supported confidence boundary/value %s without coercion', (confidence) => {
+    const output = { ...supported, confidence };
+    const schema = new Ajv().compile(groundedAnalysisSchema);
+    expect(schema(output)).toBe(true);
+    expect(parseGroundedProviderOutput(output, [source])).toMatchObject({ groundingState: 'SUPPORTED', confidence });
+  });
+  it.each([-0.001, 1.001, '0.5', true, null, Number.POSITIVE_INFINITY, Number.NaN])('rejects invalid supported confidence value/type %s without repair', (confidence) => {
+      expect(() => parseGroundedProviderOutput({ ...supported, confidence }, [source]))
+        .toThrow(expect.objectContaining({ validationReason: 'invalid_confidence' }));
+    });
+  it('rejects missing supported confidence and accepts only null confidence in an abstention', () => {
+    const missingConfidence = Object.fromEntries(Object.entries(supported).filter(([key]) => key !== 'confidence'));
+    expect(() => parseGroundedProviderOutput(missingConfidence, [source]))
+      .toThrow(expect.objectContaining({ validationReason: 'missing_required_field' }));
+    expect(parseGroundedProviderOutput(insufficient, [source])).toEqual(insufficient);
+    expect(() => parseGroundedProviderOutput({ ...insufficient, confidence: 0 }, [source]))
+      .toThrow(expect.objectContaining({ validationReason: 'invalid_state_combination' }));
+  });
   it('validates the fixed supported API response for the expected case', () => {
     const value = { ...supported, caseId: 'case-1', citations: [{ citationId: source.citationId, title: source.title,
       sourceIdentity: source.sourceIdentity, version: source.version, excerpt: source.content }], execution: { provider: 'ollama', model,
@@ -255,6 +274,38 @@ describe('mocked local structured provider', () => {
     expect(experimentalOptions).toEqual({ temperature: 0.1, num_predict: 512 });
     expect({ ...ordinary, options: { ...ordinaryOptions, num_predict: 0 } })
       .toEqual({ ...experimental, options: { ...experimentalOptions, num_predict: 0 } });
+  });
+  it('isolates the M4.17 confidence clarification to its evaluation factory', async () => {
+    const productionFetch = vi.fn().mockResolvedValue(response(supported));
+    const m415Fetch = vi.fn().mockResolvedValue(response(supported));
+    const m417Fetch = vi.fn().mockResolvedValue(response(supported));
+    const input = { caseStatus: 'in_progress', caseType: 'login', caseFacts: 'A bounded synthetic case fact.', sources: [source] };
+    await createGroundedOllamaProvider(config, { fetchImpl: productionFetch, log: () => undefined })
+      .analyze(input, new AbortController().signal, randomUUID());
+    await createGroundedOllamaTokenBudgetEvaluationProvider(config, { fetchImpl: m415Fetch, log: () => undefined })
+      .analyze(input, new AbortController().signal, randomUUID());
+    await createGroundedOllamaConfidenceContractEvaluationProvider(config, { fetchImpl: m417Fetch, log: () => undefined })
+      .analyze(input, new AbortController().signal, randomUUID());
+    const body = (fetchImpl: ReturnType<typeof vi.fn>) => JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit).body));
+    const production = body(productionFetch);
+    const m415 = body(m415Fetch);
+    const m417 = body(m417Fetch);
+    expect(production.prompt).toBe(m415.prompt);
+    expect(production.options).toEqual({ temperature: 0.1, num_predict: 256 });
+    expect(m415.options).toEqual({ temperature: 0.1, num_predict: 512 });
+    expect(m417.options).toEqual(m415.options);
+    expect(m417.model).toBe(m415.model);
+    expect(m417.format).toEqual(m415.format);
+    expect(m417.prompt.replace('\nFor SUPPORTED, confidence must be a JSON number between 0 and 1, inclusive, never a quoted string or null. For INSUFFICIENT_EVIDENCE, confidence must be null. Confidence is not a statistically calibrated probability. Human review is always required.', ''))
+      .toBe(m415.prompt);
+    const m415Request = { ...m415 };
+    const m417Request = { ...m417 };
+    delete m415Request.prompt;
+    delete m417Request.prompt;
+    expect(m417Request).toEqual(m415Request);
+    expect(m417.prompt).toContain('caseFacts');
+    expect(m417.prompt).not.toContain('expectedGroundingState');
+    expect(m417.prompt).not.toContain('reviewRationale');
   });
   it('keeps the existing byte ceiling and fails closed when a 512-budget response exceeds it', async () => {
     const raw = 'OUTPUT_TOO_LARGE_SECRET'.padEnd(4097, 'x');

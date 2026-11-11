@@ -10,6 +10,9 @@ const maxEnvelopeBytes = 8192;
 const maxModelOutputBytes = 4096;
 const maxCaseFactsBytes = 2048;
 const correlationPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const confidenceContractClarification = 'For SUPPORTED, confidence must be a JSON number between 0 and 1, inclusive, never a quoted string or null. For INSUFFICIENT_EVIDENCE, confidence must be null. Confidence is not a statistically calibrated probability. Human review is always required.';
+const promptContextMarker = '\nUNTRUSTED_CASE_FACTS_AND_RETRIEVED_SOURCES=';
+type GroundedPromptBuilder = (input: Parameters<GroundedAnalysisProvider['analyze']>[0]) => string;
 type FailureStage = 'input_validation' | 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
   'response_envelope' | 'model_json_parse' | 'output_schema' | 'generation_timeout' | 'request_cancelled' | 'unknown';
 
@@ -59,6 +62,16 @@ function buildPrompt(input: Parameters<GroundedAnalysisProvider['analyze']>[0]):
   return prompt;
 }
 
+/** M4.17-only clarification inserted before untrusted payload; the baseline prompt stays byte-for-byte unchanged. */
+function buildConfidenceContractEvaluationPrompt(input: Parameters<GroundedAnalysisProvider['analyze']>[0]): string {
+  const prompt = buildPrompt(input);
+  const marker = prompt.lastIndexOf(promptContextMarker);
+  if (marker < 0) throw new Error('invalid_prompt');
+  const variant = `${prompt.slice(0, marker)}\n${confidenceContractClarification}${prompt.slice(marker)}`;
+  if (Buffer.byteLength(variant, 'utf8') > maxGroundedPromptBytes) throw new Error('invalid_input');
+  return variant;
+}
+
 function safeTokenCount(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 1_000_000 ? value as number : null;
 }
@@ -74,7 +87,7 @@ function safeLatency(value: number): number | null {
 
 function createGroundedOllamaProviderWithBudget(config: OllamaConfig, options: {
   fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
-}, outputTokenBudgetInput: unknown): GroundedAnalysisProvider {
+}, outputTokenBudgetInput: unknown, promptBuilder: GroundedPromptBuilder = buildPrompt): GroundedAnalysisProvider {
   const outputTokenBudget = requireApprovedGroundedOutputBudget(outputTokenBudgetInput);
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
@@ -105,7 +118,7 @@ function createGroundedOllamaProviderWithBudget(config: OllamaConfig, options: {
       if (callerSignal.aborted) cancel();
       throwIfAborted();
       let prompt: string;
-      try { prompt = buildPrompt(input); }
+      try { prompt = promptBuilder(input); }
       catch { stage = 'input_validation'; throw new Error('input'); }
       let response: Response;
       try {
@@ -199,4 +212,11 @@ export function createGroundedOllamaTokenBudgetEvaluationProvider(config: Ollama
   fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
 } = {}): GroundedAnalysisProvider {
   return createGroundedOllamaProviderWithBudget(config, options, 512);
+}
+
+/** Fixed 512-token prompt-contract experiment, isolated from production and M4.15 factories. */
+export function createGroundedOllamaConfidenceContractEvaluationProvider(config: OllamaConfig, options: {
+  fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
+} = {}): GroundedAnalysisProvider {
+  return createGroundedOllamaProviderWithBudget(config, options, 512, buildConfidenceContractEvaluationPrompt);
 }
