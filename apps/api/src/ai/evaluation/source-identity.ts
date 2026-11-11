@@ -6,6 +6,8 @@ export const groundedContextEvaluationBaseCommit = '3141c60cac99c9495015b656a7c7
 export const groundedContextEvaluationBranch = 'feat/m4-grounded-context-quality';
 export const groundedBalancedEvaluationBaseCommit = '51dfcd9fb97a8c3fff27e90591f680e25ebfee53';
 export const groundedBalancedEvaluationBranch = 'feat/m4-grounded-balanced-quality';
+export const groundedReliabilityEvaluationBaseCommit = '4eadbffc52ca5f8e4fe81319478ec17ea8966a18';
+export const groundedReliabilityEvaluationBranch = 'feat/m4-grounded-reliability-instrumentation';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
 export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
@@ -134,5 +136,22 @@ export function verifyGroundedBalancedEvaluationSource(readGit: GitRead): Evalua
   requireAncestry(readGit, groundedBalancedEvaluationBaseCommit, codeCommit);
   requireAncestry(readGit, groundedBalancedEvaluationBaseCommit, reviewed.commit);
   if (treeHash !== reviewed.tree) throw new Error('Balanced evaluation main does not match the preserved reviewed source tree.');
+  return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
+}
+
+/** Reliability v2 is release-only and must equal the exact tree reviewed in its merged feature branch. */
+export function verifyGroundedReliabilityEvaluationSource(readGit: GitRead): EvaluationSourceIdentity {
+  if (readGit(['branch', '--show-current']) !== 'main') throw new Error('Grounded reliability evaluation requires merged main.');
+  assertClean(readGit);
+  const codeCommit = readGit(['rev-parse', 'HEAD']);
+  const treeHash = readGit(['rev-parse', 'HEAD^{tree}']);
+  const main = readRef(readGit, remoteMain);
+  if (codeCommit !== main.commit || treeHash !== main.tree) {
+    throw new Error('Grounded reliability evaluation main must equal the fetched origin/main release.');
+  }
+  const reviewed = readRef(readGit, `origin/${groundedReliabilityEvaluationBranch}`);
+  requireAncestry(readGit, groundedReliabilityEvaluationBaseCommit, codeCommit);
+  requireAncestry(readGit, groundedReliabilityEvaluationBaseCommit, reviewed.commit);
+  if (treeHash !== reviewed.tree) throw new Error('Grounded reliability evaluation main does not match the preserved reviewed source tree.');
   return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
 }

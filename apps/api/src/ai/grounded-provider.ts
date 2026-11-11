@@ -2,6 +2,7 @@ import { acquireOllamaSlot, AnalysisUnavailableError, localOllamaGenerateEndpoin
   type OllamaConfig } from './provider.js';
 import { groundedAnalysisSchema, GroundedOutputError, parseGroundedProviderOutput,
   GroundedAnalysisFailureError, type GroundedAnalysisProvider, type GroundedProviderOutput, type GroundedValidationReason } from './grounded-analysis.js';
+import { groundedCompletionReasons, type GroundedCompletionReason, type SafeProviderEvent } from './evaluation/grounded-provider-diagnostics.js';
 
 const maxGroundedPromptBytes = 16 * 1024;
 const maxEnvelopeBytes = 8192;
@@ -11,7 +12,7 @@ const correlationPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]
 type FailureStage = 'input_validation' | 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
   'response_envelope' | 'model_json_parse' | 'output_schema' | 'generation_timeout' | 'request_cancelled' | 'unknown';
 
-function logSafely(log: (value: Record<string, string | number | null>) => void, event: Record<string, string | number | null>): void {
+function logSafely(log: (value: SafeProviderEvent) => void, event: SafeProviderEvent): void {
   try { log(event); } catch { /* Logging must not alter the model result. */ }
 }
 
@@ -58,11 +59,20 @@ function buildPrompt(input: Parameters<GroundedAnalysisProvider['analyze']>[0]):
 }
 
 function safeTokenCount(value: unknown): number | null {
-  return value === undefined ? null : Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 1_000_000 ? value as number : null;
+}
+
+function safeCompletionReason(value: unknown): GroundedCompletionReason | null {
+  return typeof value === 'string' && groundedCompletionReasons.includes(value as GroundedCompletionReason)
+    ? value as GroundedCompletionReason : null;
+}
+
+function safeLatency(value: number): number | null {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 60_000 ? value : null;
 }
 
 export function createGroundedOllamaProvider(config: OllamaConfig, options: {
-  fetchImpl?: typeof fetch; log?: (event: Record<string, string | number | null>) => void; now?: () => number;
+  fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
 } = {}): GroundedAnalysisProvider {
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
@@ -83,7 +93,12 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
     let stage: FailureStage = 'unknown';
     let schemaReason: 'invalid_output' | 'invalid_citations' | undefined;
     let validationReason: GroundedValidationReason | undefined;
-    let responseBytes: number | undefined;
+    let envelopeBytes: number | null = null;
+    let modelOutputBytes: number | null = null;
+    let promptTokens: number | null = null;
+    let generatedTokens: number | null = null;
+    let completionReason: GroundedCompletionReason | null = null;
+    let outputLimitReached: boolean | null = null;
     try {
       if (callerSignal.aborted) cancel();
       throwIfAborted();
@@ -101,6 +116,7 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
       if (!response.ok) { stage = 'provider_http'; throw new Error('http'); }
       const declared = response.headers.get('content-length');
       if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxEnvelopeBytes)) {
+        envelopeBytes = maxEnvelopeBytes + 1;
         stage = 'response_size'; throw new Error('size');
       }
       if (!response.body) { stage = 'response_decode'; throw new Error('body'); }
@@ -113,7 +129,7 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
           throwIfAborted();
           if (done) break;
           size += value.byteLength;
-          if (size > maxEnvelopeBytes) { stage = 'response_size'; try { await reader.cancel(); } catch { /* preserve size failure */ }
+          if (size > maxEnvelopeBytes) { envelopeBytes = maxEnvelopeBytes + 1; stage = 'response_size'; try { await reader.cancel(); } catch { /* preserve size failure */ }
             throw new Error('size'); }
           chunks.push(value);
         }
@@ -122,12 +138,18 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
         if (stage === 'response_size') throw error;
         stage = 'response_decode'; throw new Error('decode');
       } finally { reader.releaseLock(); }
-      responseBytes = size;
+      envelopeBytes = size;
       let envelope: unknown;
       try { envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size))); }
       catch { stage = 'response_decode'; throw new Error('decode'); }
       if (typeof envelope !== 'object' || envelope === null || Array.isArray(envelope)) { stage = 'response_envelope'; throw new Error('envelope'); }
       const body = envelope as Record<string, unknown>;
+      promptTokens = safeTokenCount(body.prompt_eval_count);
+      generatedTokens = safeTokenCount(body.eval_count);
+      completionReason = safeCompletionReason(body.done_reason);
+      if (completionReason === 'length') outputLimitReached = true;
+      else if (completionReason === 'stop') outputLimitReached = false;
+      if (typeof body.response === 'string') modelOutputBytes = Math.min(Buffer.byteLength(body.response, 'utf8'), maxModelOutputBytes + 1);
       if (body.done !== true || body.model !== config.model || typeof body.response !== 'string' ||
           Buffer.byteLength(body.response, 'utf8') > maxModelOutputBytes) { stage = 'response_envelope'; throw new Error('envelope'); }
       let parsed: unknown;
@@ -143,15 +165,17 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
         throw new GroundedOutputError(schemaReason, validationReason);
       }
       throwIfAborted();
-      const metrics = { latencyMs: Math.max(0, Math.round(now() - started)), promptTokens: safeTokenCount(body.prompt_eval_count),
-        generatedTokens: safeTokenCount(body.eval_count) };
+      const latency = Math.max(0, Math.round(now() - started));
+      const metrics = { latencyMs: latency, promptTokens, generatedTokens };
       logSafely(log, { event: 'ai_grounded_analysis', provider: 'ollama', model: config.model, outcome: 'success', ...metrics,
+        latencyMs: safeLatency(latency), envelopeBytes, modelOutputBytes, completionReason, outputLimitReached, correlationComplete: correlation !== undefined,
         ...(correlation ? { correlationId: correlation } : {}) });
       return { output: result, metrics };
     } catch {
       const failureStage: FailureStage = abortCause ?? stage;
       logSafely(log, { event: 'ai_grounded_analysis', provider: 'ollama', model: config.model, outcome: 'failure',
-        failureStage, latencyMs: Math.max(0, Math.round(now() - started)), ...(responseBytes === undefined ? {} : { responseBytes }),
+        failureStage, latencyMs: safeLatency(Math.max(0, Math.round(now() - started))), envelopeBytes, modelOutputBytes,
+        promptTokens, generatedTokens, completionReason, outputLimitReached, correlationComplete: correlation !== undefined,
         ...(schemaReason !== undefined ? { schemaReason } : {}),
         ...(validationReason !== undefined ? { validationReason } : {}),
         ...(correlation ? { correlationId: correlation } : {}) });

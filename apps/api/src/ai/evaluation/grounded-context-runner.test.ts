@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GroundedAnalysisProvider, GroundedProviderOutput, GroundedSource } from '../grounded-analysis.js';
 import { groundedContextSlots, resolveGroundedContextSource } from './grounded-context-dataset.js';
 import { runGroundedContextEvaluation } from './grounded-context-runner.js';
+import type { SafeProviderEvent } from './grounded-provider-diagnostics.js';
 
 const privateLabel = 'EXPECTED_LABEL_AND_REVIEW_RATIONALE_MUST_NOT_ENTER_PROMPT';
 const abstention = { groundingState: 'INSUFFICIENT_EVIDENCE' as const, category: null, priority: null, recommendedTeam: null,
@@ -17,7 +18,7 @@ function sourceFor(slot: typeof groundedContextSlots[number], tenant = slot.tena
 describe('context-complete deterministic provider runner', () => {
   it('sends only approved case facts and tenant-matched evidence, never expected labels or rationale', async () => {
     const inputs: unknown[] = [];
-    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+    const providerFactory = (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
       model: 'mock-only', async analyze(input, _signal, correlationId) {
         inputs.push(input);
         log({ event: 'ai_grounded_analysis', outcome: 'success', correlationId, latencyMs: 10 });

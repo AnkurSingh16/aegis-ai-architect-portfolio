@@ -5,6 +5,7 @@ import { groundedEvaluationDatasetVersion, groundedEvaluationSlots, scoreGrounde
 import { groundedEvaluationCliResult, runGroundedProviderEvaluation } from './grounded-runner.js';
 import { groundedEvaluationV1ReportRelativePath, groundedEvaluationV2ReportRelativePath,
   groundedEvaluationV3ReportRelativePath, sanitizedCliFailure } from './run-grounded-local-evaluation.js';
+import type { SafeProviderEvent } from './grounded-provider-diagnostics.js';
 
 const secretText = 'SYNTHETIC-PRIVATE-RAW-RESPONSE-DO-NOT-REPORT';
 function sourcesFor(caseType: string): GroundedSource[] {
@@ -16,7 +17,7 @@ function supported(input: { sources: readonly GroundedSource[] }): GroundedProvi
     rationale: secretText, nextAction: 'Review the synthetic service impact and incident timeline.', citations: [input.sources[0]!.citationId],
     confidence: 0.72, uncertainty: 'moderate', humanReviewRequired: true };
 }
-const successProvider = (calls: string[]) => (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+const successProvider = (calls: string[]) => (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
   model: 'synthetic-test-model',
   async analyze(input, _signal, correlationId) {
     calls.push(input.caseType);
@@ -55,7 +56,7 @@ describe('bounded grounded provider evaluation runner', () => {
 
   it('records a valid abstention distinctly from a failed provider attempt', async () => {
     const calls: string[] = [];
-    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+    const providerFactory = (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
       model: 'synthetic-test-model', async analyze(input, _signal, correlationId) {
         calls.push(input.caseType);
         log({ event: 'ai_grounded_analysis', outcome: 'success', correlationId, latencyMs: 20 });
@@ -87,7 +88,7 @@ describe('bounded grounded provider evaluation runner', () => {
         privateResponse: secretText });
       throw new Error(secretText);
     });
-    let log: (event: Record<string, string | number | null>) => void = () => {};
+    let log: (event: SafeProviderEvent) => void = () => {};
     const providerFactory = (sink: typeof log): GroundedAnalysisProvider => {
       log = sink;
       return { model: 'synthetic', analyze: calls as GroundedAnalysisProvider['analyze'] };
@@ -101,7 +102,7 @@ describe('bounded grounded provider evaluation runner', () => {
 
   it('keeps a single schema-rejected slot as a failed observation and continues to distinct planned slots', async () => {
     let calls = 0;
-    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+    const providerFactory = (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
       model: 'synthetic', async analyze(input, _signal, correlationId) {
         calls += 1;
         if (calls === 1) {
@@ -125,7 +126,7 @@ describe('bounded grounded provider evaluation runner', () => {
 
   it('marks six fully attempted schema failures completed and returns the normal CLI success code', async () => {
     let calls = 0;
-    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+    const providerFactory = (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
       model: 'synthetic', async analyze(_input, _signal, correlationId) {
         calls += 1;
         log({ event: 'ai_grounded_analysis', outcome: 'failure', failureStage: 'output_schema', schemaReason: 'invalid_output',
