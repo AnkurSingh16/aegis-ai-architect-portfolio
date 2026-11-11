@@ -51,3 +51,7 @@ npm run ai:evaluate:grounded:local -w apps/api
 The runner independently requires a visible TTY and the exact phrase `RUN SIX GROUNDED EVALUATIONS`. Do not bypass the prompt. It reserves the v3 path only after source/runtime/model preflight and successful operator confirmation. A missing or invalid preflight must not consume the report path or start generation.
 
 Ordinary tests and CI use deterministic mocks only. They do not call Ollama, download models, access `aegis_local`, or require cloud services.
+
+## Context-complete dataset review
+
+Milestone 4.11 preserves these historical V1–V3 records and introduces a separately versioned context-complete dataset design. The new evidence matrix, case-fact boundary, source/tenant checks, scoring denominators, and future evaluation gate are documented in [AI-EVALUATION-M4.11.md](./AI-EVALUATION-M4.11.md). No V4 inference has been performed or authorized by that preparation.
