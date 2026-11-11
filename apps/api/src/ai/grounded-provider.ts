@@ -3,6 +3,7 @@ import { acquireOllamaSlot, AnalysisUnavailableError, localOllamaGenerateEndpoin
 import { groundedAnalysisSchema, GroundedOutputError, parseGroundedProviderOutput,
   GroundedAnalysisFailureError, type GroundedAnalysisProvider, type GroundedProviderOutput, type GroundedValidationReason } from './grounded-analysis.js';
 import { groundedCompletionReasons, type GroundedCompletionReason, type SafeProviderEvent } from './evaluation/grounded-provider-diagnostics.js';
+import { requireApprovedGroundedOutputBudget } from './evaluation/grounded-output-budget.js';
 
 const maxGroundedPromptBytes = 16 * 1024;
 const maxEnvelopeBytes = 8192;
@@ -71,9 +72,10 @@ function safeLatency(value: number): number | null {
   return Number.isSafeInteger(value) && value >= 0 && value <= 60_000 ? value : null;
 }
 
-export function createGroundedOllamaProvider(config: OllamaConfig, options: {
+function createGroundedOllamaProviderWithBudget(config: OllamaConfig, options: {
   fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
-} = {}): GroundedAnalysisProvider {
+}, outputTokenBudgetInput: unknown): GroundedAnalysisProvider {
+  const outputTokenBudget = requireApprovedGroundedOutputBudget(outputTokenBudgetInput);
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
   const log = options.log ?? ((event) => console.info(JSON.stringify(event)));
@@ -109,8 +111,8 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
       try {
         response = await fetchImpl(localOllamaGenerateEndpoint, { method: 'POST', redirect: 'error', signal: controller.signal,
           headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ model: config.model, prompt, stream: false, format: groundedAnalysisSchema,
-            options: { temperature: 0.1, num_predict: 256 }, keep_alive: '5m' }) });
+            body: JSON.stringify({ model: config.model, prompt, stream: false, format: groundedAnalysisSchema,
+            options: { temperature: 0.1, num_predict: outputTokenBudget }, keep_alive: '5m' }) });
       } catch { throwIfAborted(); stage = 'provider_connection'; throw new Error('fetch'); }
       throwIfAborted();
       if (!response.ok) { stage = 'provider_http'; throw new Error('http'); }
@@ -183,4 +185,18 @@ export function createGroundedOllamaProvider(config: OllamaConfig, options: {
         ? 'VALIDATION_FAILED' : 'PROVIDER_UNAVAILABLE');
     } finally { clearTimeout(timeout); callerSignal.removeEventListener('abort', cancel); releaseOllamaSlot(); }
   } };
+}
+
+/** Production and existing evaluation paths retain the established 256-token budget. */
+export function createGroundedOllamaProvider(config: OllamaConfig, options: {
+  fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
+} = {}): GroundedAnalysisProvider {
+  return createGroundedOllamaProviderWithBudget(config, options, 256);
+}
+
+/** Fixed 512-token budget for the separately guarded M4.15 diagnostic evaluator only. */
+export function createGroundedOllamaTokenBudgetEvaluationProvider(config: OllamaConfig, options: {
+  fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
+} = {}): GroundedAnalysisProvider {
+  return createGroundedOllamaProviderWithBudget(config, options, 512);
 }

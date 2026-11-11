@@ -5,7 +5,7 @@ import { categories, priorities, suggestedTeams } from '../contracts/triage.js';
 import { groundedAnalysisSchema, groundedValidationReasons, parseGroundedProviderOutput, GroundedOutputError, isGroundedAnalysisResult,
   type GroundedSource } from './grounded-analysis.js';
 import { recommendedActions, uncertaintyLevels } from './analysis.js';
-import { createGroundedOllamaProvider } from './grounded-provider.js';
+import { createGroundedOllamaProvider, createGroundedOllamaTokenBudgetEvaluationProvider } from './grounded-provider.js';
 import type { SafeProviderEvent } from './evaluation/grounded-provider-diagnostics.js';
 
 const model = 'synthetic-grounded-model:1b';
@@ -225,6 +225,50 @@ describe('mocked local structured provider', () => {
     await provider.analyze({ caseStatus: 'open', caseType: 'SYNTHETIC-LOGIN-001', sources: [source] },
       new AbortController().signal, randomUUID());
     expect(events[0]).toMatchObject({ completionReason: 'stop', outputLimitReached: false });
+  });
+  it('uses the fixed 512-token budget only through the dedicated evaluation factory', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response(supported, { done_reason: 'stop' }));
+    const provider = createGroundedOllamaTokenBudgetEvaluationProvider(config, { fetchImpl, log: () => undefined });
+    const result = await provider.analyze({ caseStatus: 'open', caseType: 'SYNTHETIC-LOGIN-001', sources: [source] },
+      new AbortController().signal, randomUUID());
+    expect(result.output).toEqual(supported);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('http://127.0.0.1:11434/api/generate');
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.options).toEqual({ temperature: 0.1, num_predict: 512 });
+    expect(body.model).toBe(model);
+    expect(body.format).toEqual(groundedAnalysisSchema);
+  });
+  it('changes only num_predict between the established and experimental request bodies', async () => {
+    const ordinaryFetch = vi.fn().mockResolvedValue(response(supported));
+    const experimentFetch = vi.fn().mockResolvedValue(response(supported));
+    const input = { caseStatus: 'open', caseType: 'SYNTHETIC-LOGIN-001', sources: [source] };
+    await createGroundedOllamaProvider(config, { fetchImpl: ordinaryFetch, log: () => undefined })
+      .analyze(input, new AbortController().signal, randomUUID());
+    await createGroundedOllamaTokenBudgetEvaluationProvider(config, { fetchImpl: experimentFetch, log: () => undefined })
+      .analyze(input, new AbortController().signal, randomUUID());
+    const ordinary = JSON.parse(String((ordinaryFetch.mock.calls[0]?.[1] as RequestInit).body));
+    const experimental = JSON.parse(String((experimentFetch.mock.calls[0]?.[1] as RequestInit).body));
+    const ordinaryOptions = ordinary.options;
+    const experimentalOptions = experimental.options;
+    expect(ordinaryOptions).toEqual({ temperature: 0.1, num_predict: 256 });
+    expect(experimentalOptions).toEqual({ temperature: 0.1, num_predict: 512 });
+    expect({ ...ordinary, options: { ...ordinaryOptions, num_predict: 0 } })
+      .toEqual({ ...experimental, options: { ...experimentalOptions, num_predict: 0 } });
+  });
+  it('keeps the existing byte ceiling and fails closed when a 512-budget response exceeds it', async () => {
+    const raw = 'OUTPUT_TOO_LARGE_SECRET'.padEnd(4097, 'x');
+    const envelope = JSON.stringify({ done: true, model, response: raw, done_reason: 'length', eval_count: 512 });
+    const events: SafeProviderEvent[] = [];
+    const fetchImpl = vi.fn().mockResolvedValue(rawResponse(envelope));
+    const provider = createGroundedOllamaTokenBudgetEvaluationProvider(config, { fetchImpl, log: (event) => events.push(event) });
+    await expect(provider.analyze({ caseStatus: 'open', caseType: 'SYNTHETIC-LOGIN-001', sources: [source] },
+      new AbortController().signal, randomUUID())).rejects.toMatchObject({ state: 'PROVIDER_UNAVAILABLE' });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(events[0]).toMatchObject({ failureStage: 'response_envelope', modelOutputBytes: 4097,
+      completionReason: 'length', outputLimitReached: true, generatedTokens: 512 });
+    expect(JSON.stringify(events)).not.toContain(raw);
+    expect(JSON.stringify(events)).not.toContain('OUTPUT_TOO_LARGE_SECRET');
   });
   it('classifies invalid citations with fixed metadata and never logs raw provider output', async () => {
     const secret = 'PRIVATE-SYNTHETIC-RESPONSE-SECRET';
