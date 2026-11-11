@@ -69,7 +69,8 @@ export interface GroundedSource {
 
 export interface GroundedAnalysisProvider {
   readonly model: string;
-  analyze(input: { caseStatus: string; caseType: string; sources: readonly GroundedSource[] }, signal: AbortSignal,
+  /** Optional only when the authorized stored case has no narrative; absence must not be filled from fixture labels. */
+  analyze(input: { caseStatus: string; caseType: string; caseFacts?: string; sources: readonly GroundedSource[] }, signal: AbortSignal,
     correlationId: string): Promise<{ output: GroundedProviderOutput; metrics: { latencyMs: number; promptTokens: number | null; generatedTokens: number | null } }>;
 }
 

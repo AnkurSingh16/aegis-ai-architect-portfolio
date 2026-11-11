@@ -2,6 +2,8 @@ export const groundedEvaluationBaseCommit = '4690bb305f959f89ca2090a56982891158e
 export const groundedEvaluationCorrectionBaseCommit = 'bd24e5bb366ed0147da08978009520c2f9c97ca4';
 export const groundedEvaluationSchemaQualityBaseCommit = 'ca1a62aecf3ecd388afbbe4515d1dfcbe30d0105';
 export const groundedEvaluationV3ReleaseBaseCommit = 'c9ce3085d19ab75128c841bc8d9f5066042bdff3';
+export const groundedContextEvaluationBaseCommit = '3141c60cac99c9495015b656a7c76c60f1a6b51b';
+export const groundedContextEvaluationBranch = 'feat/m4-grounded-context-quality';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
 export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
@@ -96,5 +98,22 @@ export function verifyGroundedEvaluationV3Source(readGit: GitRead): EvaluationSo
   if (treeHash !== reviewed.tree) {
     throw new Error('V3 grounded evaluation main does not match the preserved reviewed source tree.');
   }
+  return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
+}
+
+/** V4 context evaluation is release-only and must match the preserved reviewed feature tree. */
+export function verifyGroundedContextEvaluationSource(readGit: GitRead): EvaluationSourceIdentity {
+  if (readGit(['branch', '--show-current']) !== 'main') throw new Error('Context evaluation requires merged main.');
+  assertClean(readGit);
+  const codeCommit = readGit(['rev-parse', 'HEAD']);
+  const treeHash = readGit(['rev-parse', 'HEAD^{tree}']);
+  const main = readRef(readGit, remoteMain);
+  if (codeCommit !== main.commit || treeHash !== main.tree) {
+    throw new Error('Context evaluation main must equal the fetched origin/main release.');
+  }
+  const reviewed = readRef(readGit, `origin/${groundedContextEvaluationBranch}`);
+  requireAncestry(readGit, groundedContextEvaluationBaseCommit, codeCommit);
+  requireAncestry(readGit, groundedContextEvaluationBaseCommit, reviewed.commit);
+  if (treeHash !== reviewed.tree) throw new Error('Context evaluation main does not match the preserved reviewed source tree.');
   return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
 }
