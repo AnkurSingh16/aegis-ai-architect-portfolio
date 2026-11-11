@@ -4,6 +4,7 @@ import type { GroundedAnalysisProvider, GroundedProviderOutput, GroundedSource }
 import { groundedBalancedScenarios } from './grounded-balanced-dataset.js';
 import { runGroundedBalancedEvaluation } from './grounded-balanced-runner.js';
 import { scoreGroundedBalancedEvaluation } from './grounded-balanced-scoring.js';
+import type { SafeProviderEvent } from './grounded-provider-diagnostics.js';
 
 const secretLabelMarker = 'private-engineering-label-rationale-must-never-be-provider-input';
 
@@ -70,7 +71,7 @@ describe('balanced grounded evaluation runner', () => {
       log({ event: 'ai_grounded_analysis', outcome: 'failure', correlationId, failureStage: 'provider_http', latencyMs: 9 });
       throw new Error(secretLabelMarker);
     });
-    let log: (event: Record<string, string | number | null>) => void = () => undefined;
+    let log: (event: SafeProviderEvent) => void = () => undefined;
     const run = await runGroundedBalancedEvaluation({ healthCheck: async () => true, sourcesFor: sourceBundle,
       providerFactory: (emit) => { log = emit; return { model: 'mock', analyze: provider as GroundedAnalysisProvider['analyze'] }; } });
     expect(provider).toHaveBeenCalledOnce();
@@ -89,7 +90,7 @@ describe('balanced grounded evaluation runner', () => {
   });
 
   it('counts a known human-review validation failure in the enforcement denominator', async () => {
-    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+    const providerFactory = (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
       model: 'mock', async analyze(input, _signal, correlationId) {
         if (input.caseFacts === groundedBalancedScenarios[0]!.caseFacts) {
           log({ event: 'ai_grounded_analysis', outcome: 'failure', correlationId, failureStage: 'output_schema',
@@ -109,7 +110,7 @@ describe('balanced grounded evaluation runner', () => {
   });
 
   it('counts rejected invalid citations in citation validity without turning the response into an accepted output', async () => {
-    const providerFactory = (log: (event: Record<string, string | number | null>) => void): GroundedAnalysisProvider => ({
+    const providerFactory = (log: (event: SafeProviderEvent) => void): GroundedAnalysisProvider => ({
       model: 'mock', async analyze(input, _signal, correlationId) {
         if (input.caseFacts === groundedBalancedScenarios[0]!.caseFacts) {
           log({ event: 'ai_grounded_analysis', outcome: 'failure', correlationId, failureStage: 'output_schema',

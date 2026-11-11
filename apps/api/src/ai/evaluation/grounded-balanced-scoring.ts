@@ -1,5 +1,6 @@
 import type { GroundedProviderOutput } from '../grounded-analysis.js';
 import { groundedBalancedDatasetVersion, groundedBalancedLabelStatus, groundedBalancedScenarios, type GroundedBalancedScenario } from './grounded-balanced-dataset.js';
+import type { GroundedProviderDiagnostics } from './grounded-provider-diagnostics.js';
 
 export interface BalancedObservation {
   scenarioId: string;
@@ -23,6 +24,7 @@ export interface BalancedObservation {
   latencyMs: number | null;
   promptTokens: number | null;
   generatedTokens: number | null;
+  providerDiagnostics: GroundedProviderDiagnostics | null;
 }
 
 export interface BalancedRate { numerator: number; denominator: number; rate: number | null; state: 'measured' | 'not_measured' }
@@ -116,7 +118,7 @@ export function createBalancedObservation(scenario: GroundedBalancedScenario, st
     expectedSourceIdentities: scenario.expectedSourceIdentities,
     status, groundingState: null, parsedJson: null, schemaAccepted: null, citationsValid: null, citedExpectedSourceIdentities: [],
     humanReviewRequired: null, correlationComplete: null, failureStage: null, validationReason: null,
-    latencyMs: null, promptTokens: null, generatedTokens: null, ...changes };
+    latencyMs: null, promptTokens: null, generatedTokens: null, providerDiagnostics: null, ...changes };
 }
 
 export const groundedBalancedScenarioCount = groundedBalancedScenarios.length;

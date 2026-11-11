@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { groundedValidationReasons, parseGroundedProviderOutput, type GroundedAnalysisProvider, type GroundedSource,
   type GroundedValidationReason } from '../grounded-analysis.js';
 import { groundedEvaluationSlots, type GroundedEvaluationObservation, type GroundedFailureStage } from './grounded-scoring.js';
+import type { SafeProviderEvent } from './grounded-provider-diagnostics.js';
 
-type SafeEvent = Record<string, string | number | null>;
-type ProviderFactory = (log: (event: SafeEvent) => void) => GroundedAnalysisProvider;
+type ProviderFactory = (log: (event: SafeProviderEvent) => void) => GroundedAnalysisProvider;
 export interface GroundedEvaluationAttempt {
   attemptId?: string;
   slotId: string;
@@ -64,7 +64,7 @@ function emptyObservation(slot: typeof groundedEvaluationSlots[number], status: 
     groundednessReviewAgreement: null, humanReviewRequired: null, confidence: null, uncertainty: null,
     correlationComplete, ...(stage ? { failureStage: stage } : {}), latencyMs: null, promptTokens: null, generatedTokens: null };
 }
-function attemptFromFailure(slot: typeof groundedEvaluationSlots[number], attemptId: string, event: SafeEvent | undefined,
+function attemptFromFailure(slot: typeof groundedEvaluationSlots[number], attemptId: string, event: SafeProviderEvent | undefined,
   correlated: boolean): { attempt: GroundedEvaluationAttempt; observation: GroundedEvaluationObservation } {
   const failureStage = safeStage(event?.failureStage);
   const parsedJson = failureStage === 'output_schema' ? true : failureStage === 'model_json_parse' ? false : null;
@@ -106,7 +106,7 @@ export async function runGroundedProviderEvaluation(options: {
   }
   for (const slot of groundedEvaluationSlots) {
     const attemptId = randomUUID();
-    const events: SafeEvent[] = [];
+    const events: SafeProviderEvent[] = [];
     let observation: GroundedEvaluationObservation;
     let attempt: GroundedEvaluationAttempt;
     let providerFailureStage: GroundedFailureStage = 'unknown';

@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { groundedValidationReasons, parseGroundedProviderOutput, type GroundedAnalysisProvider, type GroundedSource } from '../grounded-analysis.js';
 import { groundedContextSlots, type GroundedContextSlot } from './grounded-context-dataset.js';
 import { createContextObservation, type ContextObservation } from './grounded-context-scoring.js';
+import type { SafeProviderEvent } from './grounded-provider-diagnostics.js';
 
-type SafeEvent = Record<string, string | number | null>;
+type SafeEvent = SafeProviderEvent;
 type SourceBundle = { tenant: GroundedContextSlot['tenant']; sources: readonly GroundedSource[] };
 type ProviderFactory = (log: (event: SafeEvent) => void) => GroundedAnalysisProvider;
 

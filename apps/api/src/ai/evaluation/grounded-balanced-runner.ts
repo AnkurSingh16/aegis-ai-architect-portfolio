@@ -3,9 +3,9 @@ import { GroundedOutputError, groundedValidationReasons, parseGroundedProviderOu
   type GroundedAnalysisProvider, type GroundedSource } from '../grounded-analysis.js';
 import { groundedBalancedScenarios, validateGroundedBalancedDataset, type GroundedBalancedScenario } from './grounded-balanced-dataset.js';
 import { createBalancedObservation, type BalancedObservation } from './grounded-balanced-scoring.js';
+import { normalizeGroundedProviderDiagnostics, type SafeProviderEvent } from './grounded-provider-diagnostics.js';
 
-type SafeEvent = Record<string, string | number | null>;
-type ProviderFactory = (log: (event: SafeEvent) => void) => GroundedAnalysisProvider;
+type ProviderFactory = (log: (event: SafeProviderEvent) => void) => GroundedAnalysisProvider;
 type SourceBundle = { tenant: GroundedBalancedScenario['tenant']; sources: GroundedSource[] };
 export interface BalancedAttempt {
   scenarioId: string;
@@ -34,7 +34,7 @@ function safeNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function eventFailure(event: SafeEvent | undefined): { stage: string; reason: string | null } {
+function eventFailure(event: SafeProviderEvent | undefined): { stage: string; reason: string | null } {
   const stage = typeof event?.failureStage === 'string' && failureStages.includes(event.failureStage as typeof failureStages[number])
     ? event.failureStage : 'unknown';
   const reason = typeof event?.validationReason === 'string' && groundedValidationReasons.includes(event.validationReason as never)
@@ -75,7 +75,7 @@ export async function runGroundedBalancedEvaluation(options: {
         })) throw new Error('Balanced evaluation source boundary is invalid.');
 
     const correlationId = randomUUID();
-    const events: SafeEvent[] = [];
+    const events: SafeProviderEvent[] = [];
     try {
       const provider = options.providerFactory((event) => events.push(event));
       const response = await provider.analyze({ caseStatus: 'in_progress', caseType: scenario.caseType,
@@ -94,6 +94,7 @@ export async function runGroundedBalancedEvaluation(options: {
         groundingState: output.groundingState, parsedJson: true, schemaAccepted: true,
         citationsValid: output.groundingState === 'SUPPORTED' ? true : null,
         citedExpectedSourceIdentities, humanReviewRequired: output.humanReviewRequired, correlationComplete: true,
+        providerDiagnostics: normalizeGroundedProviderDiagnostics(event, correlationId),
         ...(output.groundingState === 'SUPPORTED' ? { category: output.category, priority: output.priority,
           recommendedTeam: output.recommendedTeam, nextAction: output.nextAction } : {}),
         latencyMs: response.metrics.latencyMs, promptTokens: response.metrics.promptTokens, generatedTokens: response.metrics.generatedTokens,
@@ -115,6 +116,7 @@ export async function runGroundedBalancedEvaluation(options: {
         citationsValid: event?.schemaReason === 'invalid_citations' ? false : null,
         humanReviewRequired: classified.reason === 'invalid_human_review' ? false : null,
         correlationComplete: correlated,
+        providerDiagnostics: normalizeGroundedProviderDiagnostics(event, correlationId),
         failureStage: classified.stage,
         validationReason: classified.reason,
         latencyMs: safeNumber(event?.latencyMs),
