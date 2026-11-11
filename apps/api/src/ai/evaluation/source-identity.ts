@@ -10,6 +10,8 @@ export const groundedReliabilityEvaluationBaseCommit = '4eadbffc52ca5f8e4fe81319
 export const groundedReliabilityEvaluationBranch = 'feat/m4-grounded-reliability-instrumentation';
 export const groundedTokenBudget512EvaluationBaseCommit = '730ba20d60c32076f583b159acaadfc1849d9b64';
 export const groundedTokenBudget512EvaluationBranch = 'feat/m4-grounded-token-budget-experiment';
+export const groundedConfidenceContractEvaluationBaseCommit = '0572e7c5c44427116faa14e318bddc1944cdf18b';
+export const groundedConfidenceContractEvaluationBranch = 'feat/m4-grounded-confidence-contract';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
 export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
@@ -172,5 +174,24 @@ export function verifyGroundedTokenBudget512EvaluationSource(readGit: GitRead): 
   requireAncestry(readGit, groundedTokenBudget512EvaluationBaseCommit, codeCommit);
   requireAncestry(readGit, groundedTokenBudget512EvaluationBaseCommit, reviewed.commit);
   if (treeHash !== reviewed.tree) throw new Error('Token-budget evaluation main does not match the preserved reviewed source tree.');
+  return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
+}
+
+/** M4.17 is release-only and must match the reviewed confidence-contract evaluation tree. */
+export function verifyGroundedConfidenceContractEvaluationSource(readGit: GitRead): EvaluationSourceIdentity {
+  if (readGit(['branch', '--show-current']) !== 'main') throw new Error('Confidence-contract evaluation requires merged main.');
+  assertClean(readGit);
+  const codeCommit = readGit(['rev-parse', 'HEAD']);
+  const treeHash = readGit(['rev-parse', 'HEAD^{tree}']);
+  const main = readRef(readGit, remoteMain);
+  if (codeCommit !== main.commit || treeHash !== main.tree) {
+    throw new Error('Confidence-contract evaluation main must equal the fetched origin/main release.');
+  }
+  const reviewed = readRef(readGit, `origin/${groundedConfidenceContractEvaluationBranch}`);
+  requireAncestry(readGit, groundedConfidenceContractEvaluationBaseCommit, codeCommit);
+  requireAncestry(readGit, groundedConfidenceContractEvaluationBaseCommit, reviewed.commit);
+  if (treeHash !== reviewed.tree) {
+    throw new Error('Confidence-contract evaluation main does not match the preserved reviewed source tree.');
+  }
   return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
 }
