@@ -8,6 +8,8 @@ export const groundedBalancedEvaluationBaseCommit = '51dfcd9fb97a8c3fff27e90591f
 export const groundedBalancedEvaluationBranch = 'feat/m4-grounded-balanced-quality';
 export const groundedReliabilityEvaluationBaseCommit = '4eadbffc52ca5f8e4fe81319478ec17ea8966a18';
 export const groundedReliabilityEvaluationBranch = 'feat/m4-grounded-reliability-instrumentation';
+export const groundedTokenBudget512EvaluationBaseCommit = '730ba20d60c32076f583b159acaadfc1849d9b64';
+export const groundedTokenBudget512EvaluationBranch = 'feat/m4-grounded-token-budget-experiment';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
 export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
@@ -153,5 +155,22 @@ export function verifyGroundedReliabilityEvaluationSource(readGit: GitRead): Eva
   requireAncestry(readGit, groundedReliabilityEvaluationBaseCommit, codeCommit);
   requireAncestry(readGit, groundedReliabilityEvaluationBaseCommit, reviewed.commit);
   if (treeHash !== reviewed.tree) throw new Error('Grounded reliability evaluation main does not match the preserved reviewed source tree.');
+  return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
+}
+
+/** M4.15 is release-only and must match the exact reviewed 512-budget evaluator tree. */
+export function verifyGroundedTokenBudget512EvaluationSource(readGit: GitRead): EvaluationSourceIdentity {
+  if (readGit(['branch', '--show-current']) !== 'main') throw new Error('Token-budget evaluation requires merged main.');
+  assertClean(readGit);
+  const codeCommit = readGit(['rev-parse', 'HEAD']);
+  const treeHash = readGit(['rev-parse', 'HEAD^{tree}']);
+  const main = readRef(readGit, remoteMain);
+  if (codeCommit !== main.commit || treeHash !== main.tree) {
+    throw new Error('Token-budget evaluation main must equal the fetched origin/main release.');
+  }
+  const reviewed = readRef(readGit, `origin/${groundedTokenBudget512EvaluationBranch}`);
+  requireAncestry(readGit, groundedTokenBudget512EvaluationBaseCommit, codeCommit);
+  requireAncestry(readGit, groundedTokenBudget512EvaluationBaseCommit, reviewed.commit);
+  if (treeHash !== reviewed.tree) throw new Error('Token-budget evaluation main does not match the preserved reviewed source tree.');
   return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
 }
