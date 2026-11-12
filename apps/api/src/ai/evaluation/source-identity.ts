@@ -12,6 +12,8 @@ export const groundedTokenBudget512EvaluationBaseCommit = '730ba20d60c32076f583b
 export const groundedTokenBudget512EvaluationBranch = 'feat/m4-grounded-token-budget-experiment';
 export const groundedConfidenceContractEvaluationBaseCommit = '0572e7c5c44427116faa14e318bddc1944cdf18b';
 export const groundedConfidenceContractEvaluationBranch = 'feat/m4-grounded-confidence-contract';
+export const groundedSupportedDecisionEvaluationBaseCommit = 'c89794012f4ee439dbdef7f213e3e4fe0bb99e01';
+export const groundedSupportedDecisionEvaluationBranch = 'feat/m4-grounded-supported-decision';
 export const groundedEvaluationFeatureBranch = 'feat/m4-grounded-ai-intelligence';
 export const groundedEvaluationCorrectionBranch = 'fix/m4-ingestion-server-ip';
 export const groundedEvaluationSchemaQualityBranch = 'fix/m4-grounded-schema-quality';
@@ -192,6 +194,25 @@ export function verifyGroundedConfidenceContractEvaluationSource(readGit: GitRea
   requireAncestry(readGit, groundedConfidenceContractEvaluationBaseCommit, reviewed.commit);
   if (treeHash !== reviewed.tree) {
     throw new Error('Confidence-contract evaluation main does not match the preserved reviewed source tree.');
+  }
+  return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
+}
+
+/** M4.18 is release-only and must match the reviewed supported-decision experiment tree. */
+export function verifyGroundedSupportedDecisionEvaluationSource(readGit: GitRead): EvaluationSourceIdentity {
+  if (readGit(['branch', '--show-current']) !== 'main') throw new Error('Supported-decision evaluation requires merged main.');
+  assertClean(readGit);
+  const codeCommit = readGit(['rev-parse', 'HEAD']);
+  const treeHash = readGit(['rev-parse', 'HEAD^{tree}']);
+  const main = readRef(readGit, remoteMain);
+  if (codeCommit !== main.commit || treeHash !== main.tree) {
+    throw new Error('Supported-decision evaluation main must equal the fetched origin/main release.');
+  }
+  const reviewed = readRef(readGit, `origin/${groundedSupportedDecisionEvaluationBranch}`);
+  requireAncestry(readGit, groundedSupportedDecisionEvaluationBaseCommit, codeCommit);
+  requireAncestry(readGit, groundedSupportedDecisionEvaluationBaseCommit, reviewed.commit);
+  if (treeHash !== reviewed.tree) {
+    throw new Error('Supported-decision evaluation main does not match the preserved reviewed source tree.');
   }
   return { codeCommit, treeHash, sourceRef: remoteMain, reviewedRefCommit: reviewed.commit };
 }

@@ -11,6 +11,7 @@ const maxModelOutputBytes = 4096;
 const maxCaseFactsBytes = 2048;
 const correlationPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const confidenceContractClarification = 'For SUPPORTED, confidence must be a JSON number between 0 and 1, inclusive, never a quoted string or null. For INSUFFICIENT_EVIDENCE, confidence must be null. Confidence is not a statistically calibrated probability. Human review is always required.';
+const supportedDecisionClarification = 'When the case facts and retrieved sources jointly support category, priority, recommendedTeam, nextAction and a cited rationale, choose SUPPORTED. If any required decision field lacks sufficient support, choose INSUFFICIENT_EVIDENCE. Confidence and uncertainty describe the assessment; they need not appear verbatim in the source documents. Human review is always required.';
 const promptContextMarker = '\nUNTRUSTED_CASE_FACTS_AND_RETRIEVED_SOURCES=';
 type GroundedPromptBuilder = (input: Parameters<GroundedAnalysisProvider['analyze']>[0]) => string;
 type FailureStage = 'input_validation' | 'provider_connection' | 'provider_http' | 'response_size' | 'response_decode' |
@@ -68,6 +69,16 @@ function buildConfidenceContractEvaluationPrompt(input: Parameters<GroundedAnaly
   const marker = prompt.lastIndexOf(promptContextMarker);
   if (marker < 0) throw new Error('invalid_prompt');
   const variant = `${prompt.slice(0, marker)}\n${confidenceContractClarification}${prompt.slice(marker)}`;
+  if (Buffer.byteLength(variant, 'utf8') > maxGroundedPromptBytes) throw new Error('invalid_input');
+  return variant;
+}
+
+/** M4.18-only decision-boundary variant; it starts from the unchanged M4.15 prompt. */
+function buildSupportedDecisionEvaluationPrompt(input: Parameters<GroundedAnalysisProvider['analyze']>[0]): string {
+  const prompt = buildPrompt(input);
+  const marker = prompt.lastIndexOf(promptContextMarker);
+  if (marker < 0) throw new Error('invalid_prompt');
+  const variant = `${prompt.slice(0, marker)}\n${supportedDecisionClarification}${prompt.slice(marker)}`;
   if (Buffer.byteLength(variant, 'utf8') > maxGroundedPromptBytes) throw new Error('invalid_input');
   return variant;
 }
@@ -219,4 +230,11 @@ export function createGroundedOllamaConfidenceContractEvaluationProvider(config:
   fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
 } = {}): GroundedAnalysisProvider {
   return createGroundedOllamaProviderWithBudget(config, options, 512, buildConfidenceContractEvaluationPrompt);
+}
+
+/** Fixed 512-token positive-decision guidance experiment, isolated from existing provider paths. */
+export function createGroundedOllamaSupportedDecisionEvaluationProvider(config: OllamaConfig, options: {
+  fetchImpl?: typeof fetch; log?: (event: SafeProviderEvent) => void; now?: () => number;
+} = {}): GroundedAnalysisProvider {
+  return createGroundedOllamaProviderWithBudget(config, options, 512, buildSupportedDecisionEvaluationPrompt);
 }
