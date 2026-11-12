@@ -60,6 +60,7 @@ Historical Billing 301 failures reached the confidence check after JSON parsing 
 - The audit imports only evaluation fixtures and pure validation code; it is not imported by API routes or provider factories.
 - Inputs omit expected output labels and review rationales; those fields are not consulted for field evidence assessments.
 - Source identity, tenant, version, revision, and content hashes are checked before resolving evidence references.
+- Each audit input is compared field by field and in source order against the canonical reviewed fixture before an assessment is returned. A caller cannot make edited case/source content pass by recomputing the adjacent hash; unreviewed changes fail with a fixed reason.
 - An invalid or unresolved reference fails closed instead of being treated as support.
 - The audit has no network, Ollama, cloud, database, report-write, or action-execution dependency.
 - It does not change prompts, output schemas, confidence handling, citation validation, production routing, or evaluator behavior.

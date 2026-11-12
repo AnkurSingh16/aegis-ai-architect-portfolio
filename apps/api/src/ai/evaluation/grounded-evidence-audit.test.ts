@@ -43,6 +43,7 @@ const expectedFingerprint = [
 
 const inputFor = (scenarios: readonly unknown[] = groundedBalancedScenarios): readonly GroundedEvidenceAuditScenario[] =>
   scenarios as readonly GroundedEvidenceAuditScenario[];
+const contentHash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
 const scenarioById = (id: string) => auditGroundedEvidence().scenarios.find((item) => item.scenarioId === id)!;
 const sourceInput = (): GroundedSource => ({ citationId: '123e4567-e89b-42d3-a456-426614174000', title: 'Synthetic source',
   sourceIdentity: 'SYNTHETIC-TEST-SOURCE', version: 1, position: 0, content: 'Synthetic evidence.' });
@@ -155,9 +156,56 @@ describe('deterministic grounded evidence audit', () => {
     expectAuditReason(() => auditGroundedEvidence(inputFor(wrongHash)), 'source_hash_mismatch');
   });
 
+  it('rejects case facts changed with either the original or recomputed hash', () => {
+    const changedWithOriginalHash = groundedBalancedScenarios.map((item, index) => index ? item :
+      { ...item, caseFacts: `${item.caseFacts} unreviewed addition` });
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedWithOriginalHash)), 'case_facts_hash_mismatch');
+
+    const changedWithRecomputedHash = groundedBalancedScenarios.map((item, index) => {
+      if (index) return item;
+      const caseFacts = `${item.caseFacts} unreviewed addition`;
+      return { ...item, caseFacts, caseFactsSha256: contentHash(caseFacts) };
+    });
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedWithRecomputedHash)), 'unreviewed_fixture_change');
+  });
+
+  it('rejects source content changed with either the original or recomputed hash', () => {
+    const changedWithOriginalHash = groundedBalancedScenarios.map((item, index) => index ? item : ({ ...item,
+      sources: item.sources.map((source, sourceIndex) => sourceIndex ? source : { ...source, content: `${source.content} unreviewed addition` }) }));
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedWithOriginalHash)), 'source_hash_mismatch');
+
+    const changedWithRecomputedHash = groundedBalancedScenarios.map((item, index) => index ? item : ({ ...item,
+      sources: item.sources.map((source, sourceIndex) => {
+        if (sourceIndex) return source;
+        const content = `${source.content} unreviewed addition`;
+        return { ...source, content, contentSha256: contentHash(content) };
+      }) }));
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedWithRecomputedHash)), 'unreviewed_fixture_change');
+  });
+
+  it('rejects changed source titles, valid-looking replacement identities, and reordered sources', () => {
+    const changedTitle = groundedBalancedScenarios.map((item, index) => index ? item : ({ ...item,
+      sources: item.sources.map((source, sourceIndex) => sourceIndex ? source : { ...source, title: 'Rewritten synthetic title' }) }));
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedTitle)), 'unreviewed_fixture_change');
+
+    const changedIdentity = groundedBalancedScenarios.map((item, index) => index ? item : ({ ...item,
+      sources: item.sources.map((source, sourceIndex) => sourceIndex ? source : { ...source, sourceIdentity: 'EVAL-NORTH-LOGIN-REPLACEMENT-V1' }) }));
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedIdentity)), 'unreviewed_fixture_change');
+
+    const reordered = groundedBalancedScenarios.map((item, index) => index ? item : ({ ...item, sources: [...item.sources].reverse() }));
+    expectAuditReason(() => auditGroundedEvidence(inputFor(reordered)), 'unreviewed_fixture_change');
+  });
+
+  it('rejects a changed scenario tenant even when its sources share that changed tenant', () => {
+    const changedTenant = groundedBalancedScenarios.map((item, index) => index ? item : ({ ...item, tenant: 'south' as const,
+      sources: item.sources.map((source, sourceIndex) => ({ ...source, tenant: 'south' as const,
+        sourceIdentity: sourceIndex === 0 ? 'EVAL-SOUTH-LOGIN-201-SEVERITY-V1' : 'EVAL-SOUTH-LOGIN-201-STATUS-V1' })) }));
+    expectAuditReason(() => auditGroundedEvidence(inputFor(changedTenant)), 'unreviewed_fixture_change');
+  });
+
   it('rejects evidence references to absent sources and duplicate source identities', () => {
     const missingReference = groundedBalancedScenarios.map((item, index) => index ? item : { ...item, sources: item.sources.slice(1) });
-    expectAuditReason(() => auditGroundedEvidence(inputFor(missingReference)), 'missing_evidence_reference');
+    expectAuditReason(() => auditGroundedEvidence(inputFor(missingReference)), 'unreviewed_fixture_change');
 
     const duplicateIdentity = groundedBalancedScenarios.map((item, index) => index ? item : { ...item,
       sources: item.sources.map((source, sourceIndex) => sourceIndex ? source : { ...source, sourceIdentity: 'EVAL-NORTH-LOGIN-STATUS-V1' }) });

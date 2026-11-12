@@ -176,7 +176,7 @@ export class GroundedEvidenceAuditError extends Error {
   constructor(readonly reason: 'invalid_scenario_set' | 'invalid_case_provenance' | 'case_facts_hash_mismatch' |
     'duplicate_source_identity' | 'source_tenant_mismatch' | 'source_identity_mismatch' | 'source_version_mismatch' |
     'source_revision_mismatch' | 'source_owner_mismatch' | 'source_hash_mismatch' | 'missing_evidence_reference' |
-    'empty_evidence_reference' | 'invalid_case_facts' | 'invalid_source_shape') {
+    'empty_evidence_reference' | 'invalid_case_facts' | 'invalid_source_shape' | 'unreviewed_fixture_change') {
     super('Grounded evidence audit input failed deterministic validation.');
   }
 }
@@ -194,12 +194,32 @@ function sourceReference(source: BalancedSourceFixture): EvidenceReference {
     version: source.version, contentSha256: source.contentSha256 };
 }
 
+function assertMatchesCanonicalFixture(scenario: GroundedEvidenceAuditScenario, canonical: GroundedBalancedScenario): void {
+  if (scenario.scenarioId !== canonical.scenarioId || scenario.caseType !== canonical.caseType || scenario.tenant !== canonical.tenant ||
+      scenario.caseProvenance !== canonical.caseProvenance || scenario.caseFacts !== canonical.caseFacts ||
+      scenario.caseFactsSha256 !== canonical.caseFactsSha256 || scenario.sources.length !== canonical.sources.length) {
+    throw new GroundedEvidenceAuditError('unreviewed_fixture_change');
+  }
+  for (let index = 0; index < canonical.sources.length; index += 1) {
+    const source = scenario.sources[index];
+    const approved = canonical.sources[index];
+    if (!source || !approved || source.sourceIdentity !== approved.sourceIdentity || source.tenant !== approved.tenant ||
+        source.title !== approved.title || source.version !== approved.version || source.sourceRevision !== approved.sourceRevision ||
+        source.sourceOwner !== approved.sourceOwner || source.content !== approved.content || source.contentSha256 !== approved.contentSha256) {
+      throw new GroundedEvidenceAuditError('unreviewed_fixture_change');
+    }
+  }
+}
+
 function validateInput(scenarios: readonly GroundedEvidenceAuditScenario[]): void {
-  if (scenarios.length !== expectedScenarioIds.length || scenarios.map((item) => item.scenarioId).join('\0') !== expectedScenarioIds.join('\0')) {
+  if (!Array.isArray(scenarios) || scenarios.length !== expectedScenarioIds.length ||
+      scenarios.some((item) => !item || typeof item !== 'object') ||
+      scenarios.map((item) => item.scenarioId).join('\0') !== expectedScenarioIds.join('\0')) {
     throw new GroundedEvidenceAuditError('invalid_scenario_set');
   }
   const allIdentities = new Set<string>();
-  for (const scenario of scenarios) {
+  for (let scenarioIndex = 0; scenarioIndex < scenarios.length; scenarioIndex += 1) {
+    const scenario = scenarios[scenarioIndex]!;
     if (scenario.tenant !== 'north' && scenario.tenant !== 'south') throw new GroundedEvidenceAuditError('invalid_scenario_set');
     if (scenario.caseProvenance !== groundedBalancedCaseProvenance) throw new GroundedEvidenceAuditError('invalid_case_provenance');
     const idCaseType = /^BALANCED-(LOGIN|BILLING|GUIDANCE)-[0-9]{3}$/.exec(scenario.scenarioId)?.[1]?.toLowerCase();
@@ -213,6 +233,7 @@ function validateInput(scenarios: readonly GroundedEvidenceAuditScenario[]): voi
       throw new GroundedEvidenceAuditError('invalid_source_shape');
     }
     for (const source of scenario.sources) {
+      if (!source || typeof source !== 'object') throw new GroundedEvidenceAuditError('invalid_source_shape');
       if (allIdentities.has(source.sourceIdentity)) throw new GroundedEvidenceAuditError('duplicate_source_identity');
       allIdentities.add(source.sourceIdentity);
       if (source.tenant !== scenario.tenant) throw new GroundedEvidenceAuditError('source_tenant_mismatch');
@@ -229,6 +250,9 @@ function validateInput(scenarios: readonly GroundedEvidenceAuditScenario[]): voi
       if (source.sourceOwner !== 'Aegis synthetic evaluation corpus') throw new GroundedEvidenceAuditError('source_owner_mismatch');
       if (sha256(source.content) !== source.contentSha256) throw new GroundedEvidenceAuditError('source_hash_mismatch');
     }
+    const canonical = groundedBalancedScenarios[scenarioIndex];
+    if (!canonical) throw new GroundedEvidenceAuditError('invalid_scenario_set');
+    assertMatchesCanonicalFixture(scenario, canonical);
   }
 }
 
