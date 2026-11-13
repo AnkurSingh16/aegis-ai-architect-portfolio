@@ -1,4 +1,5 @@
 import Ajv from 'ajv';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -255,30 +256,110 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('requires clean synchronized merged main, reviewed tree identity, and approved base ancestry', () => {
-    const commit = 'a'.repeat(40);
-    const tree = 'b'.repeat(40);
-    const reviewed = 'c'.repeat(40);
-    const fakeGit = (overrides: Record<string, string> = {}) => (args: readonly string[]): string => {
+  it('accepts synchronized post-M4.23 main when the reviewed M4.22 and M4.23 source blobs remain pinned', () => {
+    const commit = '59cb95f32389ae1ed2fd6715f1e0e983bffb6b0c';
+    const tree = '7dfb48eaa27f7ae0b3cdb36f66d143655af46d84';
+    const reviewedGuardCommit = 'd'.repeat(40);
+    const m422 = '3fe57fd8a366b4532a440222355de0a5b3821c1d';
+    const m423 = commit;
+    const m422Tree = '79d0a6a50a59880a16a0f2294475686ccfe89872';
+    const m423Tree = tree;
+    const m422Feature = '536f702f8423824479bd77145c7031856ec5a069';
+    const m423Feature = 'a543dab169265754bfe38252abd47c6d98fc3d63';
+    const m422Paths: Record<string, string> = {
+      'apps/api/src/ai/evaluation/grounded-supported-output-diagnostic.ts': '7bce941f7f59e5d9b1bd1f9c66ed1bb2a27e8b36',
+      'apps/api/src/ai/grounded-analysis.ts': 'e39dff2024fc1ca593d54a4e96f0a8644ef64c02',
+      'apps/api/src/ai/evaluation/grounded-balanced-dataset.ts': 'a4c3ed5dd2f35d2628dc5319a402da873db96217',
+      'apps/api/src/ai/grounded-provider.ts': 'e2a7b76d059f0c2538f1b095e54df08eea99a4e4',
+      'apps/api/src/ai/provider.ts': 'dc8dc7be163ee454771fdc188632ea396d4c022d',
+      'apps/api/src/ai/evaluation/private-report.ts': '2514348183e39e5411a2ddfb0b90a4394140068c',
+    };
+    const socketPath = 'apps/api/src/ai/evaluation/ollama-socket-preflight.ts';
+    const socketBlob = 'c7c37967915bfcccd47c21150ca7ca0996667767';
+    const runnerPath = 'apps/api/src/ai/evaluation/run-grounded-supported-output-diagnostic-local.ts';
+    const testPath = 'apps/api/src/ai/evaluation/grounded-supported-output-diagnostic.test.ts';
+    const baselineRunner = 'prefix\nexport function verifySupportedOutputDiagnosticSource(readGit: unknown) { return "original"; }\nfunction assertNoOtherClient() {}\nsuffix';
+    const currentRunner = 'prefix\nexport function verifySupportedOutputDiagnosticSource(readGit: unknown) { return "narrow identity gate"; }\nfunction assertNoOtherClient() {}\nsuffix';
+    const testBlob = 'f'.repeat(40);
+    const gitBlobId = (value: string): string => {
+      const bytes = Buffer.from(value, 'utf8');
+      return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
+    };
+    const baselineRunnerBlob = gitBlobId(baselineRunner);
+    const gateBlob = gitBlobId(currentRunner);
+    const fakeGit = (extra: Record<string, string> = {}) => (args: readonly string[]): string => {
       const key = args.join(' ');
       const values: Record<string, string> = {
-        'branch --show-current': 'main', 'status --porcelain=v1': '', 'rev-parse HEAD': commit,
-        'rev-parse HEAD^{tree}': tree, 'rev-parse origin/main': commit, 'rev-parse origin/main^{tree}': tree,
-        'rev-parse origin/feat/m4-grounded-supported-output-diagnostic^{tree}': tree,
-        'rev-parse origin/feat/m4-grounded-supported-output-diagnostic': reviewed,
-        ['merge-base --is-ancestor 976856cc9eea8b4195712a3c73b4e82730cef5e5 ' + commit]: '', ...overrides,
+        'branch --show-current': 'main', 'status --porcelain=v1': '',
+        'rev-parse HEAD': commit, 'rev-parse HEAD^{tree}': tree,
+        'rev-parse origin/main': commit, 'rev-parse origin/main^{tree}': tree,
+        [`rev-parse ${m422}^{tree}`]: m422Tree, [`rev-parse ${m423}^{tree}`]: m423Tree,
+        [`rev-parse origin/feat/m4-grounded-supported-output-diagnostic`]: m422Feature,
+        [`rev-parse origin/feat/m4-grounded-supported-output-diagnostic^{tree}`]: m422Tree,
+        [`rev-parse origin/fix/m423-ollama-closed-socket-preflight`]: m423Feature,
+        [`rev-parse origin/fix/m423-ollama-closed-socket-preflight^{tree}`]: m423Tree,
+        [`merge-base --is-ancestor ${m422} ${commit}`]: '',
+        [`merge-base --is-ancestor ${m423} ${commit}`]: '',
+        [`diff --name-only ${m423}..HEAD`]: `${testPath}\n${runnerPath}`,
+        [`show ${m422}:${runnerPath}`]: baselineRunner,
+        [`show HEAD:${runnerPath}`]: currentRunner,
+        'rev-parse origin/fix/m4.22-source-identity-gate': reviewedGuardCommit,
+        [`rev-parse HEAD:${runnerPath}`]: gitBlobId(currentRunner),
+        [`rev-parse ${m422}:${runnerPath}`]: baselineRunnerBlob,
+        [`rev-parse origin/feat/m4-grounded-supported-output-diagnostic:${runnerPath}`]: baselineRunnerBlob,
+        [`rev-parse origin/fix/m4.22-source-identity-gate:${runnerPath}`]: gateBlob,
+        [`rev-parse HEAD:${testPath}`]: testBlob,
+        [`rev-parse origin/fix/m4.22-source-identity-gate:${testPath}`]: testBlob,
+        [`ls-remote origin refs/heads/main refs/heads/feat/m4-grounded-supported-output-diagnostic refs/heads/fix/m423-ollama-closed-socket-preflight refs/heads/fix/m4.22-source-identity-gate`]:
+          `${commit}\trefs/heads/main\n${m422Feature}\trefs/heads/feat/m4-grounded-supported-output-diagnostic\n${m423Feature}\trefs/heads/fix/m423-ollama-closed-socket-preflight\n${reviewedGuardCommit}\trefs/heads/fix/m4.22-source-identity-gate`,
+        ...extra,
       };
-      if (!(key in values)) throw new Error('unexpected_git_read');
-      if (values[key] === '!throw') throw new Error('guard_rejected');
+      for (const [path, blob] of Object.entries(m422Paths)) {
+        values[`rev-parse ${m422}:${path}`] = blob;
+        values[`rev-parse origin/feat/m4-grounded-supported-output-diagnostic:${path}`] = blob;
+        if (path !== runnerPath) values[`rev-parse HEAD:${path}`] = blob;
+      }
+      values[`rev-parse HEAD:${socketPath}`] = socketBlob;
+      values[`rev-parse ${m423}:${socketPath}`] = socketBlob;
+      values[`rev-parse origin/fix/m423-ollama-closed-socket-preflight:${socketPath}`] = socketBlob;
+      Object.assign(values, extra);
+      if (!(key in values) || values[key] === '!throw') throw new Error('mock_git_failure');
       return values[key]!;
     };
-    expect(verifySupportedOutputDiagnosticSource(fakeGit())).toMatchObject({ codeCommit: commit, treeHash: tree, reviewedRefCommit: reviewed });
-    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ 'branch --show-current': 'feature' }))).toThrow('source_not_clean_merged_main');
-    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ 'status --porcelain=v1': ' M file' }))).toThrow('source_not_clean_merged_main');
-    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ 'rev-parse origin/main': 'd'.repeat(40) }))).toThrow('main_not_synchronized');
-    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ 'rev-parse origin/feat/m4-grounded-supported-output-diagnostic^{tree}': 'd'.repeat(40) })))
-      .toThrow('reviewed_tree_mismatch');
-    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ ['merge-base --is-ancestor 976856cc9eea8b4195712a3c73b4e82730cef5e5 ' + commit]: '!throw' })))
-      .toThrow('guard_rejected');
+
+    expect(verifySupportedOutputDiagnosticSource(fakeGit())).toMatchObject({ codeCommit: commit, treeHash: tree,
+      sourceRef: 'origin/main', reviewedRefCommit: reviewedGuardCommit });
+
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`rev-parse HEAD:apps/api/src/ai/evaluation/grounded-supported-output-diagnostic.ts`]: '1'.repeat(40),
+    }))).toThrow('reviewed_source_blob_mismatch');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ [`rev-parse HEAD:${socketPath}`]: '2'.repeat(40) })))
+      .toThrow('reviewed_source_blob_mismatch');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ 'status --porcelain=v1': ' M source.ts' })))
+      .toThrow('source_not_clean_merged_main');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({ 'rev-parse origin/main': '3'.repeat(40) })))
+      .toThrow('main_not_synchronized');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`ls-remote origin refs/heads/main refs/heads/feat/m4-grounded-supported-output-diagnostic refs/heads/fix/m423-ollama-closed-socket-preflight refs/heads/fix/m4.22-source-identity-gate`]:
+        `${'4'.repeat(40)}\trefs/heads/main`,
+    }))).toThrow('live_source_refs_mismatch');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      'rev-parse origin/fix/m423-ollama-closed-socket-preflight': '!throw',
+    }))).toThrow('approved_source_ref_missing');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`rev-parse origin/feat/m4-grounded-supported-output-diagnostic`]: '!throw',
+    }))).toThrow('approved_source_ref_missing');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      'rev-parse origin/fix/m4.22-source-identity-gate': '!throw',
+    }))).toThrow('approved_source_ref_missing');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`merge-base --is-ancestor ${m423} ${commit}`]: '!throw',
+    }))).toThrow('approved_release_not_ancestor');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`show HEAD:${runnerPath}`]: `${currentRunner}\n// unreviewed runner change`,
+    }))).toThrow('unreviewed_runner_changes');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`diff --name-only ${m423}..HEAD`]: `${testPath}\n${runnerPath}\napps/api/src/ai/provider.ts`,
+    }))).toThrow('unreviewed_post_release_changes');
   });
 });
