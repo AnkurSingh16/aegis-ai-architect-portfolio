@@ -105,7 +105,12 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
       expect(request.format).toEqual(supportedSchema);
       expect(request.options).toEqual({ temperature: 0.1, num_predict: 512 });
       const embedded = request.prompt.split('UNTRUSTED_CASE_FACTS_AND_RETRIEVED_SOURCES=')[1]!;
-      const promptInput = JSON.parse(embedded) as { sources: Array<{ citationId: string }> };
+      const promptInput = JSON.parse(embedded) as { caseStatus: string; status?: string; sources: Array<{ citationId: string }> };
+      expect(promptInput.caseStatus).toBe('in_progress');
+      expect(promptInput).not.toHaveProperty('status');
+      expect(request.prompt).toContain('attempt a SUPPORTED-shaped response only when case facts and retrieved sources support every required recommendation field');
+      expect(request.prompt).toContain('the evaluator records it as a diagnostic failure and never repairs it');
+      expect(request.prompt).not.toMatch(/\babstain\b/i);
       const output = supported({ citations: [promptInput.sources[0]!.citationId] });
       return new Response(JSON.stringify({ done: true, model: request.model, response: JSON.stringify(output), prompt_eval_count: 44, eval_count: 30 }));
     });
@@ -183,6 +188,7 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
     expect(active.max).toBe(1);
     expect(report.decisionQualityStatus).toBe('NOT_RATED');
     expect(report.naturalSupportedCoverage).toBeNull();
+    expect(outcomes.every((item) => item.citationIdentityValid === true)).toBe(true);
     expect(JSON.stringify(report)).not.toContain('Review the supplied synthetic evidence.');
     const changedLabels = scenarios.map((scenario) => ({ ...scenario, expected: { category: 'wrong', priority: 'wrong',
       recommendedTeam: 'wrong', nextAction: 'wrong' } as never }));
@@ -194,6 +200,39 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
     expect(JSON.stringify(sanitized)).not.toContain('private prompt');
     expect(() => createSupportedOutputDiagnosticReport({ source: sourceIdentity, outcomes: [outcomes[0]!, outcomes[0]!, outcomes[2]!] }))
       .toThrow('invalid_report_outcomes');
+  });
+
+  it('keeps schema and parser acceptance separate for a parser-accepted abstention under the forced schema', async () => {
+    const provider = { model: 'qwen2.5:3b-instruct', async analyze() {
+      return { output: abstention as never, schemaAccepted: false, jsonParsed: true as const,
+        metrics: { latencyMs: 1, promptTokens: null, generatedTokens: null } };
+    } };
+    const [outcome] = await runSupportedOutputDiagnostic({ provider, validateSchema: validSupported });
+    expect(outcome).toMatchObject({ jsonParseAccepted: true, schemaAccepted: false, parserAccepted: true,
+      citationIdentityValid: null, confidenceValidation: 'not_reached' });
+  });
+
+  it('records an observed request-scoped citation failure as false without saving output details', async () => {
+    const fetchImpl = vi.fn(async (_url: Request | URL | string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { prompt: string; model: string };
+      return new Response(JSON.stringify({ done: true, model: request.model,
+        response: JSON.stringify(supported({ citations: ['b1234567-b123-4123-8123-123456789abc'] })), eval_count: 9 }));
+    });
+    const provider = createSupportedOutputDiagnosticProvider({ model: 'qwen2.5:3b-instruct', timeoutMs: 15000, maxConcurrent: 1 },
+      { fetchImpl, beforeRequest: () => undefined });
+    const [outcome] = await runSupportedOutputDiagnostic({ provider, validateSchema: validSupported });
+    expect(outcome).toMatchObject({ jsonParseAccepted: true, schemaAccepted: true, parserAccepted: false,
+      citationIdentityValid: false, validationReason: 'unknown_citation' });
+    expect(JSON.stringify(outcome)).not.toContain('b1234567-b123-4123-8123-123456789abc');
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('classifies a direct parser citation error as a failed parser check', async () => {
+    const provider = { model: 'qwen2.5:3b-instruct', async analyze() {
+      throw new GroundedOutputError('invalid_citations', 'duplicate_citation');
+    } };
+    const [outcome] = await runSupportedOutputDiagnostic({ provider, validateSchema: validSupported });
+    expect(outcome).toMatchObject({ parserAccepted: false, citationIdentityValid: false, validationReason: 'duplicate_citation' });
   });
 
   it('does not retry failures and remains limited to the three fixed scenarios', async () => {
