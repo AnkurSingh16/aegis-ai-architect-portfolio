@@ -3,6 +3,12 @@ export interface OllamaTcpRecord {
   command: string;
   name: string;
   state?: string;
+  queueReceiveBytes?: number;
+  queueSendBytes?: number;
+}
+
+function isSafeQueueSize(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 /** Parse lsof -FpcnT output, retaining its explicit TCP state field. */
@@ -43,8 +49,12 @@ export function parseOllamaTcpRecords(output: string): OllamaTcpRecord[] {
     } else if (/^TST=\S+$/.test(line) && current && current.state === undefined) {
       current.state = line.slice(4);
     } else if (/^TQR=\d+$/.test(line) && current && !sawQueueReceive) {
+      current.queueReceiveBytes = Number(line.slice(4));
+      if (!Number.isSafeInteger(current.queueReceiveBytes)) throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
       sawQueueReceive = true;
     } else if (/^TQS=\d+$/.test(line) && current && !sawQueueSend) {
+      current.queueSendBytes = Number(line.slice(4));
+      if (!Number.isSafeInteger(current.queueSendBytes)) throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
       sawQueueSend = true;
     } else {
       throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
@@ -58,7 +68,8 @@ export function parseOllamaTcpRecords(output: string): OllamaTcpRecord[] {
 /** Fail closed unless Ollama is loopback-only and no other client is connected. */
 export function assertSafeOllamaTcpRecords(records: readonly OllamaTcpRecord[], currentPid: number): void {
   if (records.length === 0 || records.some((record) => !Number.isSafeInteger(record.pid) || record.pid <= 0 ||
-      record.command.length === 0 || record.name.length === 0 || !['LISTEN', 'ESTABLISHED', 'CLOSE_WAIT'].includes(record.state ?? ''))) {
+      typeof record.command !== 'string' || record.command.length === 0 || typeof record.name !== 'string' || record.name.length === 0 ||
+      typeof record.state !== 'string')) {
     throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
   }
   const listeners = records.filter((record) => record.state === 'LISTEN');
@@ -66,6 +77,23 @@ export function assertSafeOllamaTcpRecords(records: readonly OllamaTcpRecord[], 
     throw new Error('Ollama is not bound exclusively to the approved loopback endpoint.');
   }
   const listenerPid = listeners[0].pid;
+  const closedServerPort = (name: string): number | undefined => {
+    const port = name.match(/^127\.0\.0\.1:11434->127\.0\.0\.1:(\d+)$/)?.[1];
+    if (port === undefined) return undefined;
+    const parsed = Number(port);
+    return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : undefined;
+  };
+  for (const record of records) {
+    if (record.state === 'CLOSED') {
+      const peerPort = closedServerPort(record.name);
+      if (record.pid !== listenerPid || record.command !== 'ollama' || peerPort === undefined ||
+          !isSafeQueueSize(record.queueReceiveBytes) || !isSafeQueueSize(record.queueSendBytes)) {
+        throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
+      }
+    } else if (!['LISTEN', 'ESTABLISHED', 'CLOSE_WAIT'].includes(record.state ?? '')) {
+      throw new Error('Ollama TCP socket metadata is incomplete or unsupported.');
+    }
+  }
   const established = records.filter((record) => record.state === 'ESTABLISHED');
   const clientPort = (name: string): string | undefined => {
     const port = name.match(/^127\.0\.0\.1:(\d+)->127\.0\.0\.1:11434$/)?.[1];
