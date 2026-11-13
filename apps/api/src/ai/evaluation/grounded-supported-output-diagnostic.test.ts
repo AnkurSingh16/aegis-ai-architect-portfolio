@@ -257,13 +257,13 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
   });
 
   it('accepts synchronized post-M4.23 main when the reviewed M4.22 and M4.23 source blobs remain pinned', () => {
-    const commit = '59cb95f32389ae1ed2fd6715f1e0e983bffb6b0c';
-    const tree = '7dfb48eaa27f7ae0b3cdb36f66d143655af46d84';
+    const commit = '8'.repeat(40);
+    const tree = '9'.repeat(40);
     const reviewedGuardCommit = 'd'.repeat(40);
     const m422 = '3fe57fd8a366b4532a440222355de0a5b3821c1d';
-    const m423 = commit;
+    const m423 = '59cb95f32389ae1ed2fd6715f1e0e983bffb6b0c';
     const m422Tree = '79d0a6a50a59880a16a0f2294475686ccfe89872';
-    const m423Tree = tree;
+    const m423Tree = '7dfb48eaa27f7ae0b3cdb36f66d143655af46d84';
     const m422Feature = '536f702f8423824479bd77145c7031856ec5a069';
     const m423Feature = 'a543dab169265754bfe38252abd47c6d98fc3d63';
     const m422Paths: Record<string, string> = {
