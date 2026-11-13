@@ -18,6 +18,7 @@
     "ai:evaluate:grounded:token-budget-512:local": "tsx src/ai/evaluation/run-grounded-token-budget-512-local-evaluation.ts",
     "ai:evaluate:grounded:confidence-contract:local": "tsx src/ai/evaluation/run-grounded-confidence-contract-local-evaluation.ts",
     "ai:evaluate:grounded:supported-decision:local": "tsx src/ai/evaluation/run-grounded-supported-decision-local-evaluation.ts",
+    "ai:evaluate:grounded:supported-output-diagnostic:local": "tsx src/ai/evaluation/run-grounded-supported-output-diagnostic-local.ts",
     "db:migrate": "tsx src/storage/migrate-cli.ts",
     "documents:ingest": "tsx src/documents/ingest-cli.ts",
     "cases": "tsx src/storage/cli.ts",
