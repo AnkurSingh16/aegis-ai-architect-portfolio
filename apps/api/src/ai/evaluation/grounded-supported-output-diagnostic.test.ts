@@ -1,5 +1,6 @@
 import Ajv from 'ajv';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -278,8 +279,28 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
     const socketBlob = 'c7c37967915bfcccd47c21150ca7ca0996667767';
     const runnerPath = 'apps/api/src/ai/evaluation/run-grounded-supported-output-diagnostic-local.ts';
     const testPath = 'apps/api/src/ai/evaluation/grounded-supported-output-diagnostic.test.ts';
-    const baselineRunner = 'prefix\nexport function verifySupportedOutputDiagnosticSource(readGit: unknown) { return "original"; }\nfunction assertNoOtherClient() {}\nsuffix';
-    const currentRunner = 'prefix\nexport function verifySupportedOutputDiagnosticSource(readGit: unknown) { return "narrow identity gate"; }\nfunction assertNoOtherClient() {}\nsuffix';
+    const runnerUrl = new URL('./run-grounded-supported-output-diagnostic-local.ts', import.meta.url);
+    const currentRunner = readFileSync(runnerUrl, 'utf8').trim();
+    const originalVerifier = `export function verifySupportedOutputDiagnosticSource(readGit: (args: readonly string[]) => string) {
+  if (readGit(['branch', '--show-current']) !== 'main' || readGit(['status', '--porcelain=v1']) !== '') {
+    throw new Error('source_not_clean_merged_main');
+  }
+  const commit = readGit(['rev-parse', 'HEAD']);
+  const tree = readGit(['rev-parse', 'HEAD^{tree}']);
+  if (readGit(['rev-parse', 'origin/main']) !== commit || readGit(['rev-parse', 'origin/main^{tree}']) !== tree) {
+    throw new Error('main_not_synchronized');
+  }
+  if (readGit(['rev-parse', \`origin/\${branch}^{tree}\`]) !== tree) throw new Error('reviewed_tree_mismatch');
+  readGit(['merge-base', '--is-ancestor', baseCommit, commit]);
+  return { codeCommit: commit, treeHash: tree, sourceRef: 'origin/main', reviewedRefCommit: readGit(['rev-parse', \`origin/\${branch}\`]) };
+}`;
+    let baselineRunner = currentRunner.replace("import { createHash } from 'node:crypto';\n", '');
+    const identityStart = baselineRunner.indexOf("const approvedM422Commit = '");
+    const confirmationStart = baselineRunner.indexOf("const confirmation = '", identityStart);
+    baselineRunner = `${baselineRunner.slice(0, identityStart)}const baseCommit = '976856cc9eea8b4195712a3c73b4e82730cef5e5';\nconst branch = 'feat/m4-grounded-supported-output-diagnostic';\n${baselineRunner.slice(confirmationStart)}`;
+    const verifierStart = baselineRunner.indexOf('export function verifySupportedOutputDiagnosticSource(');
+    const verifierEnd = baselineRunner.indexOf('\nfunction assertNoOtherClient()', verifierStart);
+    baselineRunner = `${baselineRunner.slice(0, verifierStart)}${originalVerifier}\n${baselineRunner.slice(verifierEnd)}`.trim();
     const testBlob = 'f'.repeat(40);
     const gitBlobId = (value: string): string => {
       const bytes = Buffer.from(value, 'utf8');
@@ -287,6 +308,7 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
     };
     const baselineRunnerBlob = gitBlobId(baselineRunner);
     const gateBlob = gitBlobId(currentRunner);
+    expect(gitBlobId(`${baselineRunner}\n`)).toBe('493b62642b52dd9e39addb17dda6dba54c44865d');
     const fakeGit = (extra: Record<string, string> = {}) => (args: readonly string[]): string => {
       const key = args.join(' ');
       const values: Record<string, string> = {
@@ -356,8 +378,12 @@ describe('M4.22 forced SUPPORTED structural diagnostic', () => {
       [`merge-base --is-ancestor ${m423} ${commit}`]: '!throw',
     }))).toThrow('approved_release_not_ancestor');
     expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
-      [`show HEAD:${runnerPath}`]: `${currentRunner}\n// unreviewed runner change`,
+      [`show HEAD:${runnerPath}`]: currentRunner.replace("if (!stdin.isTTY || !stdout.isTTY) throw new Error('interactive_terminal_required');",
+        "if (false) throw new Error('interactive_terminal_required');"),
     }))).toThrow('unreviewed_runner_changes');
+    expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
+      [`show HEAD:${runnerPath}`]: currentRunner.replace("const confirmation = '", "globalThis.unreviewed = true;\nconst confirmation = '"),
+    }))).toThrow('reviewed_runner_source_shape_invalid');
     expect(() => verifySupportedOutputDiagnosticSource(fakeGit({
       [`diff --name-only ${m423}..HEAD`]: `${testPath}\n${runnerPath}\napps/api/src/ai/provider.ts`,
     }))).toThrow('unreviewed_post_release_changes');

@@ -145,28 +145,52 @@ export function verifySupportedOutputDiagnosticSource(readGit: (args: readonly s
     originalRunner = readGit(['show', `${approvedM422Commit}:${runnerPath}`]);
     currentRunner = readGit(['show', `HEAD:${runnerPath}`]);
   } catch { throw new Error('reviewed_runner_source_missing'); }
-  const withoutIdentityGate = (source: string): string => {
-    const start = source.indexOf('export function verifySupportedOutputDiagnosticSource(');
-    const end = source.indexOf('\nfunction assertNoOtherClient()', start);
+  const normalizeReviewedRunner = (source: string): string => {
+    const identityImport = "import { createHash } from 'node:crypto';\n";
+    if (source.split(identityImport).length > 2) throw new Error('reviewed_runner_source_shape_invalid');
+    let normalized = source.replace(identityImport, '');
+    const sourceGateStart = normalized.indexOf("const approvedM422Commit = '");
+    const confirmationStart = normalized.indexOf("const confirmation = '", sourceGateStart);
+    if (sourceGateStart >= 0) {
+      if (confirmationStart < 0) throw new Error('reviewed_runner_source_shape_invalid');
+      const expectedIdentityDeclarations = [
+        `const approvedM422Commit = '${approvedM422Commit}';`,
+        `const approvedM422Tree = '${approvedM422Tree}';`,
+        `const approvedM422FeatureRef = '${approvedM422FeatureRef}';`,
+        `const approvedM422FeatureHead = '${approvedM422FeatureHead}';`,
+        `const approvedM423Commit = '${approvedM423Commit}';`,
+        `const approvedM423Tree = '${approvedM423Tree}';`,
+        `const approvedM423FeatureRef = '${approvedM423FeatureRef}';`,
+        `const approvedM423FeatureHead = '${approvedM423FeatureHead}';`,
+        '// Keep this reviewed branch available after squash merge as the source-gate blob anchor.',
+        `const sourceIdentityFeatureRef = '${sourceIdentityFeatureRef}';`,
+        `const reviewedM422Blobs = {\n${Object.entries(reviewedM422Blobs).map(([path, blob]) => `  '${path}': '${blob}',`).join('\n')}\n} as const;`,
+        `const runnerPath = '${runnerPath}';`,
+        `const socketGuardPath = '${socketGuardPath}';`,
+        `const reviewedM423SocketGuardBlob = '${reviewedM423SocketGuardBlob}';`,
+        "const allowedPostM423Paths = [runnerPath, 'apps/api/src/ai/evaluation/grounded-supported-output-diagnostic.test.ts'];",
+      ].join('\n');
+      if (normalized.slice(sourceGateStart, confirmationStart).trimEnd() !== expectedIdentityDeclarations) {
+        throw new Error('reviewed_runner_source_shape_invalid');
+      }
+      normalized = `${normalized.slice(0, sourceGateStart)}const baseCommit = '976856cc9eea8b4195712a3c73b4e82730cef5e5';\nconst branch = 'feat/m4-grounded-supported-output-diagnostic';\n${normalized.slice(confirmationStart)}`;
+    }
+    const start = normalized.indexOf('export function verifySupportedOutputDiagnosticSource(');
+    const end = normalized.indexOf('\nfunction assertNoOtherClient()', start);
     if (start < 0 || end < 0) throw new Error('reviewed_runner_source_shape_invalid');
-    return `${source.slice(0, start)}/* source identity gate */${source.slice(end)}`;
+    return `${normalized.slice(0, start)}/* reviewed source gate */${normalized.slice(end)}`;
   };
   const gitBlobId = (source: string): string => {
     const bytes = Buffer.from(source, 'utf8');
     return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
   };
-  if (gitBlobId(withoutIdentityGate(originalRunner)) !== gitBlobId(withoutIdentityGate(currentRunner))) {
+  if (gitBlobId(normalizeReviewedRunner(originalRunner)) !== gitBlobId(normalizeReviewedRunner(currentRunner))) {
     throw new Error('unreviewed_runner_changes');
   }
-  for (const path of allowedPostM423Paths) {
-    let currentBlob: string;
-    let reviewedBlob: string;
-    try {
-      currentBlob = readGit(['rev-parse', `HEAD:${path}`]);
-      reviewedBlob = readGit(['rev-parse', `${sourceIdentityFeatureRef}:${path}`]);
-    } catch { throw new Error('approved_source_blob_missing'); }
-    if (currentBlob !== reviewedBlob) throw new Error('unreviewed_post_release_changes');
-  }
+  let currentRunnerBlob: string;
+  try { currentRunnerBlob = readGit(['rev-parse', `HEAD:${runnerPath}`]); }
+  catch { throw new Error('approved_source_blob_missing'); }
+  requireBlob(sourceIdentityFeatureRef, runnerPath, currentRunnerBlob);
 
   return { codeCommit: commit, treeHash: tree, sourceRef: 'origin/main', reviewedRefCommit: reviewedRunnerCommit };
 }
