@@ -13,7 +13,7 @@ export function createDatabasePool(url: string, max = 4): Pool {
 export async function verifyRuntimeRole(pool: Pool): Promise<void> {
   const result = await pool.query<{ safe: boolean }>(`
     WITH expected_tables(name) AS (VALUES
-      ('tenants'), ('support_cases'), ('audit_events'), ('memberships'), ('documents'), ('document_chunks')),
+      ('tenants'), ('support_cases'), ('audit_events'), ('memberships'), ('documents'), ('document_chunks'), ('case_reviews')),
     aegis_tables AS (
       SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, c.relowner
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -28,7 +28,7 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
       AND NOT has_table_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_any_column_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,REFERENCES')
-      AND (SELECT count(*) = 6 AND bool_and(t.relrowsecurity AND t.relforcerowsecurity AND t.relowner <> r.oid)
+      AND (SELECT count(*) = 7 AND bool_and(t.relrowsecurity AND t.relforcerowsecurity AND t.relowner <> r.oid)
         FROM aegis_tables t JOIN expected_tables e ON e.name = t.relname)
       AND NOT EXISTS (SELECT 1 FROM expected_tables e WHERE NOT EXISTS
         (SELECT 1 FROM aegis_tables t WHERE t.relname = e.name))
@@ -58,7 +58,32 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND NOT has_table_privilege(current_user, 'aegis.documents', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_table_privilege(current_user, 'aegis.document_chunks', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_any_column_privilege(current_user, 'aegis.documents', 'INSERT,UPDATE,REFERENCES')
-      AND NOT has_any_column_privilege(current_user, 'aegis.document_chunks', 'INSERT,UPDATE,REFERENCES') AS safe
+      AND NOT has_any_column_privilege(current_user, 'aegis.document_chunks', 'INSERT,UPDATE,REFERENCES')
+      AND has_table_privilege(current_user, 'aegis.case_reviews', 'SELECT')
+      AND NOT has_table_privilege(current_user, 'aegis.case_reviews', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      AND NOT has_any_column_privilege(current_user, 'aegis.case_reviews', 'UPDATE,REFERENCES')
+      AND NOT EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) x
+        WHERE c.oid = 'aegis.case_reviews'::regclass AND x.grantee = 0)
+      AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = 'aegis.case_reviews'::regclass
+        AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(a.attacl) x WHERE x.grantee = 0))
+      AND has_column_privilege(current_user, 'aegis.case_reviews', 'tenant_id', 'INSERT')
+      AND has_column_privilege(current_user, 'aegis.case_reviews', 'case_id', 'INSERT')
+      AND has_column_privilege(current_user, 'aegis.case_reviews', 'decision', 'INSERT')
+      AND has_column_privilege(current_user, 'aegis.case_reviews', 'note', 'INSERT')
+      AND has_column_privilege(current_user, 'aegis.case_reviews', 'idempotency_key', 'INSERT')
+      AND NOT EXISTS (SELECT 1 FROM pg_attribute a
+        WHERE a.attrelid = 'aegis.case_reviews'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+          AND has_column_privilege(current_user, a.attrelid, a.attnum, 'INSERT')
+          AND a.attname NOT IN ('tenant_id', 'case_id', 'decision', 'note', 'idempotency_key'))
+      AND (SELECT NOT p.prosecdef AND p.proconfig @> ARRAY['search_path=pg_catalog']
+        FROM pg_proc p WHERE p.oid = 'aegis.attribute_case_review()'::regprocedure)
+      AND EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid = 'aegis.case_reviews'::regclass
+        AND t.tgname = 'case_review_attribution' AND NOT t.tgisinternal AND t.tgenabled = 'O')
+      AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(
+        (SELECT p.proacl FROM pg_proc p WHERE p.oid = 'aegis.attribute_case_review()'::regprocedure),
+        acldefault('f', (SELECT p.proowner FROM pg_proc p WHERE p.oid = 'aegis.attribute_case_review()'::regprocedure)))) x
+        WHERE x.grantee = 0 AND x.privilege_type = 'EXECUTE') AS safe
     FROM pg_roles r WHERE r.rolname = current_user`);
   if (result.rows[0]?.safe !== true) throw new Error('Unsafe application database role or schema.');
 }

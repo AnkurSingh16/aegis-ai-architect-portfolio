@@ -10,6 +10,14 @@ export interface AuditEvent {
   id: string; tenant_id: string; case_id: string; action: 'case.created' | 'case.updated';
   previous_status: CaseStatus | null; new_status: CaseStatus; occurred_at: Date;
 }
+export type CaseReviewDecision = 'approve' | 'reject' | 'defer';
+export interface CaseReview {
+  review_id: string; tenant_id: string; case_id: string; decision: CaseReviewDecision;
+  actor_issuer: string; actor_subject: string; note: string | null; created_at: Date;
+}
+export class CaseReviewConflictError extends Error {
+  constructor() { super('Review idempotency key conflict.'); }
+}
 export class CaseStorageError extends Error {
   constructor(public readonly code: 'invalid_input' | 'not_found' | 'unavailable') {
     super(code === 'invalid_input' ? 'Invalid case command.'

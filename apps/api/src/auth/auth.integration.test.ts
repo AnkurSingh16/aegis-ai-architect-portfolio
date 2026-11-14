@@ -58,6 +58,7 @@ function analysisFor(caseId: string): AnalysisResult {
     disclaimer: 'Advisory analysis only. Evidence references identify case fields; they are not RAG citations or external source grounding.' };
 }
 const casePath = (tenant = north.tenantId, id?: string) => `/api/tenants/${tenant}/cases${id ? `/${id}` : ''}`;
+const reviewPath = (tenant = north.tenantId, id = northId) => `${casePath(tenant, id)}/reviews`;
 async function membership(subject: string, tenant: string, role: string) {
   await admin.query(`INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, $2, $3, $4)
     ON CONFLICT (issuer, subject, tenant_id) DO UPDATE SET role = EXCLUDED.role`, [issuer, subject, tenant, role]);
@@ -135,6 +136,8 @@ describe('authenticated HTTP with real PostgreSQL membership authorization', () 
     const authorization = await token();
     const listed = await app.inject({ url: casePath(), headers: { authorization } });
     expect(listed.statusCode).toBe(200);
+    expect(listed.headers['x-aegis-can-review']).toBe('true');
+    expect(listed.headers['cache-control']).toBe('no-store');
     expect(listed.json().every((row: { tenant_id: string }) => row.tenant_id === north.tenantId)).toBe(true);
     expect((await app.inject({ url: casePath(north.tenantId, northId), headers: { authorization } })).statusCode).toBe(200);
     const created = await app.inject({ method: 'POST', url: casePath(), headers: { authorization }, payload: { syntheticCaseId: 'SYNTHETIC-GUIDANCE-003' } });
@@ -144,6 +147,95 @@ describe('authenticated HTTP with real PostgreSQL membership authorization', () 
     expect(await new CaseRepository(pool, north, () => {}).audit(id)).toMatchObject([
       { action: 'case.created', new_status: 'open' }, { action: 'case.updated', previous_status: 'open', new_status: 'resolved' },
     ]);
+  });
+
+  it('persists append-only human reviews with verified actor, database time and idempotent retries', async () => {
+    const authorization = await token(operator);
+    const idempotencyKey = randomUUID();
+    const beforeCase = await admin.query('SELECT status, updated_at FROM aegis.support_cases WHERE id=$1', [northId]);
+    const beforeAudit = await admin.query('SELECT action, previous_status, new_status FROM aegis.audit_events WHERE case_id=$1 ORDER BY occurred_at', [northId]);
+    const created = await app.inject({ method: 'POST', url: reviewPath(), headers: { authorization, 'idempotency-key': idempotencyKey },
+      payload: { decision: 'approve', note: 'Reviewed the synthetic case.' } });
+    expect(created.statusCode).toBe(201);
+    const review = created.json();
+    expect(review).toMatchObject({ tenant_id: north.tenantId, case_id: northId, decision: 'approve',
+      actor_issuer: issuer, actor_subject: operator, note: 'Reviewed the synthetic case.' });
+    expect(new Date(review.created_at).getTime()).toBeGreaterThan(0);
+    const stored = await admin.query('SELECT created_at FROM aegis.case_reviews WHERE review_id=$1', [review.review_id]);
+    expect(new Date(review.created_at).getTime()).toBe(new Date(stored.rows[0].created_at).getTime());
+
+    const otherOperator = `${prefix}|other-operator`;
+    await membership(otherOperator, north.tenantId, 'operator');
+    const otherActorReplay = await app.inject({ method: 'POST', url: reviewPath(),
+      headers: { authorization: await token(otherOperator), 'idempotency-key': idempotencyKey },
+      payload: { decision: 'approve', note: 'Reviewed the synthetic case.' } });
+    expect(otherActorReplay.statusCode).toBe(409);
+
+    const replay = await app.inject({ method: 'POST', url: reviewPath(), headers: { authorization, 'idempotency-key': idempotencyKey },
+      payload: { decision: 'approve', note: 'Reviewed the synthetic case.' } });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().review_id).toBe(review.review_id);
+    const conflict = await app.inject({ method: 'POST', url: reviewPath(), headers: { authorization, 'idempotency-key': idempotencyKey },
+      payload: { decision: 'reject', note: 'Different decision.' } });
+    expect(conflict.statusCode).toBe(409);
+
+    const later = await app.inject({ method: 'POST', url: reviewPath(), headers: { authorization, 'idempotency-key': randomUUID() },
+      payload: { decision: 'defer' } });
+    expect(later.statusCode).toBe(201);
+    const rejected = await app.inject({ method: 'POST', url: reviewPath(), headers: { authorization, 'idempotency-key': randomUUID() },
+      payload: { decision: 'reject' } });
+    expect(rejected.statusCode).toBe(201);
+    const history = await app.inject({ method: 'GET', url: reviewPath(), headers: { authorization: await token(reader, 'read:cases') } });
+    expect(history.statusCode).toBe(200);
+    const historyRows = history.json() as Array<{ decision: string; created_at: string }>;
+    expect(historyRows.map((row) => row.decision).sort()).toEqual(['approve', 'defer', 'reject']);
+    expect(historyRows.every((row, index) => index === 0 || Date.parse(historyRows[index - 1].created_at) <= Date.parse(row.created_at))).toBe(true);
+    expect(history.json()[0].actor_subject).toBe(operator);
+    expect(history.headers['cache-control']).toBe('no-store');
+    expect((await admin.query('SELECT status, updated_at FROM aegis.support_cases WHERE id=$1', [northId])).rows)
+      .toEqual(beforeCase.rows);
+    expect((await admin.query('SELECT action, previous_status, new_status FROM aegis.audit_events WHERE case_id=$1 ORDER BY occurred_at', [northId])).rows)
+      .toEqual(beforeAudit.rows);
+  });
+
+  it('denies review creation without operator membership or write scope and rejects forged or invalid input', async () => {
+    const path = reviewPath();
+    const key = randomUUID();
+    const readerCases = await app.inject({ method: 'GET', url: casePath(), headers: { authorization: await token(reader, 'read:cases') } });
+    expect(readerCases.statusCode).toBe(200);
+    expect(readerCases.headers['x-aegis-can-review']).toBe('false');
+    expect((await app.inject({ method: 'POST', url: path, payload: { decision: 'approve' } })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer invalid' }, payload: { decision: 'approve' } })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await token(operator, 'read:cases'), 'idempotency-key': key }, payload: { decision: 'approve' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await token(reader), 'idempotency-key': key }, payload: { decision: 'approve' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await token(operator), 'idempotency-key': key },
+      payload: { decision: 'approve', actor_subject: 'forged|operator' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await token(operator), 'idempotency-key': key },
+      payload: { decision: 'change-status' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await token(operator), 'idempotency-key': key },
+      payload: { decision: 'approve', note: 'x'.repeat(1001) } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: path, headers: { authorization: await token(operator) }, payload: { decision: 'approve' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: reviewPath(south.tenantId, southId),
+      headers: { authorization: await token(operator), 'idempotency-key': key }, payload: { decision: 'approve' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: reviewPath(north.tenantId, southId),
+      headers: { authorization: await token(operator), 'idempotency-key': randomUUID() }, payload: { decision: 'approve' } })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: reviewPath(north.tenantId, southId), headers: { authorization: await token(reader, 'read:cases') } })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: reviewPath(), headers: { authorization: await token(reader, 'write:cases') } })).statusCode).toBe(403);
+  });
+
+  it('keeps case reviews readable but immutable to the runtime role', async () => {
+    const key = randomUUID();
+    const created = await app.inject({ method: 'POST', url: reviewPath(), headers: { authorization: await token(operator), 'idempotency-key': key },
+      payload: { decision: 'reject' } });
+    expect(created.statusCode).toBe(201);
+    await expect(pool.query('UPDATE aegis.case_reviews SET decision = \'approve\' WHERE review_id = $1', [created.json().review_id]))
+      .rejects.toMatchObject({ code: '42501' });
+    await expect(pool.query('DELETE FROM aegis.case_reviews WHERE review_id = $1', [created.json().review_id]))
+      .rejects.toMatchObject({ code: '42501' });
+    await expect(pool.query(`INSERT INTO aegis.case_reviews
+      (tenant_id,case_id,decision,actor_issuer,actor_subject,idempotency_key)
+      VALUES ($1,$2,'approve',$3,$4,$5)`, [north.tenantId, northId, issuer, `${prefix}|forged`, randomUUID()]))
+      .rejects.toMatchObject({ code: '42501' });
   });
 
   it('requires a valid bearer token and does not use development fixture identity for HTTP', async () => {
