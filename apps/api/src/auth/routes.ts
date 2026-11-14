@@ -2,8 +2,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { syntheticCases } from '../contracts/triage.js';
-import { CaseStorageError, caseStatuses } from '../storage/models.js';
-import { createCase, listCases, readCase, updateCase } from '../storage/queries.js';
+import { CaseReviewConflictError, CaseStorageError, caseStatuses } from '../storage/models.js';
+import { createCase, createCaseReview, listCaseReviews, listCases, readCase, updateCase } from '../storage/queries.js';
 import { AuthorizationError, type Permission, type VerifiedPrincipal, type VerifyToken } from './token.js';
 import { withAuthenticatedTransaction } from './transaction.js';
 import { AnalysisDisabledError, AnalysisUnavailableError, type AnalysisProvider } from '../ai/provider.js';
@@ -14,19 +14,25 @@ const uuid = { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-
 const tenantParams = { type: 'object', required: ['tenantId'], additionalProperties: false, properties: { tenantId: uuid } };
 const caseParams = { type: 'object', required: ['tenantId', 'caseId'], additionalProperties: false,
   properties: { tenantId: uuid, caseId: uuid } };
+const reviewBody = { type: 'object', required: ['decision'], additionalProperties: false,
+  properties: { decision: { type: 'string', enum: ['approve', 'reject', 'defer'] }, note: { type: 'string', maxLength: 1000 } } };
+const idempotencyHeaders = { type: 'object', required: ['idempotency-key'], additionalProperties: true,
+  properties: { 'idempotency-key': { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' } } };
 type TenantParams = { tenantId: string };
 type CaseParams = TenantParams & { caseId: string };
 
 export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Pool, verify: VerifyToken,
   analysisProvider?: AnalysisProvider, groundedAnalysisProvider?: GroundedAnalysisProvider): Promise<void> {
   const principals = new WeakMap<FastifyRequest, VerifiedPrincipal>();
-  app.addHook('onRequest', async (request) => {
+  app.addHook('onRequest', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
     principals.set(request, await verify(request.headers.authorization));
   });
   app.setErrorHandler((error, request, reply) => {
     const candidateStatus = typeof error === 'object' && error !== null && 'statusCode' in error
       ? error.statusCode : undefined;
     const status = error instanceof AuthorizationError ? error.status
+      : error instanceof CaseReviewConflictError ? 409
       : error instanceof AnalysisUnavailableError || error instanceof AnalysisDisabledError || error instanceof GroundedAnalysisFailureError ? 503
       : error instanceof CaseStorageError ? (error.code === 'not_found' ? 404 : error.code === 'invalid_input' ? 400 : 503)
         : candidateStatus === 400 || candidateStatus === 413 || candidateStatus === 415 ? candidateStatus : 503;
@@ -35,7 +41,8 @@ export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Po
         : status === 404 ? 'not_found' : status < 500 ? 'invalid_input' : 'unavailable' }));
     if (status === 401) reply.header('WWW-Authenticate', 'Bearer');
     const message = status === 401 ? 'Authentication required.' : status === 403 ? 'Access denied.'
-      : status === 404 ? 'Case not found.' : error instanceof AnalysisDisabledError ? 'AI analysis is disabled for this development server.'
+      : status === 404 ? 'Case not found.' : status === 409 ? 'This review request key was already used for a different decision.'
+        : error instanceof AnalysisDisabledError ? 'AI analysis is disabled for this development server.'
         : error instanceof GroundedAnalysisFailureError ? 'Grounded analysis could not be completed. Check the local development provider and retry.'
         : error instanceof AnalysisUnavailableError ? 'AI analysis is unavailable. Check the local development provider and retry.'
         : status < 500 ? 'Invalid case request.' : 'Case storage is unavailable. Please retry.';
@@ -55,7 +62,17 @@ export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Po
   }
   app.get<{ Params: TenantParams }>('/api/tenants/:tenantId/cases', {
     schema: { params: tenantParams, querystring: { type: 'object', additionalProperties: false } },
-  }, (request) => run(request, request.params.tenantId, 'read:cases', listCases));
+  }, async (request, reply) => {
+    const principal = principals.get(request);
+    const result = await run(request, request.params.tenantId, 'read:cases', async (client) => {
+      const cases = await listCases(client);
+      const membership = await client.query<{ role: string }>(`SELECT role FROM aegis.memberships
+        WHERE issuer = $1 AND subject = $2 AND tenant_id = $3`,
+      [principal?.issuer, principal?.subject, request.params.tenantId]);
+      return { cases, canReview: principal?.scopes.has('write:cases') === true && membership.rows[0]?.role === 'operator' };
+    });
+    return reply.header('X-Aegis-Can-Review', result.canReview ? 'true' : 'false').send(result.cases);
+  });
   app.get<{ Params: CaseParams }>('/api/tenants/:tenantId/cases/:caseId', {
     schema: { params: caseParams, querystring: { type: 'object', additionalProperties: false } },
   }, (request) => run(request, request.params.tenantId, 'read:cases', (client) => readCase(client, request.params.caseId)));
@@ -74,6 +91,31 @@ export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Po
         properties: { status: { type: 'string', enum: caseStatuses } } } },
   }, (request) => run(request, request.params.tenantId, 'write:cases',
     (client) => updateCase(client, request.params.caseId, request.body.status)));
+
+  app.get<{ Params: CaseParams }>('/api/tenants/:tenantId/cases/:caseId/reviews', {
+    schema: { params: caseParams, querystring: { type: 'object', additionalProperties: false } },
+  }, (request) => run(request, request.params.tenantId, 'read:cases', async (client) => {
+    await readCase(client, request.params.caseId);
+    return listCaseReviews(client, request.params.caseId);
+  }));
+
+  app.post<{ Params: CaseParams; Body: { decision: 'approve' | 'reject' | 'defer'; note?: string } }>(
+    '/api/tenants/:tenantId/cases/:caseId/reviews', {
+      bodyLimit: 2048,
+      schema: { params: caseParams, querystring: { type: 'object', additionalProperties: false },
+        headers: idempotencyHeaders, body: reviewBody },
+    }, async (request, reply) => {
+      const idempotencyKey = request.headers['idempotency-key'];
+      if (typeof idempotencyKey !== 'string') throw new CaseStorageError('invalid_input');
+      const result = await run(request, request.params.tenantId, 'write:cases', async (client) => {
+        await readCase(client, request.params.caseId);
+        const principal = principals.get(request);
+        if (!principal) throw new AuthorizationError(401);
+        return createCaseReview(client, request.params.tenantId, request.params.caseId, request.body.decision,
+          request.body.note ?? null, idempotencyKey, principal.issuer, principal.subject);
+      });
+      return reply.code(result.created ? 201 : 200).send(result.review);
+    });
 
   if (process.env.NODE_ENV !== 'production') {
     app.post<{ Params: CaseParams; Body?: unknown }>('/api/tenants/:tenantId/cases/:caseId/ai-analysis', {

@@ -57,7 +57,7 @@ describe('development Auth0 case experience', () => {
     render(<DevAuthExperience config={config} />);
     expect(authMocks.providerProps).toMatchObject({ domain: config.domain, clientId: config.clientId,
       cacheLocation: 'memory', useRefreshTokens: false,
-      authorizationParams: { redirect_uri: 'http://127.0.0.1:5173/', audience: config.audience, scope: 'read:cases' } });
+      authorizationParams: { redirect_uri: 'http://127.0.0.1:5173/', audience: config.audience, scope: 'read:cases write:cases' } });
   });
 
   it('offers sign-in without calling the API when unauthenticated', () => {
@@ -102,7 +102,7 @@ describe('development Auth0 case experience', () => {
     render(<DevAuthExperience config={config} />);
     expect(await screen.findByText('SYN-NORTH-001')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith('/api/tenants/10000000-0000-4000-8000-000000000001/cases', expect.objectContaining({
-      method: 'GET', credentials: 'omit', redirect: 'error', headers: { Authorization: 'Bearer private-test-token', Accept: 'application/json' },
+      method: 'GET', credentials: 'omit', redirect: 'error', cache: 'no-store', headers: { Authorization: 'Bearer private-test-token', Accept: 'application/json' },
     }));
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
@@ -226,6 +226,107 @@ describe('development Auth0 case experience', () => {
     render(<DevAuthExperience config={config} />);
     expect(await screen.findByText(/Case data is unavailable/)).toBeTruthy();
     expect(screen.queryByText('SYN-NORTH-001')).toBeNull();
+  });
+
+  it('submits a confirmed human review once and shows the persisted actor and history', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const review = { review_id: 'review-1', tenant_id: northCase.tenant_id, case_id: northCase.id, decision: 'approve',
+      actor_issuer: 'https://synthetic.auth0.example/', actor_subject: 'auth0|operator', note: 'Verified synthetic facts.',
+      created_at: '2026-11-14T12:00:00.000Z' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'true' }, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] })
+      .mockResolvedValueOnce({ ok: true, status: 201, json: async () => review })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [review] });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+
+    expect(await screen.findByRole('heading', { name: 'Human case review' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Show review history' }));
+    await screen.findByText('No human reviews have been recorded.');
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(screen.getByText('Confirm approve decision')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Optional reviewer note'), { target: { value: 'Verified synthetic facts.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm review' }));
+
+    expect(await screen.findByText('Human review saved.')).toBeTruthy();
+    expect(await screen.findByText(/auth0\|operator/)).toBeTruthy();
+    const post = fetchMock.mock.calls.find(([url, options]) => String(url).endsWith('/reviews') && options?.method === 'POST');
+    expect(post?.[1]).toMatchObject({ method: 'POST', headers: expect.objectContaining({
+      Authorization: 'Bearer private-test-token', 'Idempotency-Key': expect.any(String) }),
+      body: JSON.stringify({ decision: 'approve', note: 'Verified synthetic facts.' }) });
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1);
+    expect(document.body.textContent).not.toContain('private-test-token');
+  });
+
+  it('retries an ambiguous submission with the same idempotency key', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const review = { review_id: 'review-2', tenant_id: northCase.tenant_id, case_id: northCase.id, decision: 'defer',
+      actor_issuer: 'https://synthetic.auth0.example/', actor_subject: 'auth0|operator', note: null,
+      created_at: '2026-11-14T12:00:00.000Z' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'true' }, json: async () => [northCase] })
+      .mockRejectedValueOnce(new Error('connection closed after request'))
+      .mockResolvedValueOnce({ ok: true, status: 201, json: async () => review })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [review] });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Defer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm review' }));
+    expect(screen.queryByRole('button', { name: 'Confirm review' })).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Retry same decision' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same decision' }));
+    expect(await screen.findByText('Human review saved.')).toBeTruthy();
+    const posts = fetchMock.mock.calls.filter(([url, options]) => String(url).endsWith('/reviews') && options?.method === 'POST');
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.[1]?.headers['Idempotency-Key']).toBe(posts[1]?.[1]?.headers['Idempotency-Key']);
+    expect(posts[0]?.[1]?.cache).toBe('no-store');
+  });
+
+  it('lets a reader inspect history without exposing decision controls', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'false' }, json: async () => [northCase] })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] });
+    globalThis.fetch = fetchMock;
+    render(<DevAuthExperience config={config} />);
+    expect(await screen.findByRole('heading', { name: 'Human case review' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Defer' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show review history' }));
+    expect(await screen.findByText('No human reviews have been recorded.')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reviews'))).toBe(true);
+  });
+
+  it('aborts and discards review history when the selected tenant changes', async () => {
+    authMocks.state = { isAuthenticated: true, isLoading: false };
+    authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
+    let resolveHistory!: (response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+    const delayed = new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve) => { resolveHistory = resolve; });
+    const oldReview = { review_id: 'review-old', tenant_id: northCase.tenant_id, case_id: northCase.id, decision: 'approve',
+      actor_issuer: 'https://synthetic.auth0.example/', actor_subject: 'old-tenant|operator', note: 'old tenant review',
+      created_at: '2026-11-14T12:00:00.000Z' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'true' }, json: async () => [northCase] })
+      .mockReturnValueOnce(delayed)
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+    globalThis.fetch = fetchMock;
+    const { container } = render(<DevAuthExperience config={config} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show review history' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByLabelText('Requested tenant'), { target: { value: '20000000-0000-4000-8000-000000000002' } });
+    await screen.findByText(/Access was denied/);
+    resolveHistory({ ok: true, status: 200, json: async () => [oldReview] });
+    await delayed;
+    expect(fetchMock.mock.calls[1]?.[1]?.signal?.aborted).toBe(true);
+    expect(container.textContent).not.toContain('old tenant review');
+    expect(container.textContent).not.toContain('old-tenant|operator');
   });
 
   it('does not persist tokens in browser storage', async () => {

@@ -19,10 +19,182 @@ type StoredCase = {
   updated_at: string;
 };
 
-type ViewState = { kind: 'idle' | 'loading' | 'ready' | 'unauthenticated' | 'forbidden' | 'unavailable'; cases: StoredCase[]; message?: string };
+type ViewState = { kind: 'idle' | 'loading' | 'ready' | 'unauthenticated' | 'forbidden' | 'unavailable'; cases: StoredCase[]; canReview?: boolean; message?: string };
 type AnalysisState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'unauthenticated' | 'forbidden' | 'failed'; caseId?: string; result?: AnalysisResult };
 type GroundedState = { kind: 'idle' | 'loading' | 'disabled' | 'success' | 'insufficient' | 'unauthenticated' | 'forbidden' |
   'validationFailed' | 'providerUnavailable' | 'failed'; caseId?: string; result?: GroundedAnalysisResult };
+type ReviewDecision = 'approve' | 'reject' | 'defer';
+type CaseReview = { review_id: string; tenant_id: string; case_id: string; decision: ReviewDecision;
+  actor_issuer: string; actor_subject: string; note: string | null; created_at: string };
+type ReviewView = { kind: 'idle' | 'loading' | 'ready' | 'unauthenticated' | 'forbidden' | 'notFound' | 'unavailable'; history: CaseReview[] };
+type ReviewSubmit = { kind: 'idle' | 'confirm' | 'submitting' | 'success' | 'unauthenticated' | 'forbidden' | 'notFound' | 'invalid' | 'conflict' | 'unavailable';
+  decision?: ReviewDecision; note: string; idempotencyKey?: string; attempted?: boolean; retryable?: boolean };
+
+function isCaseReview(value: unknown, tenantId: string, caseId: string): value is CaseReview {
+  if (!value || typeof value !== 'object') return false;
+  const review = value as Record<string, unknown>;
+  return review.tenant_id === tenantId && review.case_id === caseId && typeof review.review_id === 'string' &&
+    ['approve', 'reject', 'defer'].includes(String(review.decision)) && typeof review.actor_issuer === 'string' &&
+    typeof review.actor_subject === 'string' && (review.note === null || typeof review.note === 'string') &&
+    typeof review.created_at === 'string' && Number.isFinite(Date.parse(review.created_at));
+}
+
+function reviewErrorKind(status: number): ReviewSubmit['kind'] {
+  if (status === 401) return 'unauthenticated';
+  if (status === 403) return 'forbidden';
+  if (status === 404) return 'notFound';
+  if (status === 400) return 'invalid';
+  if (status === 409) return 'conflict';
+  return 'unavailable';
+}
+
+function reviewHistoryErrorKind(status: number): ReviewView['kind'] {
+  if (status === 401) return 'unauthenticated';
+  if (status === 403) return 'forbidden';
+  if (status === 404) return 'notFound';
+  return 'unavailable';
+}
+
+function reviewErrorMessage(kind: ReviewSubmit['kind'] | ReviewView['kind']): string {
+  if (kind === 'unauthenticated') return 'Your session is no longer authorized. Sign in again to continue.';
+  if (kind === 'forbidden') return 'Review access was denied for this tenant or your account is read-only.';
+  if (kind === 'notFound') return 'This case is no longer available in the selected tenant.';
+  if (kind === 'invalid') return 'The review request was invalid. Check the note length and try again.';
+  if (kind === 'conflict') return 'This review request conflicted with an earlier submission. Reload the history before continuing.';
+  return 'Review history or submission is unavailable. Please retry.';
+}
+
+function HumanCaseReview({ tenantId, item, canReview }: { tenantId: string; item: StoredCase; canReview: boolean }) {
+  const { getAccessTokenSilently } = useAuth0();
+  const [expanded, setExpanded] = useState(false);
+  const [history, setHistory] = useState<ReviewView>({ kind: 'idle', history: [] });
+  const [submission, setSubmission] = useState<ReviewSubmit>({ kind: 'idle', note: '' });
+  const historyGeneration = useRef(0);
+  const historyController = useRef<AbortController | undefined>(undefined);
+  const submitController = useRef<AbortController | undefined>(undefined);
+  const submitting = useRef(false);
+  const outcomeUncertain = submission.attempted === true && submission.retryable === true;
+
+  useEffect(() => () => {
+    historyGeneration.current++;
+    historyController.current?.abort();
+    submitController.current?.abort();
+  }, [tenantId, item.id]);
+
+  async function loadHistory() {
+    historyController.current?.abort();
+    const generation = ++historyGeneration.current;
+    const controller = new AbortController();
+    historyController.current = controller;
+    setHistory({ kind: 'loading', history: [] });
+    try {
+      const token = await getAccessTokenSilently();
+      if (controller.signal.aborted || generation !== historyGeneration.current) return;
+      if (!token) { setHistory({ kind: 'unauthenticated', history: [] }); return; }
+      const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(item.id)}/reviews`, {
+        method: 'GET', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
+      });
+      if (controller.signal.aborted || generation !== historyGeneration.current) return;
+      if (!response.ok) { setHistory({ kind: reviewHistoryErrorKind(response.status), history: [] }); return; }
+      const body: unknown = await response.json();
+      if (controller.signal.aborted || generation !== historyGeneration.current) return;
+      if (!Array.isArray(body) || body.length > 100 || !body.every((row) => isCaseReview(row, tenantId, item.id))) {
+        setHistory({ kind: 'unavailable', history: [] }); return;
+      }
+      setHistory({ kind: 'ready', history: body });
+    } catch {
+      if (!controller.signal.aborted && generation === historyGeneration.current) setHistory({ kind: 'unavailable', history: [] });
+    } finally {
+      if (historyController.current === controller) historyController.current = undefined;
+    }
+  }
+
+  function beginDecision(decision: ReviewDecision) {
+    setSubmission({ kind: 'confirm', decision, note: '', idempotencyKey: crypto.randomUUID() });
+  }
+
+  async function submitDecision(candidate: ReviewSubmit = submission) {
+    if (submitting.current || candidate.kind !== 'confirm' || !candidate.decision || !candidate.idempotencyKey || candidate.attempted) return;
+    submitting.current = true;
+    const controller = new AbortController();
+    submitController.current = controller;
+    const request = { ...candidate, kind: 'submitting' as const, attempted: true };
+    setSubmission(request);
+    try {
+      const token = await getAccessTokenSilently();
+      if (controller.signal.aborted) return;
+      if (!token) { setSubmission({ ...request, kind: 'unauthenticated' }); return; }
+      const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(item.id)}/reviews`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json',
+          'Idempotency-Key': candidate.idempotencyKey },
+        body: JSON.stringify({ decision: candidate.decision, ...(candidate.note ? { note: candidate.note } : {}) }),
+        credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (response.status !== 201 && response.status !== 200) {
+        setSubmission({ ...request, kind: reviewErrorKind(response.status), retryable: response.status >= 500 }); return;
+      }
+      const body: unknown = await response.json();
+      if (controller.signal.aborted) return;
+      if (!isCaseReview(body, tenantId, item.id)) { setSubmission({ ...request, kind: 'unavailable' }); return; }
+      setSubmission({ kind: 'success', note: '' });
+      setExpanded(true);
+      await loadHistory();
+    } catch {
+      if (!controller.signal.aborted) setSubmission({ ...request, kind: 'unavailable', retryable: true });
+    } finally {
+      submitting.current = false;
+      if (submitController.current === controller) submitController.current = undefined;
+    }
+  }
+
+  return <section className="case-review" aria-labelledby={`review-title-${item.id}`}>
+    <h4 id={`review-title-${item.id}`}>Human case review</h4>
+    {canReview && !outcomeUncertain && <div className="case-review-actions" aria-label="Choose a human case review decision">
+      {(['approve', 'reject', 'defer'] as const).map((decision) => <button key={decision} type="button" className="auth-button secondary"
+        disabled={submission.kind === 'submitting'} onClick={() => beginDecision(decision)}>{decision[0].toUpperCase() + decision.slice(1)}</button>)}
+    </div>}
+    {!canReview && <p className="auth-note">You can view review history but cannot submit a decision.</p>}
+    {(submission.kind === 'confirm' || submission.kind === 'submitting' || submission.attempted) && submission.decision && <fieldset>
+      <legend>Confirm {submission.decision} decision</legend>
+      <label htmlFor={`review-note-${item.id}`}>Optional reviewer note</label>
+      <textarea id={`review-note-${item.id}`} maxLength={1000} value={submission.note} disabled={submission.attempted}
+        onChange={(event) => setSubmission((current) => ({ ...current, note: event.target.value }))} />
+      {submission.kind === 'submitting' ? <p role="status">Submitting review…</p> : submission.attempted ? <>
+        <p role="alert">{reviewErrorMessage(submission.kind)}</p>
+        {submission.retryable && <p>Keep this review open and retry the same request to determine whether it was saved.</p>}
+        {submission.retryable && <button type="button" className="auth-button secondary"
+          onClick={() => void submitDecision({ ...submission, kind: 'confirm', attempted: false })}>Retry same decision</button>}
+        {!submission.retryable && <button type="button" className="auth-button secondary" onClick={() => setSubmission({ kind: 'idle', note: '' })}>Choose another decision</button>}
+      </> : <>
+        <p>This records a human decision only. It does not approve an AI recommendation, change case status, or perform an action.</p>
+        <button type="button" className="auth-button primary" onClick={() => void submitDecision()}>Confirm review</button>
+      </>}
+      {submission.kind !== 'submitting' && !submission.retryable && <button type="button" className="auth-button secondary" onClick={() => setSubmission({ kind: 'idle', note: '' })}>Cancel</button>}
+    </fieldset>}
+    {submission.kind === 'success' && <p role="status">Human review saved.</p>}
+    <button type="button" className="auth-button secondary" aria-expanded={expanded}
+      onClick={() => { const next = !expanded; setExpanded(next); if (next && history.kind !== 'ready' && history.kind !== 'loading') void loadHistory(); }}>
+      {expanded ? 'Hide review history' : 'Show review history'}
+    </button>
+    {expanded && <div aria-live="polite">
+      {history.kind === 'loading' && <p role="status">Loading review history…</p>}
+      {history.kind !== 'idle' && history.kind !== 'loading' && history.kind !== 'ready' && <p role="alert">{reviewErrorMessage(history.kind)}</p>}
+      {history.kind === 'ready' && <>
+        <h5>Latest decision</h5>
+        <p>{history.history.at(-1)?.decision ?? 'No decisions recorded.'}</p>
+        <h5>Review history</h5>
+        {history.history.length === 0 ? <p>No human reviews have been recorded.</p> : <ol>
+          {history.history.map((review) => <li key={review.review_id}>
+            <strong>{review.decision}</strong> by {review.actor_issuer} · {review.actor_subject} at {new Date(review.created_at).toLocaleString()}
+            {review.note && <p>{review.note}</p>}
+          </li>)}
+        </ol>}
+      </>}
+    </div>}
+  </section>;
+}
 
 function isStoredCase(value: unknown, tenantId: string): value is StoredCase {
   if (!value || typeof value !== 'object') return false;
@@ -78,6 +250,7 @@ function CaseAccessPanel() {
           headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
           credentials: 'omit',
           redirect: 'error',
+          cache: 'no-store',
           signal: controller.signal,
         });
         if (!active || generation !== requestGeneration.current) return;
@@ -89,7 +262,7 @@ function CaseAccessPanel() {
         if (!Array.isArray(body) || body.length > 100 || !body.every((item) => isStoredCase(item, tenantId))) {
           return setView({ kind: 'unavailable', cases: [] });
         }
-        setView({ kind: 'ready', cases: body });
+        setView({ kind: 'ready', cases: body, canReview: response.headers?.get('X-Aegis-Can-Review') === 'true' });
       } catch {
         if (active && generation === requestGeneration.current) setView({ kind: 'unavailable', cases: [] });
       }
@@ -234,7 +407,7 @@ function CaseAccessPanel() {
         {isAuthenticated && <button type="button" className="auth-button secondary" onClick={() => void signOut()}>Sign out</button>}
       </div>
       {isLoading ? <p role="status">{callbackPending ? 'Completing secure sign-in…' : 'Checking sign-in status…'}</p> : !isAuthenticated ? (
-        <div className="auth-card"><p>Sign in to request read-only access to synthetic cases. The API checks your identity, scope, tenant membership and row-level policy.</p>
+        <div className="auth-card"><p>Sign in to request access to synthetic cases. The API checks your identity, scope, tenant membership and row-level policy.</p>
           {error && <p role="alert">Auth0 sign-in could not be completed. Check the local Auth0 settings and try again.</p>}
           <button type="button" className="auth-button primary" onClick={() => void signIn()}>Sign in with Auth0</button>
           {view.kind === 'unavailable' && <p role="alert">{view.message ?? 'The development service is unavailable.'}</p>}
@@ -251,6 +424,7 @@ function CaseAccessPanel() {
             <h3>{selectedTenant.name} cases</h3>
             {view.cases.length === 0 ? <p>No cases are available to this account.</p> : <ul className="case-list">
               {view.cases.map((item) => <li key={item.id} className="case-list-item"><div><strong>{item.synthetic_case_id}</strong><span>{item.status}</span></div>
+                <HumanCaseReview key={`${tenantId}:${item.id}`} tenantId={tenantId} item={item} canReview={view.canReview === true} />
                 <button type="button" className="auth-button secondary" disabled={analysis.kind === 'loading' || grounded.kind === 'loading'}
                   onClick={() => void analyzeCase(item.id)}>Analyze with local AI</button>
                 <button type="button" className="auth-button secondary" disabled={analysis.kind === 'loading' || grounded.kind === 'loading'}
@@ -313,7 +487,7 @@ function CaseAccessPanel() {
           {view.kind === 'unavailable' && <p role="alert">{view.message ?? 'Case data is unavailable. Check the local API and retry.'}</p>}
         </div>
       )}
-      <p className="auth-disclaimer">Development-only, read-only access. No case changes are available here.</p>
+      <p className="auth-disclaimer">Development-only protected case access. Human reviews record decisions only; case status and recommended actions are not changed.</p>
     </section>
   );
 }
@@ -326,7 +500,7 @@ export default function DevAuthExperience({ config }: { config: AuthConfig }) {
   }
   const redirectUri = 'http://127.0.0.1:5173/';
   return <Auth0Provider domain={config.domain} clientId={config.clientId} cacheLocation="memory" useRefreshTokens={false}
-    authorizationParams={{ redirect_uri: redirectUri, audience: config.audience, scope: 'read:cases' }}>
+      authorizationParams={{ redirect_uri: redirectUri, audience: config.audience, scope: 'read:cases write:cases' }}>
     <CaseAccessPanel />
   </Auth0Provider>;
 }

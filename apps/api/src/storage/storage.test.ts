@@ -72,7 +72,7 @@ describe('transaction and failure handling', () => {
     const end = vi.spyOn(Pool.prototype, 'end').mockResolvedValue(undefined);
     try {
       await expect(migrateDatabase('postgres://localhost/aegis_test', 'synthetic-app-password', 'synthetic-ingest-password'))
-        .resolves.toBe(5);
+        .resolves.toBe(6);
       const ingestionSafetyQuery = queries.find((sql) => sql.includes("FROM pg_roles WHERE rolname = 'aegis_ingest'"));
       expect(ingestionSafetyQuery).toContain("to_regclass('aegis.documents')");
       expect(ingestionSafetyQuery).toContain("to_regclass('aegis.document_chunks')");
@@ -130,10 +130,12 @@ describe('transaction and failure handling', () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ safe: false }] });
     const pool = { query } as unknown as Pool;
     await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe');
-    expect(query).toHaveBeenCalledWith(expect.stringContaining("('documents'), ('document_chunks')"));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("('documents'), ('document_chunks'), ('case_reviews')"));
     expect(query).toHaveBeenCalledWith(expect.stringContaining("n.nspname = 'aegis' AND c.relkind IN ('r', 'p', 'f')"));
     expect(query).toHaveBeenCalledWith(expect.stringContaining("'aegis.documents', 'SELECT'"));
     expect(query).toHaveBeenCalledWith(expect.stringContaining("'aegis.document_chunks', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'"));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("'aegis.case_reviews', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'"));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("'aegis.case_reviews', 'note', 'INSERT'"));
     query.mockClear();
     query.mockResolvedValue({ rows: [{ safe: false }] });
     await expect(verifyRuntimeRole(pool)).rejects.toThrow('Unsafe');
