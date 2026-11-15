@@ -3,6 +3,10 @@
 ## Goal
 Demonstrate enterprise-ready systems thinking: multi-tenant support copilot, sourced answers, secure IAM/CIAM, approved escalation actions, observable and cost-aware operations.
 
+## Current MVP closure snapshot
+
+The source now includes the M5-mapped human case-review slice and local-only grounded retrieval. Migration 006 is reported applied to `aegis_local`; current main CI passed on the approved baseline. Human review changes are append-only and do not execute support actions. The real Auth0 browser session and authorized operator workflow remain unverified. Grounded-model quality is not established. See the [MVP completion audit](MVP-COMPLETION-AUDIT.md) and [local demo runbook](LOCAL-DEMO-RUNBOOK.md) for current acceptance gates. This snapshot supersedes earlier “read-only viewer” and “proposed review action” descriptions below.
+
 ## Now (starter)
 - React/Vite portfolio page, Node/Fastify health + **synthetic** demo response.
 - Independent architect/challenger review roles; QA/security/release agents.
@@ -77,16 +81,20 @@ Implemented baseline: versioned synthetic source catalog and restricted ingestio
 
 **Acceptance evidence and limitations (2026-11-10):** main CI run `42798430560` passed all required gates. The private local rollout report records successful migration, ingestion, integrity, tenant-isolation, FTS, API-health, and unauthenticated-boundary checks. Actual Auth0 browser-authenticated HTTP smoke remains unverified. The private grounded provider report records six parsed JSON outputs, zero strict-schema acceptances, and six `output_schema` / `invalid_output` failures; citation and classification measures were therefore not measured. No rejected values were retained, so the precise failed predicate is unknown. A follow-up deterministic diagnostic change and separately authorized v2 evaluation are required before model-quality acceptance. Prior Milestone 3B priority agreement remains 2/6. Milestone 4 is not production-ready. The 4.2–4.6 labels describe the implementation decomposition, not previously defined normative scopes.
 
-## Vertical slice 3 — human approved actions
-- Proposed support escalation action; approval policy; idempotency and audit trail.
-- Explicit two-step approve/execute flow with role checks and rollback plan.
+## Human case review — implemented; live browser acceptance pending
+- The merged review slice records approve/reject/defer with verified actor attribution, database-generated time, idempotency, tenant authorization and append-only history.
+- Review does not alter case status or execute an external action. Any future action-execution flow requires a separate product/security review and authorization.
+- Local migration 006 and runtime-role verification are recorded; replacing the supervised API and completing real Auth0/operator browser acceptance remain separate gates.
 
 ## Vertical slice 4 — hardening and hosting
-- CI quality gates: unit, integration (DB), Playwright E2E and dependency scanning.
+- CI quality gates include unit/component coverage, isolated PostgreSQL integration, and a test-only Playwright browser suite.
+- Local API graceful shutdown and an operator runbook are required for safe future process activation.
 - Observability/OpenTelemetry, SLO dashboards, WAF, rate limits and failure drills.
 - Dedicated staging/prod, environment-scoped GitHub permissions, OpenID Connect to cloud.
 - Deploy portfolio to static hosting, API/data tier to reviewed infrastructure.
 - Optional React Native Expo app sharing API contracts; iOS simulator first.
+
+Static portfolio hosting can be useful but is not required for the local interactive MVP. Public API/database deployment, OpenTelemetry/SLO infrastructure, React Native and runtime multi-agent orchestration remain optional post-MVP work unless a concrete acceptance gap justifies them.
 
 ## Role demonstration evidence
 Every milestone should capture ADR, threat model, test + coverage report, cost estimate, runbook, demo GIF/screenshot (sanitized), dashboard and measurable before/after outcomes. Never represent starter mocks as completed production capabilities.
