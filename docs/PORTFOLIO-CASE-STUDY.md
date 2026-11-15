@@ -1,93 +1,107 @@
-# Aegis AI — portfolio case study and demo
+# Aegis AI — enterprise architecture case study
 
 ## Recruiter summary
 
-Aegis is a local-first, synthetic support-case platform that demonstrates how identity, tenant authorization, PostgreSQL row-level security, retrieval, strict model-output validation and human review fit together. It favors an inspectable PostgreSQL full-text baseline and a local-only optional model over early cloud or vector-search complexity. Model quality and real Auth0 browser acceptance remain explicitly unverified.
+Aegis is a local-first portfolio demonstration of an authenticated, multi-tenant support-case workflow. It combines Auth0 identity, PostgreSQL row-level security, synthetic case data, evidence retrieval, strict AI-output validation, and append-only human review. The completed local workflow has been exercised with a real Auth0 browser session and one separately authorized synthetic review. Grounded model quality remains **not qualified**, so AI stays disabled by default. This is not a customer-facing or production service.
 
-## Two-to-three-minute demonstration script
+## The engineering problem
 
-1. **Frame the problem (20 sec):** “This is a synthetic support workflow. The engineering problem is allowing an operator to inspect only an authorized tenant’s case while keeping retrieval, model output and review decisions independently controlled.”
-2. **Show the portfolio and health (20 sec):** open the local React app, show the API connectivity badge, and point out fixed mock triage is labeled synthetic rather than AI.
-3. **Authenticate (30 sec):** operator completes Auth0 PKCE login/MFA. Do not display tokens. Show the requested tenant selector is not authorization.
-4. **Show the case and evidence (30 sec):** open an authorized synthetic case. Explain retrieval uses tenant-scoped PostgreSQL English full-text search; opaque citations identify retrieved chunks but do not prove entailment.
-5. **Show analysis honestly (20 sec):** only if a separately approved live run has passed its quality gates. Otherwise show the disabled or insufficient-evidence state and state that model quality is not qualified.
-6. **Show human review (35 sec):** operator explicitly chooses approve/reject/defer, reviews the confirmation copy, and inspects actor-attributed history. Do not submit a decision in a public recording unless the synthetic write is separately authorized.
-7. **Close with controls (20 sec):** explain forced RLS, strict output validation, no automatic case status changes/actions, CI integration tests, and what remains blocked.
+An AI-assisted support interface creates several coupled risks: a tenant selector can be mistaken for authorization, untrusted model output can look authoritative, evidence references can be mistaken for proof, and an approval control can accidentally trigger an operational action. The design separates identity, data access, model validation, and human decision recording so each boundary can be inspected and tested.
 
 ## System architecture
 
 ```mermaid
 flowchart LR
-  SPA[React + Auth0 PKCE] -->|same-origin API request| Fastify[Fastify / Node 24]
-  Fastify --> JWT[RS256 issuer, audience, expiry, scope]
-  JWT --> Member[Verified tenant membership / role]
-  Member --> Tx[Transaction-local principal and tenant]
-  Tx --> RLS[(PostgreSQL forced RLS)]
-  RLS --> Case[Cases and case-change audit]
-  RLS --> Review[Append-only human review]
-  RLS --> FTS[English full-text search]
-  FTS --> Sources[Authorized chunks + request citation IDs]
-  Sources --> Provider[Optional loopback Ollama]
-  Provider --> Parser[Strict schema, confidence and citation checks]
-  Parser --> SPA
-  SPA -->|explicit human decision| Fastify
+  SPA[React SPA / Auth0 PKCE] -->|Bearer token| API[Fastify / Node.js]
+  API --> JWT[RS256, issuer, audience, expiry, scope]
+  JWT --> Membership[Exact issuer-subject tenant membership]
+  Membership --> Tx[Authenticated transaction context]
+  Tx --> RLS[(PostgreSQL FORCE RLS)]
+  RLS --> Cases[Synthetic cases]
+  RLS --> Audit[Case-change audit]
+  RLS --> Reviews[Append-only human review]
+  Tx --> FTS[English PostgreSQL full-text search]
+  FTS --> Sources[Authorized synthetic source chunks]
+  Sources -. optional and disabled .-> Ollama[Loopback Ollama]
+  Ollama -. unqualified .-> Parser[Strict output parser]
+  SPA -->|confirmed human decision| API
 ```
 
-## Data and request flow
+### Request and data flow
 
 ```mermaid
 sequenceDiagram
-  actor Human
-  participant SPA as React/Auth0 SPA
+  actor Operator
+  participant SPA as React / Auth0
   participant API as Fastify
-  participant DB as PostgreSQL RLS
-  participant Model as Local Ollama (optional)
-  Human->>SPA: Sign in using PKCE
-  SPA->>API: Bearer token + tenant request
-  API->>API: Verify RS256, issuer, audience, expiry and scope
-  API->>DB: One authenticated transaction: membership + case + scoped documents
-  DB-->>API: Authorized synthetic case and sources
-  API->>DB: Commit and release connection before inference
-  opt Separately enabled local analysis
-    API->>Model: Bounded synthetic prompt and retrieved source IDs
-    Model-->>API: Structured output
-    API->>API: Strict parser and request-scoped citation validation
-  end
-  API-->>SPA: Advisory result, abstention or safe error
-  Human->>SPA: Explicit approve/reject/defer review
+  participant DB as PostgreSQL
+  Operator->>SPA: Complete PKCE login interactively
+  SPA->>API: Request a tenant case with bearer token
+  API->>API: Verify signature, issuer, audience, time and scope
+  API->>DB: Check exact principal membership and tenant under RLS
+  DB-->>SPA: Authorized synthetic case and review history
+  Operator->>SPA: Choose a review and confirm explicitly
   SPA->>API: Authenticated idempotent review request
   API->>DB: Append actor-attributed review in tenant transaction
-  DB-->>SPA: Database timestamp and review history
+  DB-->>SPA: Review row with database-generated timestamp
 ```
 
-## Security and engineering decisions
+The optional analysis path is not part of the accepted live workflow. Where enabled in a separately authorized development evaluation, retrieval and validation are performed before an advisory result is shown; they do not authorize actions or modify case state.
 
-- The UI tenant selector selects a requested resource, not an authorization boundary. API JWT/scope validation, database membership, and forced RLS must all permit access.
-- The runtime role is not the administrator or ingestion role. Migration checksums are immutable and integration tests use isolated PostgreSQL in GitHub Actions.
-- Case-change audit and human-review records are separate. Review actor identity comes from the verified JWT context and the database trigger; runtime privileges cannot update/delete review rows.
-- Retrieval is PostgreSQL English full-text search (`tsvector`/GIN), not pgvector or embedding search. Citation identity proves only that an ID came from the current request's retrieved set.
-- Ollama is loopback-only, optional, bounded and disabled by default. Historical reports show output-contract failures and zero accepted supported coverage in the reported M4.15/M4.17/M4.18 samples. The forced-branch M4.22 diagnostic, if later run, would not qualify natural decisions.
-- Human review records a decision; it does not execute an action, approve truth, or change case status.
+## Identity, tenant boundaries, and review
 
-## Current limitations and evidence
+- The SPA uses the Auth0 React SDK with Authorization Code + PKCE and an in-memory token cache. The API verifies RS256 JWTs, issuer, audience, expiry, and required scopes.
+- Authorization is the conjunction of signed permission scope and a server-managed `(issuer, subject, tenant, role)` membership. The requested tenant ID is not trusted as authorization.
+- PostgreSQL uses explicit migrations, a restricted `aegis_app` runtime role, transaction-local principal/tenant context, and FORCE RLS. Local integration tests exercise the restricted role and cross-tenant paths.
+- `reader` membership permits authorized reads; `operator` is required for review writes. The API/UI capability signal requires both operator membership and `write:cases`.
+- Human reviews are separate append-only records. The database trigger attributes the verified actor and generates the timestamp. Idempotency prevents duplicate rows for a repeated key; a conflicting reuse is rejected.
+- A review records a human decision only. It does not claim that an AI recommendation is correct, change case status, send a message, or execute a support action.
 
-- Real Auth0 browser login, authorized North operator access and cross-tenant browser denial remain pending manual verification.
-- The live API process has a known lifecycle-management blocker until it can be stopped gracefully under its supervisor. Current source lifecycle tests do not retrofit the already-running process.
-- Model groundedness, supported-decision quality and production accuracy are not established.
-- Static public hosting is acceptable for the portfolio. Public API/database hosting, AWS deployment, React Native, vector retrieval, additional models and production observability are deferred until a measured need and separate approval exist.
+## Retrieval and AI boundaries
 
-## Screenshot/capture plan
+The implemented retrieval baseline is PostgreSQL English full-text search using `tsvector`/GIN and tenant-scoped synthetic documents. It is not pgvector, embedding search, or a vector database. Citation IDs are request-scoped and validated against the retrieved set. That proves citation identity, not semantic entailment.
 
-Capture only synthetic data in a local browser. Hide the browser address bar if it reveals sensitive local paths, redact Auth0 issuer/client values where desired, never show tokens/cookies/devtools storage, and do not capture `.env` files, raw model prompts/responses, or private report contents. Suggested frames: portfolio overview, case viewer with status badge, safe abstention/disabled state, and review-history UI with synthetic identity labels.
+The optional provider is local Ollama behind explicit development-only feature flags and bounded request settings. Output is parsed against strict contracts; insufficient evidence and invalid output remain visible failures. Historical synthetic runs exposed confidence/contract failures and over-abstention. They do not establish production accuracy. No production-grade multi-agent orchestration is claimed.
 
-## Engineering interview case study
+## Acceptance evidence and provenance
 
-**Problem:** A small model and a simplistic authenticated UI can appear convincing while leaking cross-tenant content or encouraging unreviewed actions.
+The local human-review MVP is accepted within its synthetic scope. The [dated acceptance record](MVP-ACCEPTANCE-2026-11-15.md) distinguishes:
 
-**Approach:** Build the data boundary first: issuer-derived JWT verification and scopes, tenant membership, transaction-local context and forced RLS. Add a source-controlled synthetic corpus and PostgreSQL FTS retrieval with explicit request-scoped citation IDs. Treat model output as untrusted; schema, taxonomy, confidence, rationale and citation membership are validated server-side. Keep optional local inference disabled by default. Finally, persist human review separately from case state with database-attributed identity and append-only privileges.
+- **Human-confirmed browser evidence:** real Auth0 login, North case visibility, South denial, reader restriction, operator controls, and the persisted review remaining visible after refresh.
+- **Read-only database evidence:** exactly one matching review row, approved decision and note, actor matching the verified North operator membership, database-generated timestamp, unchanged `in_progress` case status, and unchanged unrelated data fingerprints.
+- **Live runtime evidence:** API and Vite returned HTTP 200, the runtime-role verifier passed, and migrations 001–006 matched repository checksums.
+- **Automation evidence:** main CI run [43682896006](https://github.com/AnkurSingh16/aegis-ai-architect-portfolio/actions/runs/43682896006) passed. Its browser suite uses mocked identity and API; PostgreSQL integration uses isolated CI storage.
+- **Source evidence:** route, RLS, trigger, authorization, idempotency, lifecycle, and no-action boundaries were inspected. Source inspection is not a substitute for live acceptance.
 
-**Trade-offs:** PostgreSQL FTS is easier to inspect and isolate than adding vector infrastructure; it may have lower semantic recall. A small local model avoids cloud data egress but has limited quality, and historical tests show that schema compliance does not imply correct supported decisions. Manual Auth0 and local service setup limits unattended demos but avoids silently mutating identity or persistent data.
+The operator UI reported success, but the exact HTTP response code was not captured. Idempotency is covered by automated tests; the live request was not replayed. The review row is the relevant review evidence; no additional case `audit_events` record was expected.
 
-**Evidence:** Main CI run 43567849483 passed the seven existing gates on the approved baseline; backend PostgreSQL integration tests run against disposable CI storage. Current-source in-process readiness, runtime-role verification, route registration, unauthenticated rejection and pool close were observed. These are not the same as real browser login or an authorized live review write.
+## Architecture decisions and leadership trade-offs
 
-**Outcome:** The platform is a credible security/reliability portfolio implementation, but the local end-to-end acceptance remains blocked on safe API activation and operator-authenticated browser verification. The grounded AI quality claim remains deliberately limited.
+1. **Establish the data boundary before adding model complexity.** Exact principal membership and database RLS are independent checks. The browser's tenant picker cannot grant access.
+2. **Use inspectable SQL and PostgreSQL FTS for this scope.** It keeps tenant filters, indexes, grants, and migrations visible without introducing an unneeded vector service. The trade-off is that lexical retrieval may miss semantically related documents.
+3. **Treat model output as untrusted.** Schema validation, citation membership, confidence checks, bounded errors, and mandatory human review remain server-side. A valid structure is not proof of a correct decision.
+4. **Record decisions separately from actions.** Human review is append-only and actor-attributed; case status and external support actions remain untouched.
+5. **Prefer reversible local operations and explicit gates.** The development database is persistent, so migrations, review writes, Auth0 changes, and inference each require separate authorization. CI integrations use disposable storage.
+6. **Keep quality claims tied to evidence.** Mock browser tests support UI wiring; live operator acceptance supports the specific local journey; neither establishes production security or AI accuracy.
+
+## Demonstration script (2–3 minutes)
+
+1. Introduce the synthetic support-case problem and state that Aegis is a local architecture demonstration.
+2. Show the portfolio and local API connectivity; distinguish fixed synthetic triage from LLM output.
+3. Complete Auth0 login interactively without showing credentials, tokens, browser storage, or developer tools.
+4. Show the authorized North case, then the expected South denial. Explain that selection is not authorization.
+5. Show the human-review section and persisted Defer history. Explain that the reviewed decision does not change status or execute an action.
+6. State that grounded AI uses PostgreSQL full-text retrieval and strict validation, but live model quality is not qualified and AI remains disabled for routine demos.
+7. Close with the tenant/RLS boundary, CI evidence, and deferred production work.
+
+Do not submit another review for a recording. Use only the existing synthetic history and sanitize the screen so no credentials or private configuration appear.
+
+## Limitations and deferred extensions
+
+- **GROUNDED AI LIVE QUALITY: NOT QUALIFIED.** No claim of reliable recommendations, real-world accuracy, or causal improvement is supported.
+- The six-case synthetic evidence and historical runs are too small and not independent ground truth.
+- No live idempotency replay, load test, independent penetration test, or production operations certification is claimed.
+- Public API/database hosting, AWS deployment, React Native, vector retrieval, additional models, and production observability are deferred until a measured need and separate security/operational approval.
+- No customers, actual customer data, business outcomes, adoption, cost savings, or performance benchmarks are represented.
+
+For reproducible setup, ownership checks, and shutdown guidance, see the [local demo runbook](LOCAL-DEMO-RUNBOOK.md) and [security runbook](SECURITY-RUNBOOK.md).

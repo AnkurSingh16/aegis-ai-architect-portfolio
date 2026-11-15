@@ -1,75 +1,96 @@
-# Aegis AI — MVP completion audit
+# Aegis AI — MVP completion and acceptance audit
 
-## Baseline and evidence
+**Audit date:** 2026-11-15
 
-Audit baseline: `main` at `2c57af83d5563e821743f0902808e9d9a22edb40`, clean and synchronized with `origin/main` when this audit began. The latest main CI run observed was [43567849483](https://github.com/AnkurSingh16/aegis-ai-architect-portfolio/actions/runs/43567849483), successful on that exact commit. It passed lint, typecheck, automated tests/coverage, isolated PostgreSQL integration, build, whitespace and Auth0 Terraform validation. That run predates the current lifecycle/E2E changes and is not evidence for them.
+**Verified source:** `main` at `ae5fe85768912aed1df1cd77164c4373e8c4746b`
 
-The local database reports migrations 001–006 with repository-matching checksums. The approved API source initializes in-process, passes its runtime-role readiness check, registers both review routes, returns 401 for an unauthenticated review-history request, and closes its pool through `app.close()`. The existing API is a separately supervised process without a graceful signal handler and has not been replaced. The current browser login and review workflow have not been exercised with a real Auth0 session.
+**Decision:** **AUTHENTICATED HUMAN-REVIEW MVP: ACCEPTED** for the local synthetic demonstration scope. This decision does not qualify grounded-AI output quality or production readiness.
 
-## Capability matrix
+## Executive summary
 
-| Capability | Current state | Evidence | Missing work | Risk | Priority | Acceptance test |
-|---|---|---|---|---|---|---|
-| M1 — Portfolio and synthetic triage | IMPLEMENTED BUT UNVERIFIED | React portfolio and fixed synthetic triage; component/API tests | Reconciled portfolio claims and browser suite | Stale overview previously described only the starter | P1 | Playwright verifies portfolio loads and labels triage as synthetic |
-| M2A — PostgreSQL cases and tenant RLS | VERIFIED COMPLETE | Migrations 001–006 checksum-verified; local rollout; isolated CI integration and role checks | None for the defined local synthetic scope | Local persistent database must not be treated as disposable | P0 | Isolated integration proves tenant denial and forced RLS |
-| M2B — Auth0 API identity and authorization | IMPLEMENTED BUT UNVERIFIED | RS256/JWKS, issuer/audience/time/scope checks; transaction membership and RLS; generated-key and PostgreSQL tests | Real Auth0 login/token and actual tenant membership acceptance | Auth0 configuration or user membership can drift | P0 | Operator completes PKCE login; authorized list succeeds; invalid token/scope/cross-tenant fail |
-| M2C — Auth0 Terraform foundation | VERIFIED COMPLETE for read-only foundation | Credential-free Terraform validation in CI; reviewed constrained Auth0 resources and state gates | No live apply is required for local MVP; confirm the configured callback against current operator-owned Auth0 state | Provider drift and identity changes require operator review | P2 | Terraform fmt/init/validate in CI; read-only state/origin check before login |
-| M2D — Protected browser case viewer | IMPLEMENTED BUT UNVERIFIED | React SDK PKCE/memory cache; API proxy; component tests | Real browser sign-in and case-list test | Browser config/membership may not match API | P0 | Real operator session loads only its authorized synthetic tenant |
-| M3A — Local case analysis | IMPLEMENTED BUT UNVERIFIED | Optional loopback Ollama provider, strict parser, tests; feature flags default off | Reliable accepted-output evidence and human-reviewed quality | Prior quality evidence is weak; model output can be wrong | P2 / approval-gated | Separately authorized evaluation passes predeclared quality gates; otherwise keep disabled |
-| M3B — Model evaluation/reliability | VERIFIED COMPLETE as a bounded diagnostic framework; model quality unresolved | Frozen reports and deterministic scorers; historical 3B priority agreement 2/6 | No more prompt experiments absent a specific approved hypothesis | Small synthetic samples do not establish accuracy | P3 | Preserve report provenance; acceptance requires independent review and a new authorization |
-| M4 — Grounded retrieval and analysis | IMPLEMENTED BUT UNVERIFIED | Synthetic catalog, restricted ingestion, tenant RLS, PostgreSQL English FTS, request-scoped citations, parser and abstention tests; no pgvector | Authenticated retrieval demonstration and acceptable independently reviewed model behavior | Citation identity is not semantic entailment; prior reports show over-abstention/contract failures | P1 for truthful demo; model use blocked | CI proves isolation; future authorized run separately evaluates groundedness and abstention |
-| M5 — Human case review | IMPLEMENTED BUT UNVERIFIED | PR #64 merged; migration 006 applied/checksummed; actor trigger, append-only permissions, idempotency, integration/component tests; in-process readiness and route check | Safely activate current API; real Auth0 operator access; browser persistence/history verification | Current supervised API may be older source; review is a persistent write | P0 | Approved API replacement, then operator signs in and reviews synthetic case with persisted actor/time/history |
-| M6 — Portfolio operations, browser automation and release readiness | INCOMPLETE | CI and Terraform validation exist; lifecycle/E2E work is in this branch | Run updated CI; add sanitized screenshots; complete runbook and manual acceptance | Green old CI and component tests are not live acceptance | P1 | Exact-head CI plus operator-run local acceptance checklist |
-| Public cloud hosting / production service | INTENTIONALLY DEFERRED | Terraform templates and decisions exist; no approved deployment | Separate privacy, threat, cost, operations and deployment approval | Public exposure and ongoing cost | P3 | No work until separately authorized |
-| React Native / multi-agent runtime / vector database | INTENTIONALLY DEFERRED | Future roadmap mentions them; current local MVP has no demonstrated need | None for local portfolio acceptance | Scope expansion without validated gap | P3 | Reopen only against a concrete user need and measured limitation |
+Aegis demonstrates an authenticated, tenant-scoped synthetic case workflow with persistent human review. A human operator completed real Auth0 browser sign-in, viewed a Synthetic North case, was denied Synthetic South access, and confirmed that reader restrictions and operator review controls behaved as expected. After one separately approved review, the operator confirmed the Defer entry remained visible after browser refresh. Read-only database verification confirmed one correctly attributed review, its PostgreSQL-generated timestamp, and an unchanged case status.
 
-### Roadmap reconciliation
+The live model-quality question is separate and unresolved. **GROUNDED AI LIVE QUALITY: NOT QUALIFIED.** AI remains disabled for routine local operation. Retrieval uses PostgreSQL English full-text search; the product does not use pgvector or claim production-grade multi-agent orchestration.
 
-The repository defines M1/starter, M2A–2D, M3A–3B, M4, and two later “vertical slices.” It does **not** define normative standalone M5/M6 acceptance documents. For this closure audit, M5 means the merged human-review slice and M6 means operational/portfolio hardening; that mapping is a reporting convenience, not a retroactive product requirement. The older roadmap's “approved actions” wording must not be read as permission to execute external actions: the current human-review feature records a decision only.
+## Evidence provenance
 
-## Architecture and dependency path
+| Class | Evidence and source | What it establishes | Limits |
+|---|---|---|---|
+| A — Real human browser | Operator-confirmed Auth0 login; North case visible; South denied; reader submission restriction; operator controls visible; Defer review persisted in history after refresh | The reviewed local browser journey worked for the signed-in development identity and synthetic tenants | No token was exposed or independently decoded. This is not a penetration test or production security certification |
+| B — Database verification | Read-only administrator queries before/after the authorized review, compared with captured table fingerprints | Exactly one matching North review; decision/note and operator attribution matched; timestamp present and trigger-generated; status stayed `in_progress`; unrelated data fingerprints stayed unchanged | Database verification is limited to the local synthetic database and the observed point in time |
+| C — Live API/runtime | Read-only health and runtime-role checks; API and Vite each returned HTTP 200; API was bound to loopback; migrations 001–006 matched source checksums | The activated local API and web app were reachable and the restricted runtime role passed its verifier | Does not establish availability under load or production operations |
+| D — Automated tests and CI | [Main push CI run 43682896006](https://github.com/AnkurSingh16/aegis-ai-architect-portfolio/actions/runs/43682896006), successful on the verified main commit | Lint, typecheck, automated tests/coverage, mocked browser workflow, isolated PostgreSQL integration, build, whitespace, and Auth0 Terraform validation passed | Browser CI mocks identity and API responses. It is not the real Auth0 acceptance above |
+| E — Source inspection | Auth, route, transaction, migration, RLS, review UI and lifecycle implementation | Documents intended enforcement, append-only review behavior, validation, and no-action boundaries | Source inspection alone is not runtime evidence |
+| F — Not verified or deferred | Live model quality, production deployment, live HTTP response code for the review, and live idempotency replay | These remain explicit limitations | No inference, review replay, public deployment, or live penetration test was performed |
+
+The UI reported review success, but the exact HTTP status was not captured. The database contains one new review. Idempotency is covered by implementation and automated tests; the live POST was not replayed. The review is the relevant persisted review evidence; no additional `audit_events` row was expected or observed.
+
+## Acceptance matrix
+
+| Capability | Status | Evidence and scope |
+|---|---|---|
+| Auth0 authentication | **VERIFIED** | Human operator completed real local browser login |
+| North tenant authorization and case listing | **VERIFIED** | Human operator viewed the synthetic North case; backend requires signed scope and exact issuer/subject membership |
+| South cross-tenant denial | **VERIFIED** | Human operator confirmed denial without South case disclosure; automated database integration also tests isolation |
+| Read/write scope and reader/operator boundary | **VERIFIED** for the demonstrated workflow | Reader restrictions were observed; after the approved membership change, operator controls appeared. The UI consumes `X-Aegis-Can-Review`, which the API sets only when `write:cases` and operator membership both hold. No token was inspected or disclosed |
+| Human-review submission | **VERIFIED** | One separately approved Defer decision was submitted through the authenticated UI and persisted once |
+| Review history after refresh | **VERIFIED** | Human operator confirmed the persisted entry remained visible after refresh |
+| Reviewer attribution and database timestamp | **VERIFIED** | Read-only row comparison matched the North operator membership; database trigger supplies actor and timestamp |
+| Idempotency | **TESTED IN AUTOMATION ONLY** | Same-key behavior and conflict handling are covered by tests; no live replay was performed |
+| Case-status preservation and no downstream action | **VERIFIED** for the observed review | Status remained `in_progress`; review code records a decision only and does not execute support actions |
+| PostgreSQL RLS and restricted runtime role | **VERIFIED** for local synthetic scope | Runtime-role verifier passed; isolated PostgreSQL integration and live tenant-denial evidence passed. This is not an independent penetration test |
+| Migration history | **VERIFIED** | Migrations 001–006 were present and recorded checksums matched repository SQL |
+| CI and automated quality gates | **VERIFIED** | Successful run 43682896006 on the approved main commit; browser tests were mocked and database integration used isolated CI storage |
+| Local deployment/reproducibility | **VERIFIED** for the observed local setup | Approved main, API/Vite health, runtime role, and demo runbook were checked. No cloud deployment is claimed |
+| Grounded retrieval behavior | **TESTED IN AUTOMATION ONLY** | PostgreSQL English full-text retrieval, tenant controls and citation contracts have implementation and integration tests; no live model call was made in this acceptance |
+| Grounded recommendation quality | **DEFERRED — NOT QUALIFIED** | Historical synthetic evaluations show contract/abstention limitations; no production accuracy or semantic-entailment claim is supported |
+| Public hosting, React Native, vector search, production observability | **DEFERRED** | Not required for the accepted local portfolio MVP; revisit only against a demonstrated need and separate approval |
+
+## Milestone reconciliation
+
+The repository's roadmap has M1, M2A–M2D, M3A–M3B and M4, followed by later vertical slices. M5/M6 below are the portfolio's reporting labels for human review and operational/portfolio completion, not retroactive standalone acceptance specifications.
+
+| Milestone | Status | Closure evidence or remaining boundary |
+|---|---|---|
+| M1 — Portfolio and synthetic triage | **VERIFIED** for the local synthetic portfolio | React portfolio and fixed synthetic triage are present; no customer data or business outcome is claimed |
+| M2A — PostgreSQL cases and tenant RLS | **VERIFIED** for local synthetic data | Checksummed migrations, runtime-role checks, isolated integration and live North/South outcome |
+| M2B — Auth0 identity and API authorization | **VERIFIED** for local browser acceptance | Real login, authorized North access, denied South access; token internals were not disclosed |
+| M2C — Auth0 Terraform foundation | **TESTED IN AUTOMATION ONLY** | Credential-free Terraform validation passed in CI; no Terraform apply or cloud change is claimed |
+| M2D — Protected browser case viewer | **VERIFIED** | Human-confirmed authenticated case-viewing workflow and tenant denial |
+| M3A — Local AI case analysis | **DEFERRED** | Optional local provider exists but AI remains disabled; no new inference was run for this closure |
+| M3B — Model evaluation and reliability | **TESTED IN AUTOMATION ONLY** as tooling; quality **NOT QUALIFIED** | Historical synthetic reports are diagnostic evidence only and do not establish model reliability |
+| M4 — Grounded retrieval and analysis | Retrieval **TESTED IN AUTOMATION ONLY**; live quality **DEFERRED** | PostgreSQL FTS and request-scoped citation controls exist; citation identity does not prove semantic entailment |
+| M5 — Human case review | **VERIFIED** | One authorized synthetic decision persisted with actor and timestamp and remained visible after refresh |
+| M6 — Operational and portfolio readiness | **VERIFIED** for local demo scope | CI, lifecycle implementation, live local health and documentation support the local synthetic demonstration; public deployment is deferred |
+
+## Architecture and boundaries
 
 ```mermaid
 flowchart LR
-  Browser[React SPA / Auth0 PKCE] -->|Bearer token, read/write scope| API[Fastify API]
-  API -->|RS256/JWKS, scope, membership| Auth[Authorization checks]
-  Auth -->|one tenant transaction| RLS[(PostgreSQL FORCE RLS)]
-  RLS --> Cases[Cases and separate case audit]
-  RLS --> Reviews[Append-only human review history]
-  Auth --> Retrieval[PostgreSQL English full-text retrieval]
-  Retrieval -->|authorized synthetic chunks, request citation IDs| AI[Optional loopback Ollama]
-  AI -->|strict parser / citations / abstention| Browser
-  Browser -->|human decision only| API
+  Browser[React SPA / Auth0 PKCE] -->|Bearer token| API[Fastify API]
+  API -->|RS256, issuer, audience, scope| Auth[Verified principal]
+  Auth -->|membership and role| Tx[Authenticated tenant transaction]
+  Tx --> RLS[(PostgreSQL FORCE RLS)]
+  RLS --> Cases[Synthetic cases and case audit]
+  RLS --> Reviews[Append-only human reviews]
+  Tx --> FTS[PostgreSQL English full-text search]
+  FTS --> Evidence[Authorized retrieved chunks]
+  Evidence -. optional; disabled .-> Model[Loopback Ollama]
+  Model -. unqualified quality .-> Parser[Strict output validation]
+  Browser -->|explicit human decision only| API
 ```
 
-Critical acceptance dependencies:
+The tenant selector requests a resource; it is not an authorization boundary. The API checks signed scopes and exact issuer/subject membership in a transaction, while PostgreSQL RLS constrains tenant rows. The `aegis_app` runtime role is restricted and cannot rewrite review history. Human review is separate from case status and downstream support actions.
 
-```mermaid
-flowchart TD
-  CI[Exact-head CI and tests] --> Life[Safe API lifecycle]
-  Life --> APIReady[Activate current API with AI off]
-  Auth[Verified Auth0 callback, scopes and membership] --> Browser[Authenticated browser cases]
-  APIReady --> Browser
-  Browser --> Review[Review history read/write verification]
-  Isolation[Grounded retrieval and citation isolation tests] --> AIReview[Human-reviewed model quality]
-  LiveApproval[Separate inference authorization] --> AIReview
-  AIReview -. remains blocked until evidence .-> Demo[Truthful portfolio demo]
-  Review --> Demo
-```
+Retrieval is PostgreSQL English full-text search (`tsvector`/GIN), not vector search. Citation identity shows that a source ID belongs to the request's retrieved set; it does not prove that the cited text entails a recommendation. The model output remains advisory and requires human review. No live quality claim is made.
 
-## Confirmed gaps and approval boundaries
+## Remaining limitations and next scope
 
-- The old live API process cannot gain new signal handlers after startup. The code change in this branch improves future API processes only. Replacing the existing Codex-supervised API remains blocked until its stop mechanism is established and separately approved.
-- Auth0 browser sign-in, North `operator` membership, `write:cases` scope, and cross-tenant denial have source and isolated-test coverage, but the real browser workflow is unverified. Do not grant membership or change Auth0 configuration as part of this work.
-- Human review writes to persistent `aegis_local`; no live review submission is authorized by this audit.
-- Historical reports are private evidence. Their summarized results show strong structural limitations: M4.15 and M4.18 each accepted 5/6 contracts and had 0/3 supported coverage with Billing 301 invalid confidence; M4.17 accepted 6/6 contracts but all outputs abstained and supported coverage remained 0/3. M4.22 forced-SUPPORTED diagnostic is not evidence of natural decision quality and has not been executed under the latest context.
-- Retrieval is PostgreSQL English full-text search with `tsvector`/GIN. No vector index or pgvector retrieval is part of the current implementation.
-- Automated browser tests added in this change use an isolated test Vite config, mocked identity and intercepted synthetic API responses. They test UI wiring, not Auth0, PostgreSQL RLS, real retrieval or model behavior; backend integration tests cover their own boundaries.
+- **GROUNDED AI LIVE QUALITY: NOT QUALIFIED.** Historical small synthetic samples do not establish production accuracy, natural supported-decision quality, or causal improvement.
+- No live model inference was performed for MVP sign-off. Any future run needs separate authorization, a versioned report, reviewed source, and predeclared acceptance/rejection criteria.
+- Automated browser tests use mocked Auth0/API behavior. Real Auth0 evidence is separately operator-confirmed above.
+- No live idempotency replay or direct capture of the review HTTP status was performed.
+- The project is a local synthetic architecture demonstration, not a production service, customer deployment, security certification, or measured business outcome.
+- Cloud hosting, public API exposure, React Native, vector retrieval, additional models, and production observability are deferred unless a concrete need justifies them.
 
-## Acceptance / rejection criteria for final local MVP
-
-Accept only when: exact-head CI passes; the new lifecycle tests pass; the current API is safely activated with both AI flags false; real Auth0 login and authorized case list succeed; unauthorized/cross-tenant/read-only paths fail closed; human review persists the verified actor and database timestamp with history; no case status or downstream action changes; and the UI remains reachable.
-
-Reject or keep blocked if: startup role verification fails; another listener would be displaced; Auth0 scope or membership is missing; a tenant boundary leaks; review history can be altered by the runtime role; any review write is duplicated or misattributed; AI is enabled unintentionally; or a mock result is represented as a live grounded recommendation.
-
-No current evidence supports a production-accuracy claim or a public deployment. The intended deliverable is a local, synthetic, human-governed portfolio demonstration.
+See the [dated acceptance evidence](MVP-ACCEPTANCE-2026-11-15.md), [portfolio case study](PORTFOLIO-CASE-STUDY.md), [local demo runbook](LOCAL-DEMO-RUNBOOK.md), and [security runbook](SECURITY-RUNBOOK.md).
