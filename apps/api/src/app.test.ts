@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from './app.js';
+import type { Pool } from 'pg';
 
 const servers: Array<ReturnType<typeof createApp>> = [];
 function createTestApp() { const app = createApp(); servers.push(app); return app; }
@@ -25,5 +26,26 @@ describe('Aegis API', () => {
       const reply = await app.inject({ method: 'POST', url: '/api/demo/query', payload: { question } });
       expect(reply.statusCode).toBe(400);
     }
+  });
+
+  it('passes startup role verification and exposes review routes without opening a listener', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ safe: true }] });
+    const end = vi.fn().mockResolvedValue(undefined);
+    const pool = { query, end } as unknown as Pool;
+    const app = createApp({ authConfig: { issuer: 'https://synthetic.auth0.example/',
+      audience: 'https://aegis.synthetic.example/api', databaseUrl: 'postgres://localhost/aegis_test' },
+    testDependencies: { pool } });
+
+    try {
+      await app.ready();
+      expect(query).toHaveBeenCalledOnce();
+      expect(app.printRoutes()).toContain('reviews (GET, HEAD, POST)');
+      const reply = await app.inject({ method: 'GET',
+        url: '/api/tenants/10000000-0000-4000-8000-000000000001/cases/00000000-0000-4000-8000-000000000001/reviews' });
+      expect(reply.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+    expect(end).toHaveBeenCalledOnce();
   });
 });

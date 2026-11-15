@@ -4,6 +4,8 @@ dist/
 **/dist/
 coverage/
 **/coverage/
+**/test-results/
+**/playwright-report/
 .local/evaluations/
 *.log
 .DS_Store

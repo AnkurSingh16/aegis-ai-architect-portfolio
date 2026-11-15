@@ -1,7 +1,9 @@
 import { createApp } from './app.js';
+import { installGracefulShutdown } from './server-lifecycle.js';
 
 try {
   const app = createApp();
+  installGracefulShutdown(app);
   const port = Number(process.env.PORT ?? 4000);
   try {
   await app.listen({ port, host: '127.0.0.1' });

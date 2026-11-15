@@ -48,6 +48,10 @@ jobs:
         run: npm run typecheck
       - name: Automated tests and measured coverage
         run: npm run test:coverage
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser workflow tests (mocked identity and API)
+        run: npm run test:e2e -w apps/web
       - name: PostgreSQL integration tests
         run: npm run test:integration
       - name: Build

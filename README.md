@@ -1,8 +1,10 @@
 # Aegis AI — Enterprise AI Engineering Portfolio
 
-An educational, production-minded portfolio foundation built with Node.js, TypeScript, React, Codex subagents, tests, CI and infrastructure-as-code planning.
+An engineering portfolio with a local synthetic support-case workflow built using Node.js 24, TypeScript, Fastify, React, PostgreSQL and Auth0.
 
-> **Status:** Milestones 2A and 2B provide local PostgreSQL case storage, database-enforced tenant isolation, and an optional Auth0 access-token boundary for protected case APIs. This remains a synthetic demonstration, **not** a production-ready AI service. Browser triage returns fixed mock responses; no OpenAI API, RAG, cloud deployment or production identity operations are included.
+> **Status:** The repository includes tenant-isolated case storage, Auth0-protected API routes, a browser case viewer, append-only human review history, PostgreSQL full-text retrieval, and optional local Ollama analysis. Examples are synthetic. AI is disabled by default, historical Qwen runs have not established reliable grounded recommendations, and the live Auth0 browser/review journey still needs operator verification. This is not a production service.
+
+Start with the [MVP completion audit](docs/MVP-COMPLETION-AUDIT.md), [local demo runbook](docs/LOCAL-DEMO-RUNBOOK.md), and [portfolio case study](docs/PORTFOLIO-CASE-STUDY.md). They distinguish merged implementation from live acceptance evidence and list approval-gated steps.
 
 ## Start on an Apple Silicon Mac
 
@@ -10,10 +12,9 @@ See **[docs/MAC-SETUP.md](docs/MAC-SETUP.md)** first. The short path, once Node 
 
 ```bash
 npm install
-npm run dev
 ```
 
-Open http://127.0.0.1:5173 in your browser. API health is at http://localhost:4000/api/health.
+Before starting services, follow the [local demo runbook](docs/LOCAL-DEMO-RUNBOOK.md) and inspect existing listeners. Start the API and Vite separately only when their loopback ports are free and service startup is approved; `npm run dev` starts both concurrently and is not appropriate when either service is already running. The web app is at http://127.0.0.1:5173 and API health is at http://127.0.0.1:4000/api/health.
 
 ## Synthetic support triage
 
@@ -76,13 +77,13 @@ When `AUTH0_ISSUER` and `AUTH0_AUDIENCE` are configured, the API enables protect
 2. Define `read:cases` and `write:cases` permissions for the API. Request the needed permissions from the local SPA using Authorization Code + PKCE. Auth0 roles are not required for this Free-plan demonstration: `reader` and `operator` are PostgreSQL membership roles, and the API does not trust token role claims for database authorization.
 3. Put the tenant's canonical issuer with trailing slash (for example `https://your-tenant.us.auth0.com/`) in `AUTH0_ISSUER`; set `AUTH0_AUDIENCE` to the API identifier. Copy `.env.api.example` to ignored `.env.api` and configure `DATABASE_URL`, `AUTH0_ISSUER`, `AUTH0_AUDIENCE` and the public SPA client ID from the reviewed Auth0 application output as `AUTH0_SPA_CLIENT_ID`. This runtime-only file keeps administrator credentials out of the HTTP process. Keep Auth0 values out of both example files except for placeholders. Use the restricted `aegis_app` credentials in `DATABASE_URL`.
 4. Run migrations. To grant a local tenant membership for the exact Auth0 `sub` claim, set `AEGIS_MEMBER_SUBJECT`, `AEGIS_MEMBER_FIXTURE` (`north` or `south`) and `AEGIS_MEMBER_ROLE`, then run `node --env-file=.env --env-file=.env.api --import tsx apps/api/src/auth/membership-cli.ts grant`. To remove access, keep issuer and subject set and run the same command with `revoke`. This local command requires `DATABASE_ADMIN_URL`; the API runtime cannot grant or revoke membership.
-5. Obtain an access token using Authorization Code with PKCE in your local OAuth client. Request the API audience and scopes, then send `Authorization: Bearer <access-token>` to the protected API. Do not paste tokens into logs, tickets or shell history. The browser demo does not perform Auth0 login or store tokens.
+5. The CLI smoke flow can check the protected API independently. The development browser flow is documented in the Milestone 2D section below; it uses the Auth0 React SDK and in-memory token handling. Do not paste tokens into logs, tickets or shell history.
 
 Run the API with `node --env-file=.env.api --import tsx apps/api/src/server.ts`. Do not launch it with the full `.env`, which contains administrator credentials for local migrations and membership provisioning. With both Auth0 settings absent, protected case routes are not registered; a partial or malformed configuration fails startup. Tests use generated local keys and do not call Auth0. This repository does not provision an Auth0 tenant; dashboard setup and local configuration are manual. See [ADR 003](docs/adr/003-auth0-tenant-authorization.md) and the [security runbook](docs/SECURITY-RUNBOOK.md).
 
 ### Development sign-in and protected case viewer (Milestone 2D)
 
-The Vite development build includes a separate Auth0 sign-in and read-only case viewer. It uses the official Auth0 React SDK with Authorization Code + PKCE and an explicitly in-memory token cache. It requests only `read:cases`; it does not put tokens in browser storage, expose user identity claims, or add case-write controls. The public portfolio and synthetic triage section remain available independently. This feature is disabled in production builds.
+The Vite development build includes Auth0 sign-in, protected case access and a human case review interface. It uses the official Auth0 React SDK with Authorization Code + PKCE and an in-memory token cache. The SPA requests `read:cases write:cases`; the API still independently enforces scopes, tenant membership, operator role and PostgreSQL RLS. Readers can see permitted history but cannot submit decisions. Review decisions append actor-attributed history and do not change case status or execute a recommendation. The feature is disabled in production builds. The code is tested, but live browser login and an authorized North operator review have not yet been demonstrated.
 
 Copy `apps/web/.env.local.example` to the ignored `apps/web/.env.local` and fill in the public issuer, SPA client ID and audience from the verified development configuration. Do not put `.env.api`, `.env.auth0`, database credentials or Management API credentials in Vite configuration. Run the API with the command above, then start Vite with `npm run dev -w apps/web`; the existing `/api` proxy sends same-origin browser requests to Fastify on `127.0.0.1:4000`, so no API CORS change is needed.
 
@@ -94,7 +95,7 @@ The SPA URLs are managed by `auth0_client.local_spa`. Browser sign-in requires a
 
 Add `http://127.0.0.1:5173` to Auth0 CORS Allowed Origins only if a reviewed flow requires it; the Vite `/api` proxy keeps API calls same-origin. No Terraform or Auth0 settings were changed for this feature. Auth0 checks callback URLs by exact match. The case viewer treats a selected tenant as a resource request only; Fastify membership checks and PostgreSQL RLS remain the authorization boundary. A 403 is displayed as access denied and does not trigger a retry under another tenant. See the [security runbook](docs/SECURITY-RUNBOOK.md).
 
-Membership changes take effect for new transactions after commit. An in-flight repeatable-read request can finish using its transaction snapshot. Case-change audit rows record changes but do not attribute them to a verified Auth0 subject. Production deployment, rate limiting, actor-attributed audit events and production identity operations remain future work.
+Membership changes take effect for new transactions after commit. An in-flight repeatable-read request can finish using its transaction snapshot. The separate case-change audit remains intact; human decisions are recorded in their own append-only table with verified actor attribution. Production deployment, rate limiting and production identity operations remain deferred.
 
 ### Grounded synthetic document analysis (Milestone 4 implementation)
 
