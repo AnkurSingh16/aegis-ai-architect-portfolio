@@ -2,9 +2,9 @@
 
 An engineering portfolio with a local synthetic support-case workflow built using Node.js 24, TypeScript, Fastify, React, PostgreSQL and Auth0.
 
-> **Status:** The repository includes tenant-isolated case storage, Auth0-protected API routes, a browser case viewer, append-only human review history, PostgreSQL full-text retrieval, and optional local Ollama analysis. Examples are synthetic. AI is disabled by default, historical Qwen runs have not established reliable grounded recommendations, and the live Auth0 browser/review journey still needs operator verification. This is not a production service.
+> **Status:** The local synthetic authenticated case-viewing and human-review MVP is accepted. A real Auth0 browser journey verified North access, South denial, reader/operator boundaries, and one authorized persisted review with actor attribution and database-generated time. Grounded AI live quality is **not qualified**; AI remains disabled by default. This is an engineering portfolio demonstration, not a production service.
 
-Start with the [MVP completion audit](docs/MVP-COMPLETION-AUDIT.md), [local demo runbook](docs/LOCAL-DEMO-RUNBOOK.md), and [portfolio case study](docs/PORTFOLIO-CASE-STUDY.md). They distinguish merged implementation from live acceptance evidence and list approval-gated steps.
+Start with the [MVP completion audit](docs/MVP-COMPLETION-AUDIT.md), [dated acceptance evidence](docs/MVP-ACCEPTANCE-2026-11-15.md), [portfolio case study](docs/PORTFOLIO-CASE-STUDY.md), and [local demo runbook](docs/LOCAL-DEMO-RUNBOOK.md). They distinguish human-confirmed browser results, read-only database/runtime checks, automated tests, and remaining AI limitations.
 
 ## Start on an Apple Silicon Mac
 
@@ -83,7 +83,7 @@ Run the API with `node --env-file=.env.api --import tsx apps/api/src/server.ts`.
 
 ### Development sign-in and protected case viewer (Milestone 2D)
 
-The Vite development build includes Auth0 sign-in, protected case access and a human case review interface. It uses the official Auth0 React SDK with Authorization Code + PKCE and an in-memory token cache. The SPA requests `read:cases write:cases`; the API still independently enforces scopes, tenant membership, operator role and PostgreSQL RLS. Readers can see permitted history but cannot submit decisions. Review decisions append actor-attributed history and do not change case status or execute a recommendation. The feature is disabled in production builds. The code is tested, but live browser login and an authorized North operator review have not yet been demonstrated.
+The Vite development build includes Auth0 sign-in, protected case access and a human case review interface. It uses the official Auth0 React SDK with Authorization Code + PKCE and an in-memory token cache. The SPA requests `read:cases write:cases`; the API independently enforces scopes, tenant membership, operator role and PostgreSQL RLS. Readers can see permitted history but cannot submit decisions. Review decisions append actor-attributed history and do not change case status or execute a recommendation. The local synthetic workflow has been verified in a real browser, including one separately authorized review that remained visible after refresh. Automated browser tests mock Auth0 and API behavior; they are not the source of the real-login evidence. The feature is disabled in production builds.
 
 Copy `apps/web/.env.local.example` to the ignored `apps/web/.env.local` and fill in the public issuer, SPA client ID and audience from the verified development configuration. Do not put `.env.api`, `.env.auth0`, database credentials or Management API credentials in Vite configuration. Run the API with the command above, then start Vite with `npm run dev -w apps/web`; the existing `/api` proxy sends same-origin browser requests to Fastify on `127.0.0.1:4000`, so no API CORS change is needed.
 
