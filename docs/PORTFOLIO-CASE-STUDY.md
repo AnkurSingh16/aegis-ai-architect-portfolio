@@ -36,14 +36,16 @@ sequenceDiagram
   participant API as Fastify
   participant DB as PostgreSQL
   Operator->>SPA: Complete PKCE login interactively
-  SPA->>API: Request a tenant case with bearer token
+  SPA->>API: Request a tenant case and review history with bearer token
   API->>API: Verify signature, issuer, audience, time and scope
-  API->>DB: Check exact principal membership and tenant under RLS
-  DB-->>SPA: Authorized synthetic case and review history
+  API->>DB: Check membership and read case/history under tenant RLS
+  DB-->>API: Authorized case and review-history rows
+  API-->>SPA: Return authorized case and review history
   Operator->>SPA: Choose a review and confirm explicitly
   SPA->>API: Authenticated idempotent review request
   API->>DB: Append actor-attributed review in tenant transaction
-  DB-->>SPA: Review row with database-generated timestamp
+  DB-->>API: Persisted review with database-generated timestamp
+  API-->>SPA: Return review result to the browser
 ```
 
 The optional analysis path is not part of the accepted live workflow. Where enabled in a separately authorized development evaluation, retrieval and validation are performed before an advisory result is shown; they do not authorize actions or modify case state.
