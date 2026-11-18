@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createGroundedOllamaProvider } from '../grounded-provider.js';
 import { localOllamaGenerateEndpoint, resolveOllamaConfig } from '../provider.js';
 import { assertSafeOllamaTcpRecords, parseOllamaTcpRecords } from './ollama-socket-preflight.js';
+import { assertNoDiagnosticProxy } from './run-grounded-supported-output-diagnostic-local.js';
 import { groundedBalancedScenarios, validateGroundedBalancedDataset } from './grounded-balanced-dataset.js';
 import { runGroundedBalancedEvaluation } from './grounded-balanced-runner.js';
 import { createBalancedObservation } from './grounded-balanced-scoring.js';
@@ -27,7 +28,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../')
 const reportPath = resolve(root, groundedAiQualificationV1ReportRelativePath);
 const datasetReviewPath = resolve(root, '.local/operator/grounded-ai-qualification-v1-dataset-review.json');
 const confirmation = 'RUN GROUNDED AI QUALIFICATION V1';
-const proxyNames = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
 const failureStages = ['source_preflight', 'dataset_review', 'configuration', 'model_preflight', 'operator_confirmation',
   'report_reservation', 'provider_evaluation', 'report_write', 'report_close', 'unknown'] as const;
 type FailureStage = typeof failureStages[number];
@@ -47,9 +47,13 @@ function gitBlobSha256(ref: string, filePath: string): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+export function assertQualificationV1LocalTransport(env: NodeJS.ProcessEnv, execArgv: readonly string[], endpoint: string): void {
+  assertNoDiagnosticProxy(env, execArgv);
+  if (endpoint !== contract.endpoint) throw new Error('non_loopback_endpoint');
+}
+
 function assertNoProxy(): void {
-  if (proxyNames.some((name) => Boolean(process.env[name]))) throw new Error('proxy_configuration_not_allowed');
-  if (localOllamaGenerateEndpoint !== contract.endpoint) throw new Error('non_loopback_endpoint');
+  assertQualificationV1LocalTransport(process.env, process.execArgv, localOllamaGenerateEndpoint);
 }
 
 function assertNoOtherOllamaClient(): void {

@@ -75,7 +75,7 @@ export const groundedAiQualificationV1ProtectedFileSha256 = Object.freeze({
 
 /** Pinned after the runner source is finalized; the verifier itself is anchored by independently verified release CI. */
 export const groundedAiQualificationV1ReviewedFileSha256 = Object.freeze({
-  'apps/api/src/ai/evaluation/run-grounded-ai-qualification-v1-local.ts': '872358e92f38b04566c2c43978a6180614144e9ed749a0820ab138912a11aabe',
+  'apps/api/src/ai/evaluation/run-grounded-ai-qualification-v1-local.ts': 'ecb841ffb35c4de2c9605d5ed759fd2559d20b72ac45258c6da4394d54abf3cb',
 });
 
 export type QualificationGitRead = (args: readonly string[]) => string;

@@ -19,7 +19,7 @@ import { runGroundedBalancedEvaluation } from './grounded-balanced-runner.js';
 import { createBalancedObservation } from './grounded-balanced-scoring.js';
 import { groundedBalancedScenarios } from './grounded-balanced-dataset.js';
 import { reservePrivateReport } from './private-report.js';
-import { parseGroundedAiQualificationV1DatasetReview } from './run-grounded-ai-qualification-v1-local.js';
+import { assertQualificationV1LocalTransport, parseGroundedAiQualificationV1DatasetReview } from './run-grounded-ai-qualification-v1-local.js';
 
 const releaseSha = 'a'.repeat(40);
 const treeSha = 'b'.repeat(40);
@@ -298,6 +298,29 @@ describe('Grounded AI Qualification V1 report and review artifacts', () => {
 });
 
 describe('Grounded AI Qualification V1 deterministic mock runner', () => {
+  it.each([
+    ['uppercase HTTP proxy', { HTTP_PROXY: 'http://proxy.invalid' }, []],
+    ['uppercase HTTPS proxy', { HTTPS_PROXY: 'http://proxy.invalid' }, []],
+    ['uppercase ALL proxy', { ALL_PROXY: 'http://proxy.invalid' }, []],
+    ['lowercase http proxy', { http_proxy: 'http://proxy.invalid' }, []],
+    ['lowercase https proxy', { https_proxy: 'http://proxy.invalid' }, []],
+    ['lowercase all proxy', { all_proxy: 'http://proxy.invalid' }, []],
+    ['Node environment proxy mode', { NODE_USE_ENV_PROXY: 'yes' }, []],
+    ['Node options proxy flag', { NODE_OPTIONS: '--use-env-proxy' }, []],
+    ['explicit process proxy flag', {}, ['--use-env-proxy']],
+    ['explicit process proxy flag with value', {}, ['--use-env-proxy=1']],
+  ])('rejects %s during local transport preflight', (_name, env, execArgv) => {
+    expect(() => assertQualificationV1LocalTransport(env, execArgv, contract.endpoint)).toThrow();
+  });
+
+  it('accepts proxy-free configuration only for the exact loopback generation endpoint', () => {
+    expect(() => assertQualificationV1LocalTransport({}, [], contract.endpoint)).not.toThrow();
+    expect(() => assertQualificationV1LocalTransport({}, [], 'https://remote.example/api/generate'))
+      .toThrow(/non_loopback_endpoint/);
+    expect(() => assertQualificationV1LocalTransport({}, [], 'http://localhost:11434/api/generate'))
+      .toThrow(/non_loopback_endpoint/);
+  });
+
   it('runs sequentially, passes only case facts/source DTOs, and never retries a timed-out case', async () => {
     let requests = 0;
     let active = 0;
