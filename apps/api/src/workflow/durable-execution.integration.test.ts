@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { createDatabasePool } from '../storage/database.js';
+import { migrateDatabase } from '../storage/migrations.js';
 import type { TenantQueryable } from '../security/tool-approval-store.js';
 import { createDurableStore } from './durable-store.js';
 import { runDurableAttempt } from './durable-driver.js';
@@ -45,6 +46,8 @@ function driver(executionId: string, tenantId: string, owner: string, clockMs: {
 }
 
 beforeAll(async () => {
+  // Idempotent: applies only pending migrations, so this file does not depend on test file order.
+  await migrateDatabase(adminUrl, process.env.DATABASE_APP_PASSWORD ?? '', process.env.DATABASE_INGEST_PASSWORD ?? '');
   await admin.query("INSERT INTO aegis.tenants (id, name) VALUES ($1, 'Synthetic North'), ($2, 'Synthetic South')", [tenantA, tenantB]);
 });
 

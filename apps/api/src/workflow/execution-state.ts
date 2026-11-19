@@ -37,7 +37,8 @@ const transitions: TransitionTable = {
     step_failed_permanent: 'failed',
     cancel: 'cancelled',
   },
-  awaiting_approval: { approve: 'running', reject: 'cancelled', cancel: 'cancelled' },
+  // An approval makes the waiting attempt due again. It does not start an attempt by itself.
+  awaiting_approval: { approve: 'retry_wait', reject: 'cancelled', cancel: 'cancelled' },
   retry_wait: { retry_due: 'running', cancel: 'cancelled' },
   succeeded: {},
   failed: {},

@@ -15,6 +15,8 @@ describe('execution state machine', () => {
     let state = nextState('pending', 'start');
     state = nextState(state, 'request_approval');
     state = nextState(state, 'approve');
+    expect(state).toBe('retry_wait');
+    state = nextState(state, 'retry_due');
     state = nextState(state, 'step_succeeded');
     expect(state).toBe('succeeded');
     expect(isTerminal(state)).toBe(true);

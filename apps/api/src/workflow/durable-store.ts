@@ -1,7 +1,7 @@
 import type { TenantRunner } from '../security/tool-approval-store.js';
 import type { ExecutionState } from './execution-state.js';
 
-/** Postgres-backed execution state. Every write is conditional on the lease owner and the expected version. */
+/** Postgres-backed execution state. Every lease-holding write is conditional on the lease owner and the expected version. */
 
 export class StaleLeaseError extends Error {
   readonly name = 'StaleLeaseError';
@@ -14,6 +14,9 @@ export interface ExecutionRow {
   readonly maxAttempts: number;
   readonly version: number;
   readonly nextAttemptAt: Date | null;
+  readonly cancelRequested: boolean;
+  readonly approvalId: string | null;
+  readonly approvalGranted: boolean;
 }
 
 export interface CheckpointRow {
@@ -21,6 +24,12 @@ export interface CheckpointRow {
   readonly state: ExecutionState;
   readonly attempts: number;
 }
+
+export type ApprovalChange =
+  | { readonly kind: 'keep' }
+  | { readonly kind: 'request'; readonly approvalId: string }
+  | { readonly kind: 'grant' }
+  | { readonly kind: 'consume' };
 
 export interface TransitionInput {
   readonly executionId: string;
@@ -30,11 +39,12 @@ export interface TransitionInput {
   readonly state: ExecutionState;
   readonly attempts: number;
   readonly nextAttemptAt: Date | null;
-  readonly lastErrorClass: 'retryable' | 'permanent' | 'timeout' | null;
+  readonly lastErrorClass: 'retryable' | 'permanent' | 'timeout' | 'cancelled' | null;
   /** Keep the lease while the attempt is running; release it at every other transition. */
   readonly keepLease: boolean;
   readonly leaseExpiresAt: Date;
   readonly now: Date;
+  readonly approval?: ApprovalChange;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -43,13 +53,28 @@ const assertUuid = (value: string, label: string): void => {
 };
 
 interface ExecutionDbRow extends Record<string, unknown> {
-  execution_id: string; state: ExecutionState; attempts: number; max_attempts: number; version: number; next_attempt_at: Date | null;
+  execution_id: string; state: ExecutionState; attempts: number; max_attempts: number; version: number;
+  next_attempt_at: Date | null; cancel_requested: boolean; approval_id: string | null; approval_granted: boolean;
 }
+
+const SELECT_EXECUTION = `execution_id, state, attempts, max_attempts, version, next_attempt_at,
+  cancel_requested, approval_id, approval_granted`;
 
 const toRow = (row: ExecutionDbRow): ExecutionRow => ({
   executionId: row.execution_id, state: row.state, attempts: row.attempts, maxAttempts: row.max_attempts,
-  version: row.version, nextAttemptAt: row.next_attempt_at,
+  version: row.version, nextAttemptAt: row.next_attempt_at, cancelRequested: row.cancel_requested,
+  approvalId: row.approval_id, approvalGranted: row.approval_granted,
 });
+
+/** Approval column values for a transition. Keeps the current value unless the change says otherwise. */
+function approvalColumns(change: ApprovalChange | undefined): { setId: boolean; id: string | null; setGranted: boolean; granted: boolean } {
+  switch (change?.kind) {
+    case 'request': return { setId: true, id: change.approvalId, setGranted: true, granted: false };
+    case 'grant': return { setId: false, id: null, setGranted: true, granted: true };
+    case 'consume': return { setId: false, id: null, setGranted: true, granted: false };
+    default: return { setId: false, id: null, setGranted: false, granted: false };
+  }
+}
 
 export function createDurableStore(runTenant: TenantRunner) {
   return {
@@ -86,7 +111,7 @@ export function createDurableStore(runTenant: TenantRunner) {
               AND state IN ('pending', 'retry_wait', 'running')
               AND (lease_expires_at IS NULL OR lease_expires_at <= $4)
               AND (next_attempt_at IS NULL OR next_attempt_at <= $4)
-            RETURNING execution_id, state, attempts, max_attempts, version, next_attempt_at`,
+            RETURNING ${SELECT_EXECUTION}`,
           [executionId, tenantId, owner, now, leaseExpiresAt],
         );
         return result.rows[0] ? toRow(result.rows[0]) : null;
@@ -97,18 +122,22 @@ export function createDurableStore(runTenant: TenantRunner) {
     async transition(input: TransitionInput): Promise<number> {
       assertUuid(input.executionId, 'executionId');
       assertUuid(input.tenantId, 'tenantId');
+      const approval = approvalColumns(input.approval);
       return runTenant(input.tenantId, async (client) => {
         const updated = await client.query<{ version: number }>(
           `UPDATE aegis.workflow_executions
               SET state = $4, attempts = $5, next_attempt_at = $6, last_error_class = $7,
                   lease_owner = CASE WHEN $8::boolean THEN lease_owner ELSE NULL END,
                   lease_expires_at = CASE WHEN $8::boolean THEN $9::timestamptz ELSE NULL END,
+                  approval_id = CASE WHEN $12::boolean THEN $13::uuid ELSE approval_id END,
+                  approval_granted = CASE WHEN $14::boolean THEN $15::boolean ELSE approval_granted END,
                   version = version + 1, updated_at = $10
             WHERE execution_id = $1 AND tenant_id = $2 AND version = $3
               AND lease_owner = $11 AND lease_expires_at > $10
             RETURNING version`,
           [input.executionId, input.tenantId, input.expectedVersion, input.state, input.attempts, input.nextAttemptAt,
-            input.lastErrorClass, input.keepLease, input.leaseExpiresAt, input.now, input.owner],
+            input.lastErrorClass, input.keepLease, input.leaseExpiresAt, input.now, input.owner,
+            approval.setId, approval.id, approval.setGranted, approval.granted],
         );
         const version = updated.rows[0]?.version;
         if (version === undefined) throw new StaleLeaseError('execution lease or version is stale');
@@ -121,12 +150,89 @@ export function createDurableStore(runTenant: TenantRunner) {
       });
     },
 
+    /**
+     * Cancels without a lease when nothing is running. If an attempt holds the lease, only the request is recorded
+     * and the driver honours it when that attempt finishes.
+     */
+    async requestCancel(executionId: string, tenantId: string, now: Date): Promise<'cancelled' | 'cancel_requested' | 'not_found' | 'terminal'> {
+      assertUuid(executionId, 'executionId');
+      assertUuid(tenantId, 'tenantId');
+      return runTenant(tenantId, async (client) => {
+        const current = await client.query<ExecutionDbRow & { lease_held: boolean }>(
+          `SELECT ${SELECT_EXECUTION}, (lease_owner IS NOT NULL AND lease_expires_at > $3) AS lease_held
+             FROM aegis.workflow_executions WHERE execution_id = $1 AND tenant_id = $2`,
+          [executionId, tenantId, now],
+        );
+        const row = current.rows[0];
+        if (!row) return 'not_found';
+        if (['succeeded', 'failed', 'cancelled'].includes(row.state)) return 'terminal';
+        if (row.lease_held) {
+          // An attempt is in flight. Record the request; the driver honours it when the attempt finishes.
+          await client.query('UPDATE aegis.workflow_executions SET cancel_requested = true, updated_at = $3 WHERE execution_id = $1 AND tenant_id = $2',
+            [executionId, tenantId, now]);
+          return 'cancel_requested';
+        }
+        const cancelled = await client.query<{ version: number }>(
+          `UPDATE aegis.workflow_executions
+              SET state = 'cancelled', cancel_requested = true, next_attempt_at = NULL, last_error_class = 'cancelled',
+                  lease_owner = NULL, lease_expires_at = NULL, approval_granted = false, version = version + 1, updated_at = $4
+            WHERE execution_id = $1 AND tenant_id = $2 AND version = $3 AND state = $5
+            RETURNING version`,
+          [executionId, tenantId, row.version, now, row.state],
+        );
+        const version = cancelled.rows[0]?.version;
+        if (version === undefined) return 'cancel_requested'; // another writer moved it; the flag is set for the driver
+        await client.query(
+          'INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts) VALUES ($1, $2, $3, $4, $5)',
+          [executionId, tenantId, version, 'cancelled', row.attempts],
+        );
+        return 'cancelled';
+      });
+    },
+
+    async isCancelRequested(executionId: string, tenantId: string): Promise<boolean> {
+      assertUuid(executionId, 'executionId');
+      assertUuid(tenantId, 'tenantId');
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<{ cancel_requested: boolean }>(
+          'SELECT cancel_requested FROM aegis.workflow_executions WHERE execution_id = $1 AND tenant_id = $2',
+          [executionId, tenantId],
+        );
+        return result.rows[0]?.cancel_requested === true;
+      });
+    },
+
+    /** Resolves an approval wait without a lease. Only an awaiting execution at the expected version can move. */
+    async resolveApproval(executionId: string, tenantId: string, expectedVersion: number, outcome: 'granted' | 'rejected', now: Date): Promise<boolean> {
+      assertUuid(executionId, 'executionId');
+      assertUuid(tenantId, 'tenantId');
+      const nextState: ExecutionState = outcome === 'granted' ? 'retry_wait' : 'cancelled';
+      return runTenant(tenantId, async (client) => {
+        const updated = await client.query<{ version: number; attempts: number }>(
+          `UPDATE aegis.workflow_executions
+              SET state = $4, approval_granted = $5, next_attempt_at = $6,
+                  last_error_class = CASE WHEN $4 = 'cancelled' THEN 'cancelled' ELSE last_error_class END,
+                  version = version + 1, updated_at = $6
+            WHERE execution_id = $1 AND tenant_id = $2 AND version = $3 AND state = 'awaiting_approval'
+            RETURNING version, attempts`,
+          [executionId, tenantId, expectedVersion, nextState, outcome === 'granted', now],
+        );
+        const row = updated.rows[0];
+        if (!row) return false;
+        await client.query(
+          'INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts) VALUES ($1, $2, $3, $4, $5)',
+          [executionId, tenantId, row.version, nextState, row.attempts],
+        );
+        return true;
+      });
+    },
+
     async load(executionId: string, tenantId: string): Promise<{ execution: ExecutionRow; checkpoints: CheckpointRow[] } | undefined> {
       assertUuid(executionId, 'executionId');
       assertUuid(tenantId, 'tenantId');
       return runTenant(tenantId, async (client) => {
         const execution = await client.query<ExecutionDbRow>(
-          'SELECT execution_id, state, attempts, max_attempts, version, next_attempt_at FROM aegis.workflow_executions WHERE execution_id = $1 AND tenant_id = $2',
+          `SELECT ${SELECT_EXECUTION} FROM aegis.workflow_executions WHERE execution_id = $1 AND tenant_id = $2`,
           [executionId, tenantId],
         );
         const row = execution.rows[0];

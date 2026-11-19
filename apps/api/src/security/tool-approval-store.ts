@@ -23,6 +23,8 @@ export interface ApprovalAdministration {
   create(input: NewApproval): Promise<string>;
   /** Returns true only when a pending, unexpired approval was approved by someone other than the requester. */
   approve(approvalId: string, tenantId: string, approver: string, now: Date): Promise<boolean>;
+  /** Returns true only when a pending, unexpired approval is rejected. */
+  reject(approvalId: string, tenantId: string, now: Date): Promise<boolean>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,6 +91,20 @@ export function createPostgresApprovalStore(runTenant: TenantRunner): ApprovalSt
         const id = result.rows[0]?.approval_id;
         if (!id) throw new Error('approval was not created');
         return id;
+      });
+    },
+
+    async reject(approvalId, tenantId, now) {
+      assertUuid(approvalId, 'approvalId');
+      assertUuid(tenantId, 'tenantId');
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<{ approval_id: string }>(
+          `UPDATE aegis.tool_approvals SET status = 'rejected', decided_at = $3
+            WHERE approval_id = $1 AND tenant_id = $2 AND status = 'pending' AND expires_at > $3
+            RETURNING approval_id`,
+          [approvalId, tenantId, now],
+        );
+        return (result.rowCount ?? 0) === 1;
       });
     },
 

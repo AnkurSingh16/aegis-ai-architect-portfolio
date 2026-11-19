@@ -1,14 +1,25 @@
-import { type ExecutionState } from './execution-state.js';
 import { classifyFailure, decideAfterFailure, type RetryPolicy, validateRetryPolicy } from './retry-policy.js';
 import type { ExecutionRow } from './durable-store.js';
 import { createDurableStore } from './durable-store.js';
+
+/**
+ * Approval gate for side-effecting attempts. Every attempt needs its own approval: once consumed, a retry asks again.
+ * The gate is backed by the tool approval store, so approvals are tenant-scoped and single-use.
+ */
+export interface ApprovalGate {
+  createApproval(): Promise<string>;
+  status(approvalId: string): Promise<'approved' | 'pending' | 'rejected' | 'expired' | 'consumed'>;
+  consume(approvalId: string): Promise<boolean>;
+}
 
 export type DriverOutcome =
   | { readonly status: 'not_claimable' }
   | { readonly status: 'succeeded'; readonly attempt: number }
   | { readonly status: 'retry_scheduled'; readonly attempt: number; readonly nextAttemptAt: Date }
   | { readonly status: 'failed'; readonly attempt: number; readonly errorClass: 'permanent' | 'timeout' | 'retryable' }
-  | { readonly status: 'lost_attempt_recovered'; readonly nextAttemptAt: Date | null };
+  | { readonly status: 'lost_attempt_recovered'; readonly nextAttemptAt: Date }
+  | { readonly status: 'approval_requested'; readonly approvalId: string }
+  | { readonly status: 'cancelled'; readonly reason: 'requested' | 'approval_rejected' | 'approval_expired' | 'approval_already_consumed' };
 
 export interface DriverInput {
   readonly store: ReturnType<typeof createDurableStore>;
@@ -19,14 +30,14 @@ export interface DriverInput {
   readonly leaseMs: number;
   readonly timeoutMs: number;
   readonly clock: () => Date;
+  readonly approvalGate?: ApprovalGate;
   /** Performs one attempt. Must be idempotent under the execution id and attempt number, because attempts can be repeated after a crash. */
   readonly step: (attempt: number, signal: AbortSignal) => Promise<void>;
 }
 
 const addMs = (date: Date, ms: number): Date => new Date(date.getTime() + ms);
 
-async function withTimeout(work: Promise<void>, timeoutMs: number): Promise<void> {
-  const controller = new AbortController();
+async function withTimeout(work: Promise<void>, timeoutMs: number, controller: AbortController): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -42,67 +53,115 @@ async function withTimeout(work: Promise<void>, timeoutMs: number): Promise<void
 }
 
 /**
- * Runs at most one attempt for one execution. Call it again after a crash or a retry delay: it resumes from
- * the persisted attempt count. Lease expiry is the only recovery signal, so two workers never run the same attempt
- * concurrently.
+ * Runs at most one step for one execution per call, or handles one waiting condition (approval, cancellation).
+ * Call it again after a crash, a retry delay or an approval. It resumes from the persisted state.
  */
 export async function runDurableAttempt(input: DriverInput): Promise<DriverOutcome> {
   validateRetryPolicy(input.policy);
-  const { store } = input;
+  const { store, tenantId, executionId, owner } = input;
   const now = input.clock();
   const leaseExpiresAt = addMs(now, input.leaseMs);
-  const claimed: ExecutionRow | null = await store.claim(input.executionId, input.tenantId, input.owner, now, leaseExpiresAt);
+  const claimed: ExecutionRow | null = await store.claim(executionId, tenantId, owner, now, leaseExpiresAt);
   if (!claimed) return { status: 'not_claimable' };
-
-  let version = claimed.version;
   // The attempt budget stored with the execution is authoritative, not the caller's policy.
   const policy: RetryPolicy = { ...input.policy, maxAttempts: claimed.maxAttempts };
+  let version = claimed.version;
+
+  const cancelNow = async (reason: 'requested' | 'approval_rejected' | 'approval_expired' | 'approval_already_consumed', at: Date) => {
+    await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'cancelled', attempts: claimed.attempts,
+      nextAttemptAt: null, lastErrorClass: 'cancelled', keepLease: false, leaseExpiresAt: at, now: at });
+    return { status: 'cancelled' as const, reason };
+  };
+
+  if (claimed.cancelRequested) return cancelNow('requested', now);
 
   // An attempt that was started but never finished (its worker died while the lease was held) counts as a failed attempt.
   if (claimed.state === 'running') {
     const decision = decideAfterFailure('retryable', claimed.attempts, policy);
     if (decision.event === 'step_failed_permanent') {
-      await store.transition({ executionId: input.executionId, tenantId: input.tenantId, owner: input.owner, expectedVersion: version,
-        state: 'failed', attempts: claimed.attempts, nextAttemptAt: null, lastErrorClass: 'timeout', keepLease: false, leaseExpiresAt, now });
+      await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'failed', attempts: claimed.attempts,
+        nextAttemptAt: null, lastErrorClass: 'timeout', keepLease: false, leaseExpiresAt, now });
       return { status: 'failed', attempt: claimed.attempts, errorClass: 'timeout' };
     }
-    const nextAttemptAt = now;
-    version = await store.transition({ executionId: input.executionId, tenantId: input.tenantId, owner: input.owner, expectedVersion: version,
-      state: 'retry_wait', attempts: claimed.attempts, nextAttemptAt, lastErrorClass: 'timeout', keepLease: false, leaseExpiresAt, now });
-    return { status: 'lost_attempt_recovered', nextAttemptAt };
+    await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'retry_wait', attempts: claimed.attempts,
+      nextAttemptAt: now, lastErrorClass: 'timeout', keepLease: false, leaseExpiresAt, now });
+    return { status: 'lost_attempt_recovered', nextAttemptAt: now };
+  }
+
+  // Approval gate: a side-effecting attempt waits for a human decision before it may start.
+  let consumeApproval = false;
+  if (input.approvalGate) {
+    if (!claimed.approvalGranted || claimed.approvalId === null) {
+      const approvalId = await input.approvalGate.createApproval();
+      await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'awaiting_approval', attempts: claimed.attempts,
+        nextAttemptAt: null, lastErrorClass: null, keepLease: false, leaseExpiresAt, now, approval: { kind: 'request', approvalId } });
+      return { status: 'approval_requested', approvalId };
+    }
+    const decision = await input.approvalGate.status(claimed.approvalId);
+    if (decision === 'consumed') return cancelNow('approval_already_consumed', now);
+    if (decision !== 'approved') {
+      return cancelNow(decision === 'expired' ? 'approval_expired' : 'approval_rejected', now);
+    }
+    if (!(await input.approvalGate.consume(claimed.approvalId))) return cancelNow('approval_already_consumed', now);
+    consumeApproval = true;
   }
 
   const attempt = claimed.attempts + 1;
   // Persist the intent before the side effect: a crash after this point is visible as a lost attempt.
-  version = await store.transition({ executionId: input.executionId, tenantId: input.tenantId, owner: input.owner, expectedVersion: version,
-    state: 'running', attempts: attempt, nextAttemptAt: null, lastErrorClass: null, keepLease: true, leaseExpiresAt, now });
+  version = await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'running', attempts: attempt,
+    nextAttemptAt: null, lastErrorClass: null, keepLease: true, leaseExpiresAt, now,
+    approval: consumeApproval ? { kind: 'consume' } : { kind: 'keep' } });
 
   const controller = new AbortController();
   try {
-    await withTimeout(input.step(attempt, controller.signal), input.timeoutMs);
+    await withTimeout(input.step(attempt, controller.signal), input.timeoutMs, controller);
   } catch (error) {
-    const failure = classifyFailure(error);
-    const errorName = error instanceof Error ? error.name : '';
-    const isTimeout = errorName === 'TimeoutError';
-    const decision = decideAfterFailure(failure, attempt, policy);
-    const errorClass = isTimeout ? 'timeout' : failure;
+    const isTimeout = error instanceof Error && error.name === 'TimeoutError';
+    const failure = isTimeout ? 'timeout' : classifyFailure(error);
     const done = input.clock();
+    if (await store.isCancelRequested(executionId, tenantId)) {
+      await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'cancelled', attempts: attempt,
+        nextAttemptAt: null, lastErrorClass: 'cancelled', keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
+      return { status: 'cancelled', reason: 'requested' };
+    }
+    const decision = decideAfterFailure(failure === 'timeout' ? 'retryable' : failure, attempt, policy);
     if (decision.event === 'step_failed_permanent') {
-      await store.transition({ executionId: input.executionId, tenantId: input.tenantId, owner: input.owner, expectedVersion: version,
-        state: 'failed', attempts: attempt, nextAttemptAt: null, lastErrorClass: errorClass === 'retryable' ? 'retryable' : errorClass,
-        keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
-      return { status: 'failed', attempt, errorClass: errorClass === 'retryable' ? 'retryable' : errorClass };
+      const errorClass = failure === 'timeout' ? 'timeout' : failure === 'retryable' ? 'retryable' : 'permanent';
+      await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'failed', attempts: attempt,
+        nextAttemptAt: null, lastErrorClass: errorClass, keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
+      return { status: 'failed', attempt, errorClass };
     }
     const nextAttemptAt = addMs(done, decision.delayMs);
-    await store.transition({ executionId: input.executionId, tenantId: input.tenantId, owner: input.owner, expectedVersion: version,
-      state: 'retry_wait', attempts: attempt, nextAttemptAt, lastErrorClass: errorClass, keepLease: false,
+    await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'retry_wait', attempts: attempt,
+      nextAttemptAt, lastErrorClass: failure === 'timeout' ? 'timeout' : failure, keepLease: false,
       leaseExpiresAt: addMs(done, input.leaseMs), now: done });
     return { status: 'retry_scheduled', attempt, nextAttemptAt };
   }
 
+  // The side effect completed. Success is recorded even if cancellation was requested meanwhile.
   const done = input.clock();
-  await store.transition({ executionId: input.executionId, tenantId: input.tenantId, owner: input.owner, expectedVersion: version,
-    state: 'succeeded' satisfies ExecutionState, attempts: attempt, nextAttemptAt: null, lastErrorClass: null, keepLease: false,
-    leaseExpiresAt: addMs(done, input.leaseMs), now: done });
+  await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'succeeded', attempts: attempt,
+    nextAttemptAt: null, lastErrorClass: null, keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
   return { status: 'succeeded', attempt };
+}
+
+export type ApprovalWaitResult = 'not_awaiting' | 'waiting' | 'granted' | 'rejected' | 'expired';
+
+/** Applies a human approval decision to an execution that is waiting for one. Does not need a lease. */
+export async function resumeApprovalWait(input: {
+  store: ReturnType<typeof createDurableStore>; executionId: string; tenantId: string;
+  gate: ApprovalGate; clock: () => Date;
+}): Promise<ApprovalWaitResult> {
+  const loaded = await input.store.load(input.executionId, input.tenantId);
+  if (!loaded || loaded.execution.state !== 'awaiting_approval' || loaded.execution.approvalId === null) return 'not_awaiting';
+  const decision = await input.gate.status(loaded.execution.approvalId);
+  if (decision === 'pending') return 'waiting';
+  const now = input.clock();
+  if (decision === 'approved') {
+    const moved = await input.store.resolveApproval(input.executionId, input.tenantId, loaded.execution.version, 'granted', now);
+    return moved ? 'granted' : 'not_awaiting';
+  }
+  const moved = await input.store.resolveApproval(input.executionId, input.tenantId, loaded.execution.version, 'rejected', now);
+  if (!moved) return 'not_awaiting';
+  return decision === 'expired' ? 'expired' : 'rejected';
 }
