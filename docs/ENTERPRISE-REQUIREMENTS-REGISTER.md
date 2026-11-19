@@ -18,7 +18,7 @@ This register tracks implementation status only. It does not record human approv
 | C7 | Three-tier memory | MISSING | None found | All three tiers, retention, deletion, poisoning defences | Defer; needs privacy design decision |
 | C8 | Typed multi-agent orchestration | MISSING | None found | Roles, delegation, messaging, bounded loops, approval integration | Depends on C5 and C10 |
 | C9 | Trajectory evaluation and CI gates | PARTIAL | Grounded and exploratory evaluation runners and scorers under `ai/evaluation/`; CI workflows exist in `.github/` | Trajectory metrics, cost per successful task, CI regression gate verified on the exact PR head | Verify CI gate definitions before claiming any gate |
-| C10 | Inter-agent security proxy | PARTIAL | `context/output-guard.ts`: deterministic forbidden-substring and citation checks (4 tests). Live dev run showed the model echoed a planted sentinel in 4 of 8 runs, so the guard is necessary. HTTP auth and tenant checks exist in `auth/` | Tool authorisation layer, identity model for agents, adversarial suite across the listed attack classes | High priority; required before C6 and C8 |
+| C10 | Inter-agent security proxy | PARTIAL | `security/tool-policy-gateway.ts`: deny-by-default tool authorisation, least-privilege scope intersection, trusted-context tenant binding, argument screening (tenant, privilege, secret), approval bound to action digest, no self-approval, single-use approvals, issued single-use run ids for results. 18 adversarial tests. `context/output-guard.ts` checks answers (4 tests); live dev run showed the model echoed a planted sentinel in 4 of 8 runs | Not wired to any tool or HTTP route yet. Approval store is an interface only (no persistence). Identity is passed in, not verified. No network or rate-limit controls | High priority; wire to C6 and C8 |
 | C11 | Semantic cache and model routing | MISSING | Only `auth/` cache-like code (not related) | All components | Defer; measure first |
 | C12 | Public architecture teardown | PARTIAL | Existing `docs/` architecture and evaluation notes | Teardown document covering all sections of the directive | Write once C1–C10 status is final |
 
@@ -53,3 +53,5 @@ This register tracks implementation status only. It does not record human approv
 - `apps/api/src/context/output-guard.ts` and tests.
 - `apps/api/scripts/dev-context-benchmark.ts` with synthetic fixtures `apps/api/scripts/fixtures/dev-context-fixtures.json` (non-protected, loopback Ollama, bounded to 8 requests).
 - Results and limits: `docs/DEV-CONTEXT-ASSEMBLY-BENCHMARK.md`.
+
+- `apps/api/src/security/tool-policy-gateway.ts` and 18 adversarial tests (C10).
