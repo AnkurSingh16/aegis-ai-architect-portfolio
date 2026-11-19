@@ -17,14 +17,14 @@ export async function storeChunkEmbeddings(client: TenantQueryable, tenantId: st
   return stored;
 }
 
-export interface VectorHit { sourceIdentity: string; chunkId: string; similarity: number }
+export interface VectorHit { sourceIdentity: string; chunkId: string; similarity: number; content: string }
 
 /** Nearest chunks by cosine distance for one tenant, ranked best first. Ties break on chunk id. */
 export async function retrieveByVector(client: TenantQueryable, tenantId: string, queryVector: readonly number[], topK: number): Promise<VectorHit[]> {
   if (!Number.isInteger(topK) || topK < 1 || topK > 20) throw new RangeError('topK must be 1 to 20');
   const literal = toVectorLiteral(queryVector);
-  const result = await client.query<{ source_identity: string; chunk_id: string; similarity: number | string }>(
-    `SELECT d.source_identity, c.id AS chunk_id, 1 - (e.embedding <=> $2::vector) AS similarity
+  const result = await client.query<{ source_identity: string; chunk_id: string; similarity: number | string; content: string }>(
+    `SELECT d.source_identity, c.id AS chunk_id, c.content, 1 - (e.embedding <=> $2::vector) AS similarity
        FROM aegis.chunk_embeddings e
        JOIN aegis.document_chunks c ON c.id = e.chunk_id AND c.tenant_id = e.tenant_id
        JOIN aegis.documents d ON d.tenant_id = c.tenant_id AND d.id = c.document_id
@@ -34,5 +34,5 @@ export async function retrieveByVector(client: TenantQueryable, tenantId: string
       LIMIT $4`,
     [tenantId, literal, EMBEDDING_MODEL, topK],
   );
-  return result.rows.map((row) => ({ sourceIdentity: row.source_identity, chunkId: row.chunk_id, similarity: Number(row.similarity) }));
+  return result.rows.map((row) => ({ sourceIdentity: row.source_identity, chunkId: row.chunk_id, similarity: Number(row.similarity), content: row.content }));
 }

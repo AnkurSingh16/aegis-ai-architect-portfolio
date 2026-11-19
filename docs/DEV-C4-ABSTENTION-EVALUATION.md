@@ -35,3 +35,30 @@ recovery-code, network-authz.
 ## Reproduce
 Set the isolated test URLs and role passwords as for the other integration tests, and set `C4_EVAL_OUTPUT` to a file path.
 Then run `npm run test:integration -w apps/api` and read the report from that file.
+
+## Vector retrieval (live local embeddings, same 15 cases)
+Wired through `rag/document-evidence.ts` (`vectorEvidenceRetriever`): the query is embedded with the local loopback
+`nomic-embed-text` model (pinned digest), the nearest chunks are read under the tenant's row-level security, and the
+score is cosine similarity. The similarity floor **0.5 was declared before the first live run** and not changed
+afterwards. Gated by `AEGIS_LIVE_OLLAMA=1`, so the default test run does not need the embedding service.
+
+| Measure | Lexical (earlier) | Vector, floor 0.5 |
+|---|---|---|
+| Answer recall | 3 / 8 = 0.375 | 8 / 8 = 1.0 |
+| Wrong-source answers | 0 | 0 |
+| False abstentions | 5 | 0 |
+| False answers on unanswerable | 0 / 7 | 4 / 7 = 0.571 |
+| Abstention precision | 7 / 12 = 0.583 | 3 / 3 = 1.0 (3 abstentions, all correct) |
+
+Top similarity per case (first round):
+- Answerable: 0.673 to 0.838.
+- Unanswerable: 0.463 to 0.663. Four of seven were answered, with top similarity 0.589 to 0.663. Those four were the
+  off-topic physics question and the three cross-tenant questions. Each citation named a North document; none named a
+  South one, so tenant isolation held.
+
+What this supports: at floor 0.5, vector retrieval answers more of the labelled answerable questions than lexical
+retrieval, and it answers more unanswerable ones.
+
+What this does not support: any choice of floor. The answerable and unanswerable similarity ranges overlap around
+0.66 to 0.67. A floor near 0.67 would separate this set, but choosing it from these labels would be tuning on the
+evaluation, so it is not reported as a result. A floor needs a separate labelled set, or the decision goes to the owner.
