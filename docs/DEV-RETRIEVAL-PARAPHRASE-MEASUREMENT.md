@@ -33,3 +33,25 @@ Means over 8 queries: recall@5 0.125, MRR 0.125, nDCG@5 0.125.
 - Eight queries, one author, no independent labelling. The results are descriptive, not a statistical comparison.
 - Relevance is binary, so nDCG reduces to a rank-weighted recall here.
 - This does not measure answer quality or grounding.
+
+## Vector and hybrid retrieval (live, local embeddings)
+
+Model: `nomic-embed-text` (digest `0a109f422b47…`), served by loopback Ollama. Documents use the `search_document:` prefix and queries use `search_query:`. Vectors (768-dimensional) are stored in `aegis.chunk_embeddings` (migration 009) under row-level security. Hybrid retrieval fuses the lexical and vector source rankings with reciprocal rank fusion (k0 = 60). Raw evidence is kept outside the repository.
+
+| Approach | Mean recall@5 | Mean reciprocal rank | Mean nDCG@5 |
+|---|---|---|---|
+| Lexical (full-text) | 0.125 | 0.125 | 0.125 |
+| Vector (cosine) | 1.000 | 0.542 | 0.657 |
+| Hybrid (RRF) | 1.000 | 0.625 | 0.719 |
+
+### How to read these numbers
+- **Recall@5 is saturated and tells us nothing here.** Each tenant has only four synthetic documents, so the top five always contains all relevant sources. Recall is not a discriminating metric on this corpus.
+- **MRR and nDCG are the informative measures**, and they are based on a four-document pool per tenant. The vector ranking's first hit is wrong for several queries. For example, the login paraphrase ranks the network-diagnostics document first.
+- Lexical retrieval abstains (returns nothing) on the paraphrases, so its numbers reflect abstention as well as ranking.
+- Eight queries, one author, engineer-assigned labels, one embedding model. Treat the gap as a direction, not a result.
+
+### What is not yet established
+- Behaviour on a larger corpus, where the candidate pool is much bigger than five.
+- Confidence intervals, repeated runs, or a second embedding model.
+- Latency and cost. The embedding calls were not timed as a benchmark.
+- Answer quality or grounding.

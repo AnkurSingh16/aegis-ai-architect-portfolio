@@ -10,6 +10,13 @@ import { syntheticDocuments } from './catalog.js';
 import { ingestSyntheticCatalog, ingestSyntheticCatalogLocal, validateIngestionConnection, validateLocalIngestionConnection } from './ingestion.js';
 import { retrieveDocumentChunks } from './retrieval.js';
 import { retrievalEvaluationCases, scoreRetrieval } from './evaluation.js';
+import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EMBEDDING_MODEL_DIGEST, embedTexts } from '../retrieval/ollama-embeddings.js';
+import { retrieveByVector, storeChunkEmbeddings } from '../retrieval/vector-retrieval.js';
+import { paraphraseCases, paraphraseDatasetVersion } from './paraphrase-evaluation.js';
+import { ndcgAtK, recallAtK, reciprocalRank, reciprocalRankFusion } from '../retrieval/ranking-metrics.js';
+import type { TenantQueryable } from '../security/tool-approval-store.js';
+import type { PoolClient } from 'pg';
+import { writeFileSync } from 'node:fs';
 
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
 const runtimeUrl = process.env.TEST_DATABASE_URL;
@@ -245,7 +252,6 @@ describe('isolated PostgreSQL tenant document boundary', () => {
       meanRecallAt5: mean('recallAt5'), meanReciprocalRank: mean('reciprocalRank'), meanNdcgAt5: mean('ndcgAt5'), perQuery };
     const evidencePath = process.env.AEGIS_RETRIEVAL_EVIDENCE;
     if (evidencePath) {
-      const { writeFileSync } = await import('node:fs');
       writeFileSync(evidencePath, `${JSON.stringify(summary, null, 2)}\n`);
     }
     // Recorded as measurement, not a pass threshold: the purpose is to find where lexical retrieval fails.
@@ -279,4 +285,122 @@ describe('isolated PostgreSQL tenant document boundary', () => {
     ];
     for (const statement of statements) await expect(runtime.query(statement)).rejects.toMatchObject({ code: '42501' });
   });
+});
+
+// Vector retrieval runs inside this suite so it shares the seeded corpus and migrations deterministically.
+describe('vector retrieval (corpus seeded above)', () => {
+const live = process.env.AEGIS_LIVE_OLLAMA === '1';
+
+const vectorIssuer = 'https://vector.embed.test/';
+const vectorSubject = `vector-${randomUUID()}`;
+
+/** Authenticated context, the same one document reads use: membership-checked, then tenant-scoped. */
+const runTenant = async <T>(tenantId: string, operation: (client: TenantQueryable) => Promise<T>): Promise<T> => {
+  const client = await runtime.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT set_config('aegis.access_mode', 'authenticated', true),
+      set_config('aegis.principal_issuer', $1, true), set_config('aegis.principal_subject', $2, true)`, [vectorIssuer, vectorSubject]);
+    await client.query("SELECT set_config('aegis.tenant_id', $1, true)", [tenantId]);
+    const result = await operation(client as unknown as TenantQueryable);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+const axis = (index: number) => Array.from({ length: EMBEDDING_DIMENSIONS }, (_, i) => (i === index ? 1 : 0));
+let northChunks: { id: string; source: string }[] = [];
+let southChunks: { id: string; source: string }[] = [];
+
+beforeAll(async () => {
+  const load = async (tenantId: string) => (await admin.query<{ id: string; source_identity: string }>(
+    'SELECT id, source_identity FROM aegis.document_chunks WHERE tenant_id=$1 AND document_version=1 ORDER BY source_identity, position', [tenantId])).rows
+    .map((row) => ({ id: row.id, source: row.source_identity }));
+  northChunks = await load(north.tenantId);
+  southChunks = await load(south.tenantId);
+  if (northChunks.length < 2 || southChunks.length < 1) throw new Error('synthetic corpus is not seeded; run the documents suite first');
+  await admin.query('DELETE FROM aegis.chunk_embeddings WHERE tenant_id = ANY($1::uuid[])', [[north.tenantId, south.tenantId]]);
+  await admin.query("INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1,$2,$3,'operator'),($1,$2,$4,'operator')", [vectorIssuer, vectorSubject, north.tenantId, south.tenantId]);
+});
+
+afterAll(async () => {
+  await admin.query('DELETE FROM aegis.chunk_embeddings WHERE tenant_id = ANY($1::uuid[])', [[north.tenantId, south.tenantId]]);
+  await admin.query('DELETE FROM aegis.memberships WHERE issuer=$1 AND subject=$2', [vectorIssuer, vectorSubject]);
+});
+
+describe('vector retrieval with row-level tenant isolation', () => {
+  it('ranks by cosine similarity and never returns another tenant\'s chunks', async () => {
+    // Two distinct north chunks get orthogonal unit vectors; the south chunk gets the same vector as the first north chunk.
+    await admin.query(`INSERT INTO aegis.chunk_embeddings (chunk_id, tenant_id, model, model_digest, embedding) VALUES
+      ($1,$2,'nomic-embed-text',$3,$4::vector),($5,$2,'nomic-embed-text',$3,$6::vector),($7,$8,'nomic-embed-text',$3,$4::vector)`,
+    [northChunks[0].id, north.tenantId, EMBEDDING_MODEL_DIGEST, `[${axis(0).join(',')}]`, northChunks[1].id, `[${axis(1).join(',')}]`,
+      southChunks[0].id, south.tenantId]);
+    const hits = await runTenant(north.tenantId, (client) => retrieveByVector(client, north.tenantId, axis(0), 5));
+    expect(hits[0]).toMatchObject({ chunkId: northChunks[0].id, sourceIdentity: northChunks[0].source });
+    expect(hits.every((hit) => hit.sourceIdentity.startsWith('SYNTHETIC-NORTH-'))).toBe(true);
+    expect(hits.map((hit) => hit.chunkId)).not.toContain(southChunks[0].id);
+  });
+
+  it('refuses to store an embedding for a chunk that belongs to another tenant', async () => {
+    await expect(runTenant(north.tenantId, (client) => storeChunkEmbeddings(client, north.tenantId,
+      [{ chunkId: southChunks[0].id, vector: axis(5) }]))).rejects.toThrow();
+  });
+
+  it('stores embeddings for the caller\'s own chunks through the application role', async () => {
+    const stored = await runTenant(north.tenantId, (client) => storeChunkEmbeddings(client, north.tenantId,
+      [{ chunkId: northChunks[2].id, vector: axis(2) }]));
+    expect(stored).toBe(1);
+  });
+});
+
+describe.skipIf(!live)('paraphrase retrieval: lexical vs vector vs hybrid (live local embeddings, development evidence)', () => {
+  it('embeds the corpus with the local model and measures each approach', async () => {
+    // Embed every chunk through the application role, in batches of 8.
+    for (const tenant of [north, south]) {
+      const chunks = await admin.query<{ id: string; content: string }>(
+        'SELECT id, content FROM aegis.document_chunks WHERE tenant_id=$1 AND document_version=1 ORDER BY source_identity, position', [tenant.tenantId]);
+      for (let i = 0; i < chunks.rows.length; i += 8) {
+        const batch = chunks.rows.slice(i, i + 8);
+        const vectors = await embedTexts(batch.map((row) => row.content), 'search_document');
+        await runTenant(tenant.tenantId, (client) => storeChunkEmbeddings(client, tenant.tenantId,
+          batch.map((row, index) => ({ chunkId: row.id, vector: vectors[index]! }))));
+      }
+    }
+    const perQuery: { id: string; approach: string; ranked: string[]; recallAt5: number; reciprocalRank: number; ndcgAt5: number }[] = [];
+    for (const item of paraphraseCases) {
+      const tenant = item.tenant === 'north' ? north : south;
+      const [queryVector] = await embedTexts([item.query], 'search_query');
+      const relevant = new Set<string>(item.relevantSources);
+      const grades = new Map<string, number>(item.relevantSources.map((source) => [source, 1]));
+      const lexical = [...new Set((await runTenant(tenant.tenantId, (client) => retrieveDocumentChunks(client as unknown as PoolClient, tenant.tenantId, item.query)))
+        .map((row) => row.sourceIdentity))];
+      const vector = [...new Set((await runTenant(tenant.tenantId, (client) => retrieveByVector(client, tenant.tenantId, queryVector!, 10)))
+        .map((hit) => hit.sourceIdentity))];
+      const hybrid = reciprocalRankFusion([lexical, vector]);
+      for (const [approach, ranked] of [['lexical', lexical], ['vector', vector], ['hybrid', hybrid]] as const) {
+        perQuery.push({ id: item.id, approach, ranked, recallAt5: recallAtK(ranked, relevant, 5),
+          reciprocalRank: reciprocalRank(ranked, relevant), ndcgAt5: ndcgAtK(ranked, grades, 5) });
+      }
+    }
+    const summarise = (approach: string) => {
+      const rows = perQuery.filter((row) => row.approach === approach);
+      const mean = (key: 'recallAt5' | 'reciprocalRank' | 'ndcgAt5') => rows.reduce((sum, row) => sum + row[key], 0) / rows.length;
+      return { meanRecallAt5: mean('recallAt5'), meanReciprocalRank: mean('reciprocalRank'), meanNdcgAt5: mean('ndcgAt5') };
+    };
+    const evidence = {
+      datasetVersion: paraphraseDatasetVersion, model: EMBEDDING_MODEL, modelDigest: EMBEDDING_MODEL_DIGEST,
+      endpoint: 'http://127.0.0.1:11434', queries: paraphraseCases.length, fusion: 'reciprocal rank fusion, k0=60',
+      summary: { lexical: summarise('lexical'), vector: summarise('vector'), hybrid: summarise('hybrid') }, perQuery,
+    };
+    const evidencePath = process.env.AEGIS_RETRIEVAL_EVIDENCE;
+    if (evidencePath) writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+    expect(evidence.summary.vector.meanRecallAt5).toBeGreaterThanOrEqual(0);
+    expect(perQuery.every((row) => row.recallAt5 >= 0 && row.recallAt5 <= 1)).toBe(true);
+  }, 300_000);
+});
 });
