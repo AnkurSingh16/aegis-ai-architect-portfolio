@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { reservePrivateReport, writePrivateReport } from './private-report.js';
+import { replacePrivateReportAtomically, reservePrivateReport, writePrivateReport } from './private-report.js';
 
 describe('private one-time evaluation report storage', () => {
   it('creates a mode-0700 directory and mode-0600 report, and refuses overwrite', async () => {
@@ -140,6 +140,73 @@ describe('private one-time evaluation report storage', () => {
       expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
       expect((await readFile(reportPath)).byteLength).toBe(5);
       await expect(reservePrivateReport(reportPath)).rejects.toMatchObject({ code: 'EEXIST' });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('atomically replaces a reserved report with complete JSON and leaves no temporary files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aegis-eval-report-'));
+    const directory = join(root, 'private');
+    const reportPath = join(directory, 'result.json');
+    const reports = [{ status: 'in_progress', planned: 6 }, { status: 'completed', attempted: 6 }];
+    try {
+      const reservation = await reservePrivateReport(reportPath);
+      await reservation.close();
+      for (const report of reports) {
+        await replacePrivateReportAtomically(reportPath, report);
+        expect(JSON.parse(await readFile(reportPath, 'utf8'))).toEqual(report);
+        expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
+      }
+      expect(await readdir(directory)).toEqual(['result.json']);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps the previous complete report when serialization fails before any file change', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aegis-eval-report-'));
+    const directory = join(root, 'private');
+    const reportPath = join(directory, 'result.json');
+    try {
+      const reservation = await reservePrivateReport(reportPath);
+      await reservation.close();
+      await replacePrivateReportAtomically(reportPath, { status: 'in_progress', planned: 6 });
+      const previous = await readFile(reportPath, 'utf8');
+
+      await expect(replacePrivateReportAtomically(reportPath, { status: 'completed', count: 1n }))
+        .rejects.toThrow(TypeError);
+      expect(await readFile(reportPath, 'utf8')).toBe(previous);
+      expect(await readdir(directory)).toEqual(['result.json']);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('refuses to replace a symlinked reservation and never writes through to its target', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aegis-eval-report-'));
+    const directory = join(root, 'private');
+    const reportPath = join(directory, 'result.json');
+    const targetPath = join(directory, 'target.json');
+    const original = '{"status":"completed","synthetic":true}\n';
+    try {
+      const reservation = await reservePrivateReport(reportPath);
+      await reservation.close();
+      await rm(reportPath);
+      await writeFile(targetPath, original, { mode: 0o600 });
+      await symlink(targetPath, reportPath);
+
+      await expect(replacePrivateReportAtomically(reportPath, { status: 'in_progress' }))
+        .rejects.toThrow('reservation is invalid');
+      expect(await readFile(targetPath, 'utf8')).toBe(original);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('refuses atomic replacement when the report directory became group- or world-accessible', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aegis-eval-report-'));
+    const directory = join(root, 'private');
+    const reportPath = join(directory, 'result.json');
+    try {
+      const reservation = await reservePrivateReport(reportPath);
+      await reservation.close();
+      await chmod(directory, 0o755);
+      await expect(replacePrivateReportAtomically(reportPath, { status: 'in_progress' }))
+        .rejects.toThrow('permissions are unsafe');
+      expect(await readdir(directory)).toEqual(['result.json']);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
