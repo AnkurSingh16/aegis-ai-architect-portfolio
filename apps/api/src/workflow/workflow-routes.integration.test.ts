@@ -159,6 +159,23 @@ describe('GET /api/tenants/:tenantId/workflows/executions/:executionId', () => {
   });
 });
 
+describe('correlation id on the execution', () => {
+  it('records the caller correlation id at creation and returns it from the status route', async () => {
+    const created = await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key(), 'x-correlation-id': 'trace-7781' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+    const { executionId } = created.json() as { executionId: string };
+    const read = (await get(tenantNorth, `executions/${executionId}`, 'Bearer reader')).json() as { correlationId: string };
+    expect(read.correlationId).toBe('trace-7781');
+  });
+
+  it('keeps the first correlation id when a repeated key arrives with a different one', async () => {
+    const idKey = key();
+    const first = (await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': idKey, 'x-correlation-id': 'first-trace' }, { caseId: 'SYNTHETIC-LOGIN-001' })).json() as { executionId: string };
+    await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': idKey, 'x-correlation-id': 'second-trace' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+    const read = (await get(tenantNorth, `executions/${first.executionId}`, 'Bearer reader')).json() as { correlationId: string };
+    expect(read.correlationId).toBe('first-trace');
+  });
+});
+
 describe('GET /api/tenants/:tenantId/workflows/dead-letters', () => {
   it('lists failed executions for a member, newest first, with a bounded limit', async () => {
     const failedId = await createFailedExecution(tenantNorth);

@@ -73,6 +73,8 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND has_column_privilege(current_user, 'aegis.workflow_executions', 'lease_owner', 'UPDATE')
       AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'tenant_id', 'UPDATE')
       AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'idempotency_key', 'UPDATE')
+      AND has_column_privilege(current_user, 'aegis.workflow_executions', 'correlation_id', 'INSERT')
+      AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'correlation_id', 'UPDATE')
       AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'max_attempts', 'UPDATE')
       AND has_table_privilege(current_user, 'aegis.workflow_checkpoints', 'SELECT')
       AND NOT has_table_privilege(current_user, 'aegis.workflow_checkpoints', 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')

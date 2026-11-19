@@ -18,6 +18,8 @@ export interface ExecutionRow {
   readonly approvalId: string | null;
   readonly approvalGranted: boolean;
   readonly lastErrorClass: 'retryable' | 'permanent' | 'timeout' | 'cancelled' | null;
+  /** Set once, when the execution is created by the first request. Later requests with the same key do not change it. */
+  readonly correlationId: string | null;
 }
 
 export interface DeadLetterRow {
@@ -64,16 +66,17 @@ const assertUuid = (value: string, label: string): void => {
 interface ExecutionDbRow extends Record<string, unknown> {
   execution_id: string; state: ExecutionState; attempts: number; max_attempts: number; version: number;
   next_attempt_at: Date | null; cancel_requested: boolean; approval_id: string | null; approval_granted: boolean;
-  last_error_class: ExecutionRow['lastErrorClass']; updated_at: Date;
+  last_error_class: ExecutionRow['lastErrorClass']; updated_at: Date; correlation_id: string | null;
 }
 
 const SELECT_EXECUTION = `execution_id, state, attempts, max_attempts, version, next_attempt_at,
-  cancel_requested, approval_id, approval_granted, last_error_class`;
+  cancel_requested, approval_id, approval_granted, last_error_class, correlation_id`;
 
 const toRow = (row: ExecutionDbRow): ExecutionRow => ({
   executionId: row.execution_id, state: row.state, attempts: row.attempts, maxAttempts: row.max_attempts,
   version: row.version, nextAttemptAt: row.next_attempt_at, cancelRequested: row.cancel_requested,
   approvalId: row.approval_id, approvalGranted: row.approval_granted, lastErrorClass: row.last_error_class,
+  correlationId: row.correlation_id,
 });
 
 /** Approval column values for a transition. Keeps the current value unless the change says otherwise. */
@@ -89,14 +92,14 @@ function approvalColumns(change: ApprovalChange | undefined): { setId: boolean; 
 export function createDurableStore(runTenant: TenantRunner) {
   return {
     /** Idempotent on (tenant, key): a repeated request returns the existing execution with created = false. */
-    async createExecution(tenantId: string, idempotencyKey: string, maxAttempts: number): Promise<{ executionId: string; created: boolean }> {
+    async createExecution(tenantId: string, idempotencyKey: string, maxAttempts: number, correlationId: string | null = null): Promise<{ executionId: string; created: boolean }> {
       assertUuid(tenantId, 'tenantId');
       if (idempotencyKey.length === 0 || idempotencyKey.length > 200) throw new RangeError('idempotency key must be 1 to 200 characters');
       return runTenant(tenantId, async (client) => {
         const inserted = await client.query<{ execution_id: string }>(
-          `INSERT INTO aegis.workflow_executions (tenant_id, idempotency_key, state, max_attempts)
-           VALUES ($1, $2, 'pending', $3) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING execution_id`,
-          [tenantId, idempotencyKey, maxAttempts],
+          `INSERT INTO aegis.workflow_executions (tenant_id, idempotency_key, state, max_attempts, correlation_id)
+           VALUES ($1, $2, 'pending', $3, $4) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING execution_id`,
+          [tenantId, idempotencyKey, maxAttempts, correlationId],
         );
         if (inserted.rows[0]) return { executionId: inserted.rows[0].execution_id, created: true };
         const existing = await client.query<{ execution_id: string }>(

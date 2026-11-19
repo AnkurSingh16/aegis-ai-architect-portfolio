@@ -22,6 +22,8 @@ export interface TriageWorkflowInput {
   readonly args: Readonly<Record<string, unknown>>;
   readonly context: Omit<RequestContext, 'now'>;
   readonly owner: string;
+  /** Recorded on the execution when it is created. */
+  readonly correlationId?: string;
   readonly policy: RetryPolicy;
   readonly leaseMs: number;
   readonly timeoutMs: number;
@@ -37,7 +39,9 @@ export interface TriageWorkflowResult {
 }
 
 export async function runTriageWorkflow(input: TriageWorkflowInput): Promise<TriageWorkflowResult> {
-  const { executionId, created } = await input.store.createExecution(input.tenantId, input.idempotencyKey, input.policy.maxAttempts);
+  const { executionId, created } = await input.store.createExecution(
+    input.tenantId, input.idempotencyKey, input.policy.maxAttempts, input.correlationId ?? null,
+  );
   let output: unknown;
   let captured = false;
 

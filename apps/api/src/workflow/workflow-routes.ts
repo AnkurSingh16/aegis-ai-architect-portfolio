@@ -106,6 +106,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
         tenantId, userId: principal.subject, userScopes: ['cases:read'], agentId: 'triage-agent', requestedBy: principal.subject,
       },
       owner: `api-${request.id}`,
+      correlationId: correlations.get(request),
       policy, leaseMs: LEASE_MS, timeoutMs: TIMEOUT_MS, clock: () => new Date(),
     });
 
@@ -140,6 +141,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       maxAttempts: execution.maxAttempts,
       version: execution.version,
       lastErrorClass: execution.lastErrorClass,
+      correlationId: execution.correlationId,
       cancelRequested: execution.cancelRequested,
       approvalGranted: execution.approvalGranted,
       checkpoints,
