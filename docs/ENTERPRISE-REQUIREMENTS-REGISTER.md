@@ -75,8 +75,8 @@ This register tracks implementation status only. It does not record human approv
 - `workflow/durable-store.ts`: `lastErrorClass` on execution rows, `listDeadLetters` (bounded, tenant-scoped, read-only).
 - `workflow/workflow-routes.integration.test.ts`: 6 new real-PostgreSQL tests (13 in the file).
 
-## Known test-isolation issue (not fixed in this slice)
+## Test-isolation fix (documents and storage files)
 
-- `documents/documents.integration.test.ts` leaves North documents in the shared test database. `storage/storage.integration.test.ts` assumes it is the only writer, so when both run in one database, 4 of its assertions fail (extra rows). Alone, storage passes 25 of 25.
-- Verified on fresh disposable PostgreSQL 17 databases: all files except documents pass (87 tests); the documents file alone passes (12 passed, 1 skipped). The skipped test is the live local-embedding measurement, gated by an environment flag.
-- Fix (later): give each file its own database or clean its rows in `afterAll`.
+- Previously `documents/documents.integration.test.ts` left its catalog rows in the shared test database, so `storage/storage.integration.test.ts` failed 4 assertions when both ran together.
+- Its `afterAll` now deletes its own chunk embeddings, chunks and documents for the two test tenants and the catalog's source identities, then its memberships.
+- Verified on one fresh disposable PostgreSQL 17 database: full integration suite 99 passed, 1 skipped (the live local-embedding measurement, gated by an environment flag).

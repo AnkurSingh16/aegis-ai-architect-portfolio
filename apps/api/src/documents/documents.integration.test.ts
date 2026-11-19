@@ -64,7 +64,14 @@ beforeAll(async () => {
 }, 30000);
 
 afterAll(async () => {
+  // Remove the rows this file wrote, so later integration files in the same database see only their own data.
+  const tenants = [north.tenantId, south.tenantId];
+  const identities = syntheticDocuments.map((document) => document.sourceIdentity);
   try {
+    await admin.query(`DELETE FROM aegis.chunk_embeddings WHERE chunk_id IN (
+      SELECT id FROM aegis.document_chunks WHERE tenant_id = ANY($1::uuid[]) AND source_identity = ANY($2::text[]))`, [tenants, identities]);
+    await admin.query('DELETE FROM aegis.document_chunks WHERE tenant_id = ANY($1::uuid[]) AND source_identity = ANY($2::text[])', [tenants, identities]);
+    await admin.query('DELETE FROM aegis.documents WHERE tenant_id = ANY($1::uuid[]) AND source_identity = ANY($2::text[])', [tenants, identities]);
     await admin.query('DELETE FROM aegis.memberships WHERE issuer=$1 AND subject LIKE $2', [issuer, `${prefix}|%`]);
   } finally { await Promise.all([admin.end(), runtime.end(), ingestion.end()]); }
 });
