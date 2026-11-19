@@ -225,6 +225,34 @@ describe('isolated PostgreSQL tenant document boundary', () => {
     expect(score.precisionAtK.denominator).toBe(8);
   });
 
+  it('measures lexical retrieval on paraphrased queries (development evidence, not qualification)', async () => {
+    const { paraphraseCases, paraphraseDatasetVersion } = await import('./paraphrase-evaluation.js');
+    const { recallAtK, reciprocalRank, ndcgAtK } = await import('../retrieval/ranking-metrics.js');
+    const perQuery = [];
+    for (const item of paraphraseCases) {
+      const fixture = item.tenant === 'north' ? north : south;
+      const subject = item.tenant === 'north' ? northSubject : southSubject;
+      const rows = await withAuthenticatedTransaction(runtime, principal(subject), fixture.tenantId, 'read:cases',
+        (client) => retrieveDocumentChunks(client, fixture.tenantId, item.query));
+      const ranked = [...new Set(rows.map((row) => row.sourceIdentity))];
+      const relevant = new Set<string>(item.relevantSources);
+      const grades = new Map<string, number>(item.relevantSources.map((source) => [source, 1]));
+      perQuery.push({ id: item.id, retrieved: ranked.length, recallAt5: recallAtK(ranked, relevant, 5),
+        reciprocalRank: reciprocalRank(ranked, relevant), ndcgAt5: ndcgAtK(ranked, grades, 5) });
+    }
+    const mean = (key: 'recallAt5' | 'reciprocalRank' | 'ndcgAt5') => perQuery.reduce((sum, q) => sum + q[key], 0) / perQuery.length;
+    const summary = { datasetVersion: paraphraseDatasetVersion, queries: perQuery.length,
+      meanRecallAt5: mean('recallAt5'), meanReciprocalRank: mean('reciprocalRank'), meanNdcgAt5: mean('ndcgAt5'), perQuery };
+    const evidencePath = process.env.AEGIS_RETRIEVAL_EVIDENCE;
+    if (evidencePath) {
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(evidencePath, `${JSON.stringify(summary, null, 2)}\n`);
+    }
+    // Recorded as measurement, not a pass threshold: the purpose is to find where lexical retrieval fails.
+    expect(summary.queries).toBe(paraphraseCases.length);
+    expect(perQuery.every((q) => q.recallAt5 >= 0 && q.recallAt5 <= 1)).toBe(true);
+  });
+
   it('returns no chunks for an irrelevant query so the HTTP path can abstain without generation', async () => {
     const rows = await withAuthenticatedTransaction(runtime, principal(northSubject), north.tenantId, 'read:cases',
       (client) => retrieveDocumentChunks(client, north.tenantId, 'volcano spacecraft'));
