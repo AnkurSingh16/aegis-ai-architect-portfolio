@@ -102,3 +102,27 @@ Recorded before the run, from the code as committed, with no score from this hol
   are none, the result still supports only this holdout, because the author is the same and the sets are small.
 - **Known limit:** the South-domain negatives are written as close to the boundary as one author can make them, but they
   are still one author's judgement of what is "close". Recall on twelve questions moves about 8 points per question.
+
+## Third holdout result (one live run, at the pre-registered floor 0.70)
+
+Run once through the real loop, with the report written by the gated test. The floor was not changed after the run.
+
+- **Real loop, holdout v3 at 0.70:** 24 cases. Answer recall 9 of 12 = 0.75. Wrong-source answers 0. **False answers 0 of 12.**
+  Abstention precision 12 of 15 = 0.80 (3 answerable questions abstained).
+- **Sweep and real loop agree case by case** (the test asserts this).
+- **The three misses** (all abstained, with top score just under the floor): `hold3-answer-login-capture` 0.696,
+  `hold3-answer-mfa-policy-bot` 0.700 (scored 0.6998), `hold3-answer-recovery-never-request` 0.691.
+- **Closest unanswerable score:** `hold3-abstain-south-outage-update` at 0.658. The other South-domain negatives scored
+  0.602 to 0.645. Off-topic questions scored 0.468 to 0.560.
+- **Calibration v2 at 0.70** (for comparison, as the rule chose): recall 20 of 22, false answers 0 of 22.
+
+**Stop condition met:** no false answers at 0.70, so the floor is not rejected by this holdout. The result supports only
+this holdout. It was written by the same author, and 12 answerable questions move recall by about 8 points each.
+
+**What this run does not show:** three answerable questions score within 0.01 of the floor. Any floor from about 0.66 up
+to 0.69 would have answered them without answering the South-domain negatives on this holdout. That observation was made
+after the run, so it is not a basis for choosing a new floor. A future floor needs its own pre-registered set.
+
+**The holdout is now spent.** v3 has been seen, so it cannot choose or test a floor again. Holdouts v2 and v3 are both
+spent. The C4 floor is still not settled as a general value. It is settled only for the current corpus and this rule, pending
+an independent set.
