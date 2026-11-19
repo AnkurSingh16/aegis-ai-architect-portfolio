@@ -47,3 +47,27 @@ describe('chooseFloor', () => {
     expect(rows[1]!.report.falseAbstentions).toBe(1);
   });
 });
+
+describe('chooseFloor exact ties', () => {
+  it('treats values that are equal as fractions as a tie, even when floating point disagrees in the last digit', () => {
+    // Floor 0.5: recall 3/3, false answers 1/3, value 1 - 1/3. Floor 0.7: recall 2/3, false answers 0, value 2/3.
+    // The two are equal as fractions but differ by one unit in the last place in floating point. The tie goes to 0.7.
+    const threeAnswerable: LabelledCase[] = [
+      { id: 'a1', question: 'q', expected: { kind: 'answer', sourceId: 'DOC-A1' } },
+      { id: 'a2', question: 'q', expected: { kind: 'answer', sourceId: 'DOC-A2' } },
+      { id: 'a3', question: 'q', expected: { kind: 'answer', sourceId: 'DOC-A3' } },
+      { id: 'u1', question: 'q', expected: { kind: 'abstain' } },
+      { id: 'u2', question: 'q', expected: { kind: 'abstain' } },
+      { id: 'u3', question: 'q', expected: { kind: 'abstain' } },
+    ];
+    const evidence = [
+      [{ sourceId: 'DOC-A1', score: 0.9 }],
+      [{ sourceId: 'DOC-A2', score: 0.9 }],
+      [{ sourceId: 'DOC-A3', score: 0.6 }],
+      [{ sourceId: 'DOC-X', score: 0.6 }],
+      [],
+      [],
+    ];
+    expect(chooseFloor(threeAnswerable, evidence, [0.5, 0.7]).floor).toBe(0.7);
+  });
+});

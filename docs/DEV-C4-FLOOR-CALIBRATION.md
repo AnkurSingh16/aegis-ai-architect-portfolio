@@ -50,3 +50,38 @@ answers 0 of 7, abstention precision 7 of 8. The earlier 0.5 floor was 8 of 8 re
   and the floor sits close to the edge of the answerable scores, so one question shifts recall by 12 points. The
   boundary is sensitive. A larger, independently written set is needed before the floor is treated as settled.
 - The holdout was run once, after the floor was fixed. Any later change to the floor would need a new holdout.
+
+## Second round (pre-registered before the run)
+- **Calibration v2** (`calibrationCasesV2`, `apps/api/src/rag/floor-cases-v2.ts`): the first calibration set plus 12
+  answerable and 12 unanswerable additions. 22 answerable and 22 unanswerable in total. Used only to choose the floor,
+  with the same rule and the same candidates (0.50 to 0.80).
+- **Holdout v2** (`holdoutCasesV2`): 12 answerable and 12 unanswerable, fresh. Used once, with the floor chosen from calibration v2.
+- The first holdout and the original 15 are reference only.
+- Still one author. The additions are not independent of the first round or of the corpus wording.
+- Recorded here before the run: the rule, the sets and the run count (one).
+
+## Second round result (one live run)
+
+**Calibration v2, exact counts** (answerable correct / unanswerable false answers): 0.65 gives 21/22 and 2/22; 0.66 gives
+21/22 and 1/22; 0.68, 0.69 and 0.70 each give 20/22 and 0/22. As fractions, 0.66, 0.68, 0.69 and 0.70 all score 20/22
+on recall minus false-answer rate. The rule breaks ties toward the higher floor, so the rule gives **0.70**.
+
+**What the run actually did:** the code chose **0.66**. Floating-point arithmetic put 0.66 one unit above the others,
+so the tie was missed. This is a bug in the tie check, not a result. It is fixed in `floor-calibration.ts` (tolerance
+1e-9), with a unit test built from the same case (`chooseFloor exact ties`).
+
+**Holdout v2, through the real loop at the code's choice (0.66), run once:**
+- Answer recall 11 of 12 = 0.917. Wrong-source answers 0 (one false answer and no wrong-source answers are reported above).
+- False answers 1 of 12 = 0.083. The miss was `hold2-abstain-south-degraded-review`, a South question, answered from a
+  North document with top score 0.665.
+- Abstention precision 11 of 12.
+
+**The same run's holdout sweep at the rule's floor (0.70):** 9 of 12 answerable correct (recall 0.75) and 0 of 12 false
+answers. That number is in the output of this run, so it has now been seen.
+
+**The holdout is spent.** It has been used to inspect two floors, so it is no longer clean for choosing one. The gated
+test will rerun the same holdout if run again. Any further decision needs a new holdout.
+
+**Decision still open.** The rule, applied correctly, gives 0.70: no false answers, recall 0.75 on this holdout. The code
+gave 0.66: recall 0.92, one false answer. Both are inside the uncertainty of sets this small. The owner should choose,
+or a new holdout should settle it.

@@ -36,7 +36,10 @@ export function chooseFloor(cases: readonly LabelledCase[], evidenceByCase: read
   let bestValue = -Infinity;
   for (const row of rows) {
     const value = (row.report.answerRecall ?? 0) - (row.report.falseAnswerRate ?? 0);
-    if (value > bestValue || (value === bestValue && best !== undefined && row.floor > best.floor)) {
+    // Ratios of small counts are not exact in floating point, so two equal values can differ by one unit in the last place.
+    // Compare with a tolerance, so that exact ties still go to the higher floor.
+    const tolerance = 1e-9;
+    if (value > bestValue + tolerance || (Math.abs(value - bestValue) <= tolerance && best !== undefined && row.floor > best.floor)) {
       best = row;
       bestValue = value;
     }

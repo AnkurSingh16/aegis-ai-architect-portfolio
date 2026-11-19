@@ -15,7 +15,8 @@ import { storeChunkEmbeddings } from '../retrieval/vector-retrieval.js';
 import { answerWithSelfCorrection, type Evidence } from './self-correcting-answer.js';
 import { vectorEvidenceRetriever, type ClientRunner } from './document-evidence.js';
 import { abstentionCases, type LabelledCase } from './abstention-cases.js';
-import { calibrationCases, holdoutCases } from './floor-cases.js';
+import { holdoutCases } from './floor-cases.js';
+import { calibrationCasesV2, holdoutCasesV2 } from './floor-cases-v2.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
 import { chooseFloor, outcomeAtFloor, sweepFloors, type RankedEvidence } from './floor-calibration.js';
 
@@ -100,15 +101,19 @@ async function realLoop(cases: readonly LabelledCase[], floor: number): Promise<
 
 describe.skipIf(!live)('similarity floor: calibration, then one holdout run', () => {
   it('chooses the floor on calibration and tests it once on the holdout through the real loop', async () => {
-    const calEvidence = await rankedEvidence(calibrationCases);
-    const { floor, rows } = chooseFloor(calibrationCases, calEvidence);
-    const holdEvidence = await rankedEvidence(holdoutCases);
-    const holdSweep = sweepFloors(holdoutCases, holdEvidence);
+    const calEvidence = await rankedEvidence(calibrationCasesV2);
+    const { floor, rows } = chooseFloor(calibrationCasesV2, calEvidence);
+    const holdEvidence = await rankedEvidence(holdoutCasesV2);
+    const holdSweep = sweepFloors(holdoutCasesV2, holdEvidence);
 
-    const holdLoop = await realLoop(holdoutCases, floor);
+    const holdLoop = await realLoop(holdoutCasesV2, floor);
     // The sweep is exact for this generator; the real loop must agree case by case.
     holdLoop.forEach((outcome, index) => expect(outcome).toEqual(outcomeAtFloor(holdEvidence[index]!, floor)));
-    const holdReport = scoreAbstentionCases(holdoutCases, holdLoop);
+    const holdReport = scoreAbstentionCases(holdoutCasesV2, holdLoop);
+
+    // Reference only: the first holdout was already observed, so it is not a clean test any more.
+    const firstHoldoutLoop = await realLoop(holdoutCases, floor);
+    const firstHoldoutReport = scoreAbstentionCases(holdoutCases, firstHoldoutLoop);
 
     const referenceLoop = await realLoop(abstentionCases, floor);
     const referenceReport = scoreAbstentionCases(abstentionCases, referenceLoop);
@@ -119,10 +124,11 @@ describe.skipIf(!live)('similarity floor: calibration, then one holdout run', ()
         calibrationSweep: rows.map((row) => ({ floor: row.floor, ...row.report })),
         holdoutSweep: holdSweep.map((row) => ({ floor: row.floor, ...row.report })),
         holdoutRealLoop: holdReport,
-        holdoutDetail: holdoutCases.map((labelled, index) => ({ id: labelled.id, expected: labelled.expected, outcome: holdLoop[index], topScore: holdEvidence[index]?.[0]?.score ?? null })),
+        holdoutDetail: holdoutCasesV2.map((labelled, index) => ({ id: labelled.id, expected: labelled.expected, outcome: holdLoop[index], topScore: holdEvidence[index]?.[0]?.score ?? null })),
+        firstHoldoutAtChosenFloor_seenBefore: firstHoldoutReport,
         originalFifteenAtChosenFloor_seenBefore: referenceReport,
       }, null, 2)}\n`);
     }
-    expect(holdReport.total).toBe(holdoutCases.length);
+    expect(holdReport.total).toBe(holdoutCasesV2.length);
   });
 });
