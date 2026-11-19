@@ -111,7 +111,8 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
     });
 
     console.info(JSON.stringify({
-      event: 'workflow_request', requestId: request.id, correlationId: correlations.get(request), outcome: 'success', created: result.created,
+      event: 'workflow_request', requestId: request.id, correlationId: correlations.get(request), outcome: 'success',
+      executionId: result.executionId, created: result.created, driverStatus: result.driver.status,
     }));
     return reply.code(result.created ? 201 : 200).send({
       executionId: result.executionId,

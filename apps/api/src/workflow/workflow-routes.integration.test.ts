@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { createDatabasePool } from '../storage/database.js';
 import { migrateDatabase } from '../storage/migrations.js';
@@ -165,6 +165,20 @@ describe('correlation id on the execution', () => {
     const { executionId } = created.json() as { executionId: string };
     const read = (await get(tenantNorth, `executions/${executionId}`, 'Bearer reader')).json() as { correlationId: string };
     expect(read.correlationId).toBe('trace-7781');
+  });
+
+  it('logs the correlation id, execution id and driver status for a successful triage request', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      const response = await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key(), 'x-correlation-id': 'log-trace-9' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+      const { executionId, outcome } = response.json() as { executionId: string; outcome: string };
+      const lines = info.mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+      expect(lines).toContainEqual(expect.objectContaining({
+        event: 'workflow_request', outcome: 'success', correlationId: 'log-trace-9', executionId, driverStatus: outcome,
+      }));
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it('keeps the first correlation id when a repeated key arrives with a different one', async () => {
