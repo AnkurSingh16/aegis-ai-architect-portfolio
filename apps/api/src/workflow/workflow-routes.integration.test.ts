@@ -167,6 +167,23 @@ describe('correlation id on the execution', () => {
     expect(read.correlationId).toBe('trace-7781');
   });
 
+  it('logs the correlation id on the status and dead-letter routes', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      const created = await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key(), 'x-correlation-id': 'get-trace-3' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+      const { executionId } = created.json() as { executionId: string };
+      await get(tenantNorth, `executions/${executionId}`, 'Bearer reader', { 'x-correlation-id': 'get-trace-4' });
+      await get(tenantNorth, `executions/${randomUUID()}`, 'Bearer reader', { 'x-correlation-id': 'get-trace-5' });
+      await get(tenantNorth, 'dead-letters', 'Bearer reader', { 'x-correlation-id': 'get-trace-6' });
+      const lines = info.mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+      expect(lines).toContainEqual(expect.objectContaining({ route: 'execution_status', outcome: 'success', correlationId: 'get-trace-4', executionId }));
+      expect(lines).toContainEqual(expect.objectContaining({ route: 'execution_status', outcome: 'not_found', correlationId: 'get-trace-5' }));
+      expect(lines).toContainEqual(expect.objectContaining({ route: 'dead_letters', outcome: 'success', correlationId: 'get-trace-6' }));
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('logs the correlation id, execution id and driver status for a successful triage request', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     try {

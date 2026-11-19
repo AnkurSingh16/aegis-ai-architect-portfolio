@@ -133,8 +133,12 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
     const { tenantId, executionId } = request.params;
     await authorise(request, tenantId);
     const found = await store.load(executionId, tenantId);
-    if (!found) return reply.code(404).send({ error: 'Execution not found.' });
+    if (!found) {
+      console.info(JSON.stringify({ event: 'workflow_request', route: 'execution_status', requestId: request.id, correlationId: correlations.get(request), outcome: 'not_found' }));
+      return reply.code(404).send({ error: 'Execution not found.' });
+    }
     const { execution, checkpoints } = found;
+    console.info(JSON.stringify({ event: 'workflow_request', route: 'execution_status', requestId: request.id, correlationId: correlations.get(request), outcome: 'success', executionId, state: execution.state }));
     return reply.send({
       executionId: execution.executionId,
       state: execution.state,
@@ -161,6 +165,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
     const tenantId = request.params.tenantId;
     await authorise(request, tenantId);
     const rows = await store.listDeadLetters(tenantId, request.query.limit ?? DEFAULT_DEAD_LETTER_LIMIT);
+    console.info(JSON.stringify({ event: 'workflow_request', route: 'dead_letters', requestId: request.id, correlationId: correlations.get(request), outcome: 'success', count: rows.length }));
     return reply.send({
       items: rows.map((row) => ({
         executionId: row.executionId,
