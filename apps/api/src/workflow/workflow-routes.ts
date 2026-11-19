@@ -13,6 +13,10 @@ const uuid = { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-
 const policy = { maxAttempts: 3, baseDelayMs: 1000, maxDelayMs: 8000 } as const;
 const LEASE_MS = 30_000;
 const TIMEOUT_MS = 5_000;
+const DEFAULT_DEAD_LETTER_LIMIT = 20;
+
+/** A caller-supplied correlation id is echoed and logged only if it is short and printable. Anything else is replaced. */
+const CORRELATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** Runs one operation in its own transaction with the tenant set for row-level security. */
 function tenantRunner(pool: Pool) {
@@ -35,19 +39,38 @@ function tenantRunner(pool: Pool) {
 
 interface TriageBody { caseId: (typeof syntheticCases)[number]['id'] }
 interface TenantParams { tenantId: string }
+interface ExecutionParams extends TenantParams { executionId: string }
+interface DeadLetterQuery { limit?: number }
 
 /**
- * POST /api/tenants/:tenantId/workflows/triage
- * Authenticated, membership-checked, idempotent (Idempotency-Key header). Runs the triage tool as a durable execution.
+ * Workflow routes. Every route requires a bearer token, the read:cases scope and tenant membership.
+ * - POST /api/tenants/:tenantId/workflows/triage            run the triage tool once per Idempotency-Key
+ * - GET  /api/tenants/:tenantId/workflows/executions/:id    execution state and checkpoints
+ * - GET  /api/tenants/:tenantId/workflows/dead-letters      failed executions, newest first (read-only)
+ * Each response carries x-correlation-id: the caller's valid id, or the request id.
  */
 export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool: Pool, verify: VerifyToken): Promise<void> {
   const principals = new WeakMap<FastifyRequest, VerifiedPrincipal>();
+  const correlations = new WeakMap<FastifyRequest, string>();
   const runTenant = tenantRunner(pool);
   const store = createDurableStore(runTenant);
   const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant));
 
+  /** Authenticates, checks the scope and checks membership for the tenant in the path. Throws AuthorizationError otherwise. */
+  async function authorise(request: FastifyRequest, tenantId: string): Promise<VerifiedPrincipal> {
+    const principal = principals.get(request);
+    if (!principal) throw new AuthorizationError(401);
+    requireScope(principal, 'read:cases');
+    await withAuthenticatedTransaction(pool, principal, tenantId, 'read:cases', async () => undefined);
+    return principal;
+  }
+
   app.addHook('onRequest', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
+    const supplied = request.headers['x-correlation-id'];
+    const correlationId = typeof supplied === 'string' && CORRELATION_ID.test(supplied) ? supplied : request.id;
+    correlations.set(request, correlationId);
+    reply.header('x-correlation-id', correlationId);
     principals.set(request, await verify(request.headers.authorization));
   });
 
@@ -55,7 +78,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
     const status = error instanceof AuthorizationError ? error.status
       : typeof error === 'object' && error !== null && 'statusCode' in error && (error as { statusCode?: number }).statusCode === 400 ? 400
       : 503;
-    console.error(JSON.stringify({ event: 'workflow_request', requestId: request.id, outcome: 'failure', status }));
+    console.error(JSON.stringify({ event: 'workflow_request', requestId: request.id, correlationId: correlations.get(request), outcome: 'failure', status }));
     if (status === 401) reply.header('WWW-Authenticate', 'Bearer');
     const message = status === 401 ? 'Authentication required.' : status === 403 ? 'Access denied.'
       : status === 400 ? 'Invalid workflow request.' : 'Workflow storage is unavailable. Please retry.';
@@ -72,12 +95,8 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       },
     },
   }, async (request, reply) => {
-    const principal = principals.get(request);
-    if (!principal) throw new AuthorizationError(401);
     const tenantId = request.params.tenantId;
-    requireScope(principal, 'read:cases');
-    // Membership check in its own transaction. Only then is the tenant context used for the workflow.
-    await withAuthenticatedTransaction(pool, principal, tenantId, 'read:cases', async () => undefined);
+    const principal = await authorise(request, tenantId);
 
     const idempotencyKey = String(request.headers['idempotency-key']).toLowerCase();
     const result = await runTriageWorkflow({
@@ -90,12 +109,63 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       policy, leaseMs: LEASE_MS, timeoutMs: TIMEOUT_MS, clock: () => new Date(),
     });
 
-    console.info(JSON.stringify({ event: 'workflow_request', requestId: request.id, outcome: 'success', created: result.created }));
+    console.info(JSON.stringify({
+      event: 'workflow_request', requestId: request.id, correlationId: correlations.get(request), outcome: 'success', created: result.created,
+    }));
     return reply.code(result.created ? 201 : 200).send({
       executionId: result.executionId,
       created: result.created,
       outcome: result.driver.status,
       ...(result.output !== undefined ? { output: result.output } : {}),
+    });
+  });
+
+  app.get<{ Params: ExecutionParams }>('/api/tenants/:tenantId/workflows/executions/:executionId', {
+    schema: {
+      params: {
+        type: 'object', required: ['tenantId', 'executionId'], additionalProperties: false,
+        properties: { tenantId: uuid, executionId: uuid },
+      },
+    },
+  }, async (request, reply) => {
+    const { tenantId, executionId } = request.params;
+    await authorise(request, tenantId);
+    const found = await store.load(executionId, tenantId);
+    if (!found) return reply.code(404).send({ error: 'Execution not found.' });
+    const { execution, checkpoints } = found;
+    return reply.send({
+      executionId: execution.executionId,
+      state: execution.state,
+      attempts: execution.attempts,
+      maxAttempts: execution.maxAttempts,
+      version: execution.version,
+      lastErrorClass: execution.lastErrorClass,
+      cancelRequested: execution.cancelRequested,
+      approvalGranted: execution.approvalGranted,
+      checkpoints,
+    });
+  });
+
+  app.get<{ Params: TenantParams; Querystring: DeadLetterQuery }>('/api/tenants/:tenantId/workflows/dead-letters', {
+    schema: {
+      params: { type: 'object', required: ['tenantId'], additionalProperties: false, properties: { tenantId: uuid } },
+      querystring: {
+        type: 'object', additionalProperties: false,
+        properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } },
+      },
+    },
+  }, async (request, reply) => {
+    const tenantId = request.params.tenantId;
+    await authorise(request, tenantId);
+    const rows = await store.listDeadLetters(tenantId, request.query.limit ?? DEFAULT_DEAD_LETTER_LIMIT);
+    return reply.send({
+      items: rows.map((row) => ({
+        executionId: row.executionId,
+        attempts: row.attempts,
+        maxAttempts: row.maxAttempts,
+        lastErrorClass: row.lastErrorClass,
+        updatedAt: row.updatedAt.toISOString(),
+      })),
     });
   });
 }

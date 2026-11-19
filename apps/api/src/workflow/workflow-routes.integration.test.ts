@@ -6,6 +6,8 @@ import { createDatabasePool } from '../storage/database.js';
 import { migrateDatabase } from '../storage/migrations.js';
 import { AuthorizationError, type VerifiedPrincipal } from '../auth/token.js';
 import { registerProtectedWorkflowRoutes } from './workflow-routes.js';
+import { createDurableStore } from './durable-store.js';
+import type { TenantQueryable } from '../security/tool-approval-store.js';
 
 // Real PostgreSQL + Fastify injection tests for the authenticated triage workflow route.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
@@ -35,6 +37,39 @@ const verify = async (authorization: string | undefined): Promise<VerifiedPrinci
 const key = () => randomUUID();
 const post = (tenant: string, headers: Record<string, string>, body: unknown) =>
   app.inject({ method: 'POST', url: `/api/tenants/${tenant}/workflows/triage`, headers: { 'content-type': 'application/json', ...headers }, payload: body as object });
+const get = (tenant: string, path: string, authorization: string, headers: Record<string, string> = {}) =>
+  app.inject({ method: 'GET', url: `/api/tenants/${tenant}/workflows/${path}`, headers: { authorization, ...headers } });
+
+// Same tenant-scoped transaction as the route, used here only to drive a failure through the durable store.
+const runTenant = async <T>(tenantId: string, operation: (client: TenantQueryable) => Promise<T>): Promise<T> => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('aegis.tenant_id', $1, true)", [tenantId]);
+    const result = await operation(client as unknown as TenantQueryable);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/** Creates one execution and drives it to 'failed' through the store, the only path that can reach that state. */
+async function createFailedExecution(tenantId: string): Promise<string> {
+  const store = createDurableStore(runTenant);
+  const { executionId } = await store.createExecution(tenantId, key(), 3);
+  const now = new Date();
+  const claimed = await store.claim(executionId, tenantId, 'test-owner', now, new Date(now.getTime() + 30_000));
+  if (!claimed) throw new Error('test execution was not claimable');
+  await store.transition({
+    executionId, tenantId, owner: 'test-owner', expectedVersion: claimed.version, state: 'failed', attempts: 1,
+    nextAttemptAt: null, lastErrorClass: 'permanent', keepLease: false, leaseExpiresAt: now, now,
+  });
+  return executionId;
+}
 
 beforeAll(async () => {
   await migrateDatabase(adminUrl, process.env.DATABASE_APP_PASSWORD ?? '', process.env.DATABASE_INGEST_PASSWORD ?? '');
@@ -98,5 +133,67 @@ describe('POST /api/tenants/:tenantId/workflows/triage', () => {
     expect(b.executionId).toBe(a.executionId);
     expect(b.outcome).toBe('not_claimable');
     expect(b.output).toBeUndefined();
+  });
+});
+
+describe('GET /api/tenants/:tenantId/workflows/executions/:executionId', () => {
+  it('returns state and checkpoints for a member, and refuses other callers', async () => {
+    const created = (await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key() }, { caseId: 'SYNTHETIC-LOGIN-001' })).json() as { executionId: string };
+    const read = await get(tenantNorth, `executions/${created.executionId}`, 'Bearer reader');
+    expect(read.statusCode).toBe(200);
+    const body = read.json() as { state: string; attempts: number; checkpoints: { seq: number; state: string }[]; approvalGranted: boolean };
+    expect(body).toMatchObject({ state: 'succeeded', attempts: 1, approvalGranted: false });
+    expect(body.checkpoints.map((c) => c.seq)).toEqual([...body.checkpoints.map((c) => c.seq)].sort((a, b) => a - b));
+    expect(body.checkpoints.at(-1)?.state).toBe('succeeded');
+
+    expect((await get(tenantNorth, `executions/${created.executionId}`, 'Bearer stranger')).statusCode).toBe(403);
+    expect((await get(tenantNorth, `executions/${created.executionId}`, 'Bearer no-scope')).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: `/api/tenants/${tenantNorth}/workflows/executions/${created.executionId}` })).statusCode).toBe(401);
+  });
+
+  it('does not reveal an execution from another tenant, and returns 404 for an unknown id', async () => {
+    const created = (await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key() }, { caseId: 'SYNTHETIC-LOGIN-001' })).json() as { executionId: string };
+    // The reader is a member of North only. Asking South for North's execution is refused by membership.
+    expect((await get(tenantSouth, `executions/${created.executionId}`, 'Bearer reader')).statusCode).toBe(403);
+    expect((await get(tenantNorth, `executions/${randomUUID()}`, 'Bearer reader')).statusCode).toBe(404);
+  });
+});
+
+describe('GET /api/tenants/:tenantId/workflows/dead-letters', () => {
+  it('lists failed executions for a member, newest first, with a bounded limit', async () => {
+    const failedId = await createFailedExecution(tenantNorth);
+    const response = await get(tenantNorth, 'dead-letters?limit=5', 'Bearer reader');
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { items: { executionId: string; lastErrorClass: string; attempts: number }[] };
+    expect(body.items.length).toBeLessThanOrEqual(5);
+    expect(body.items).toContainEqual(expect.objectContaining({ executionId: failedId, lastErrorClass: 'permanent', attempts: 1 }));
+    expect(body.items.every((item) => item.executionId !== undefined)).toBe(true);
+  });
+
+  it('keeps dead letters tenant-scoped and rejects out-of-range limits', async () => {
+    const southFailed = await createFailedExecution(tenantSouth);
+    const northView = (await get(tenantNorth, 'dead-letters', 'Bearer reader')).json() as { items: { executionId: string }[] };
+    expect(northView.items.map((i) => i.executionId)).not.toContain(southFailed);
+    expect((await get(tenantSouth, 'dead-letters', 'Bearer reader')).statusCode).toBe(403);
+    expect((await get(tenantNorth, 'dead-letters?limit=0', 'Bearer reader')).statusCode).toBe(400);
+    expect((await get(tenantNorth, 'dead-letters?limit=101', 'Bearer reader')).statusCode).toBe(400);
+  });
+});
+
+describe('correlation ids', () => {
+  it('echoes a valid caller id on success and on failure', async () => {
+    const ok = await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key(), 'x-correlation-id': 'case-review.42' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+    expect(ok.headers['x-correlation-id']).toBe('case-review.42');
+    const denied = await post(tenantNorth, { authorization: 'Bearer stranger', 'idempotency-key': key(), 'x-correlation-id': 'case-review.43' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+    expect(denied.headers['x-correlation-id']).toBe('case-review.43');
+  });
+
+  it('replaces an unsafe caller id with the request id instead of echoing it', async () => {
+    const unsafe = 'bad id "with quotes"';
+    const response = await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key(), 'x-correlation-id': unsafe }, { caseId: 'SYNTHETIC-LOGIN-001' });
+    const header = response.headers['x-correlation-id'];
+    expect(typeof header).toBe('string');
+    expect(header).not.toBe(unsafe);
+    expect(header).toMatch(/^[A-Za-z0-9._:-]{1,128}$/);
   });
 });

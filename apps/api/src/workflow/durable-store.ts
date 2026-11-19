@@ -17,6 +17,15 @@ export interface ExecutionRow {
   readonly cancelRequested: boolean;
   readonly approvalId: string | null;
   readonly approvalGranted: boolean;
+  readonly lastErrorClass: 'retryable' | 'permanent' | 'timeout' | 'cancelled' | null;
+}
+
+export interface DeadLetterRow {
+  readonly executionId: string;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly lastErrorClass: 'retryable' | 'permanent' | 'timeout' | 'cancelled' | null;
+  readonly updatedAt: Date;
 }
 
 export interface CheckpointRow {
@@ -55,15 +64,16 @@ const assertUuid = (value: string, label: string): void => {
 interface ExecutionDbRow extends Record<string, unknown> {
   execution_id: string; state: ExecutionState; attempts: number; max_attempts: number; version: number;
   next_attempt_at: Date | null; cancel_requested: boolean; approval_id: string | null; approval_granted: boolean;
+  last_error_class: ExecutionRow['lastErrorClass']; updated_at: Date;
 }
 
 const SELECT_EXECUTION = `execution_id, state, attempts, max_attempts, version, next_attempt_at,
-  cancel_requested, approval_id, approval_granted`;
+  cancel_requested, approval_id, approval_granted, last_error_class`;
 
 const toRow = (row: ExecutionDbRow): ExecutionRow => ({
   executionId: row.execution_id, state: row.state, attempts: row.attempts, maxAttempts: row.max_attempts,
   version: row.version, nextAttemptAt: row.next_attempt_at, cancelRequested: row.cancel_requested,
-  approvalId: row.approval_id, approvalGranted: row.approval_granted,
+  approvalId: row.approval_id, approvalGranted: row.approval_granted, lastErrorClass: row.last_error_class,
 });
 
 /** Approval column values for a transition. Keeps the current value unless the change says otherwise. */
@@ -224,6 +234,28 @@ export function createDurableStore(runTenant: TenantRunner) {
           [executionId, tenantId, row.version, nextState, row.attempts],
         );
         return true;
+      });
+    },
+
+    /**
+     * Read-only view of failed executions for one tenant, newest first. There is no replay or requeue here:
+     * a dead letter is a record for an operator to inspect.
+     */
+    async listDeadLetters(tenantId: string, limit: number): Promise<DeadLetterRow[]> {
+      assertUuid(tenantId, 'tenantId');
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError('limit must be an integer from 1 to 100');
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<ExecutionDbRow>(
+          `SELECT ${SELECT_EXECUTION}, updated_at FROM aegis.workflow_executions
+            WHERE tenant_id = $1 AND state = 'failed'
+            ORDER BY updated_at DESC, execution_id
+            LIMIT $2`,
+          [tenantId, limit],
+        );
+        return result.rows.map((row) => ({
+          executionId: row.execution_id, attempts: row.attempts, maxAttempts: row.max_attempts,
+          lastErrorClass: row.last_error_class, updatedAt: row.updated_at,
+        }));
       });
     },
 
