@@ -18,7 +18,7 @@
     "test:integration": "npm run test:integration -w apps/api"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^10.0.1",
     "concurrently": "^10.0.6",
     "eslint": "^9.0.0",
     "globals": "^17.13.0",
