@@ -85,3 +85,20 @@ test will rerun the same holdout if run again. Any further decision needs a new 
 **Decision still open.** The rule, applied correctly, gives 0.70: no false answers, recall 0.75 on this holdout. The code
 gave 0.66: recall 0.92, one false answer. Both are inside the uncertainty of sets this small. The owner should choose,
 or a new holdout should settle it.
+
+## Third holdout (pre-registered before any run)
+
+Recorded before the run, from the code as committed, with no score from this holdout seen.
+
+- **Floor chosen:** 0.70. This is the fixed rule (maximise answer recall minus false-answer rate, ties to the higher
+  floor, tolerance 1e-9) applied to `calibrationCasesV2`, the set already used to choose in the second round. The code's
+  earlier 0.66 came from the float bug, not from the rule, so 0.70 is the rule's answer.
+- **Holdout v3** (`holdoutCasesV3`, `apps/api/src/rag/floor-cases-v3.ts`): 12 answerable (three per North document) and 12
+  unanswerable. Six unanswerable are off-topic. Six are South-domain questions, which the North tenant must not answer.
+  Fresh: a unit test checks that no question wording repeats any earlier calibration or holdout set.
+- **Run count: one.** The gated integration test now points at `holdoutCasesV3`. It runs the real loop once at 0.70.
+- **Stop condition, written now:** the reported counts are the result. The floor is not changed after seeing them. If
+  there is any false answer at 0.70, the floor is not accepted for C4 and the register keeps the floor unsettled. If there
+  are none, the result still supports only this holdout, because the author is the same and the sets are small.
+- **Known limit:** the South-domain negatives are written as close to the boundary as one author can make them, but they
+  are still one author's judgement of what is "close". Recall on twelve questions moves about 8 points per question.
