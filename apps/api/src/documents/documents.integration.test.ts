@@ -228,7 +228,7 @@ describe('isolated PostgreSQL tenant document boundary', () => {
   it('measures lexical retrieval on paraphrased queries (development evidence, not qualification)', async () => {
     const { paraphraseCases, paraphraseDatasetVersion } = await import('./paraphrase-evaluation.js');
     const { recallAtK, reciprocalRank, ndcgAtK } = await import('../retrieval/ranking-metrics.js');
-    const perQuery = [];
+    const perQuery: { id: string; retrieved: number; recallAt5: number; reciprocalRank: number; ndcgAt5: number }[] = [];
     for (const item of paraphraseCases) {
       const fixture = item.tenant === 'north' ? north : south;
       const subject = item.tenant === 'north' ? northSubject : southSubject;
