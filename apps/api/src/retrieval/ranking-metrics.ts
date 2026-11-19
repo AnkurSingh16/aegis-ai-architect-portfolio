@@ -53,3 +53,23 @@ export function reciprocalRankFusion(lists: readonly (readonly string[])[], k0 =
 function assertK(k: number): void {
   if (!Number.isInteger(k) || k < 1) throw new RangeError('k must be a positive integer');
 }
+
+/**
+ * Weighted reciprocal rank fusion: score(d) = w / (k0 + rank_lexical) + (1 - w) / (k0 + rank_vector).
+ * w = 0.5 reproduces equal-weight RRF. Ties break on id, so the output is deterministic.
+ */
+export function weightedReciprocalRankFusion(lexical: readonly string[], vector: readonly string[], w: number, k0 = 60): string[] {
+  if (!Number.isFinite(w) || w < 0 || w > 1) throw new RangeError('w must be between 0 and 1');
+  const scores = new Map<string, number>();
+  const add = (list: readonly string[], weight: number) => {
+    const seen = new Set<string>();
+    list.forEach((id, index) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      scores.set(id, (scores.get(id) ?? 0) + weight / (k0 + index + 1));
+    });
+  };
+  add(lexical, w);
+  add(vector, 1 - w);
+  return [...scores.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id]) => id);
+}

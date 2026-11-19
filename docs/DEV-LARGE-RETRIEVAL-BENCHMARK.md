@@ -34,3 +34,36 @@ Status: **development evidence only**. Engineer-written corpus and queries, one 
 - A mixed query set with graded overlap, so lexical retrieval has a fair chance.
 - Weighted fusion, tuned on a held-out split, instead of equal-weight RRF.
 - A second embedding model and repeated runs before any comparative claim.
+
+## Mixed query set and weighted fusion (held-out)
+
+100 queries: the 50 pure paraphrases, plus 50 augmented versions with 1, 2 or 3 target content words added (`apps/api/src/retrieval/eval/mixed-queries.ts`). The split is by index parity: 50 dev and 50 test. The fusion weight `w` (lexical share in weighted RRF, k0 = 60) was chosen on dev only, over `w` in {0, 0.05, …, 1}. The test split was reported once. Script: `apps/api/scripts/mixed-retrieval-benchmark.ts`.
+
+**Selected weight: w = 0 (vector only).** Every dev weight above zero lowered dev MRR (0.917 at w = 0, 0.753 at w = 0.2, 0.480 at w = 1).
+
+Held-out test (50 queries):
+
+| Approach | MRR | nDCG@10 | Recall@10 |
+|---|---|---|---|
+| BM25 (lexical) | 0.473 | 0.480 | 0.500 |
+| Vector (cosine) | 0.931 | 0.947 | 1.000 |
+| Equal-weight RRF | 0.740 | 0.804 | 1.000 |
+| Tuned weighted RRF (w = 0) | 0.931 | 0.947 | 1.000 |
+
+By query kind (all 100 queries):
+
+| Approach | Paraphrase MRR | Augmented MRR |
+|---|---|---|
+| BM25 | 0.000 | 0.920 |
+| Vector | 0.882 | 0.966 |
+| Equal-weight RRF | 0.487 | 0.960 |
+
+### What this shows
+1. **Vector retrieval is the best single approach on this set,** on both kinds of query.
+2. **Adding lexical evidence did not help at any weight on dev.** On augmented queries lexical is strong (0.920), but fusing it with vector does not beat vector alone (0.960 at equal weight, 0.966 for vector alone).
+3. **The paraphrase result is a construction effect.** Pure paraphrases give BM25 zero, so any fusion weight above zero can only add noise on that subset.
+
+### Limits
+- Synthetic, template-like text; keyword augmentation makes the augmented queries artificially easy for BM25.
+- One author, one relevant document per query, one embedding model, single run, no confidence intervals. A test split of 50 queries cannot separate close results.
+- The selection rule is coarse, and w = 0 is at the boundary of the search range.

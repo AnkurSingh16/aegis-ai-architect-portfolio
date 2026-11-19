@@ -53,3 +53,19 @@ describe('reciprocal rank fusion', () => {
     expect(() => reciprocalRankFusion([['a']], -1)).toThrow(RangeError);
   });
 });
+
+describe('weighted reciprocal rank fusion', () => {
+  it('reproduces equal-weight RRF at w = 0.5 and follows each list at the extremes', async () => {
+    const { weightedReciprocalRankFusion } = await import('./ranking-metrics.js');
+    const lexical = ['a', 'b', 'c'];
+    const vector = ['c', 'a', 'd'];
+    expect(weightedReciprocalRankFusion(lexical, vector, 0.5)).toEqual(reciprocalRankFusion([lexical, vector]));
+    expect(weightedReciprocalRankFusion(lexical, vector, 1)[0]).toBe('a');
+    expect(weightedReciprocalRankFusion(lexical, vector, 0)[0]).toBe('c');
+  });
+
+  it('rejects weights outside [0, 1]', async () => {
+    const { weightedReciprocalRankFusion } = await import('./ranking-metrics.js');
+    expect(() => weightedReciprocalRankFusion(['a'], ['a'], 1.5)).toThrow(RangeError);
+  });
+});
