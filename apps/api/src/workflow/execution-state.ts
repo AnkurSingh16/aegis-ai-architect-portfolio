@@ -23,6 +23,7 @@ export const executionEvents = [
   'step_failed_permanent',
   'retry_due',
   'cancel',
+  'operator_requeue',
 ] as const;
 export type ExecutionEvent = typeof executionEvents[number];
 
@@ -41,7 +42,8 @@ const transitions: TransitionTable = {
   awaiting_approval: { approve: 'retry_wait', reject: 'cancelled', cancel: 'cancelled' },
   retry_wait: { retry_due: 'running', cancel: 'cancelled' },
   succeeded: {},
-  failed: {},
+  // A human operator may requeue a dead-lettered execution for one more attempt. Nothing else leaves 'failed'.
+  failed: { operator_requeue: 'retry_wait' },
   cancelled: {},
 };
 

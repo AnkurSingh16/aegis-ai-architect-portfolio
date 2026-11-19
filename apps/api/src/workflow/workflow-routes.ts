@@ -41,12 +41,14 @@ interface TriageBody { caseId: (typeof syntheticCases)[number]['id'] }
 interface TenantParams { tenantId: string }
 interface ExecutionParams extends TenantParams { executionId: string }
 interface DeadLetterQuery { limit?: number }
+interface RequeueBody { reason: string }
 
 /**
  * Workflow routes. Every route requires a bearer token, the read:cases scope and tenant membership.
  * - POST /api/tenants/:tenantId/workflows/triage            run the triage tool once per Idempotency-Key
  * - GET  /api/tenants/:tenantId/workflows/executions/:id    execution state and checkpoints
  * - GET  /api/tenants/:tenantId/workflows/dead-letters      failed executions, newest first (read-only)
+ * - POST /api/tenants/:tenantId/workflows/dead-letters/:id/requeue   operators only: one more attempt, with a reason, audited
  * Each response carries x-correlation-id: the caller's valid id, or the request id.
  */
 export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool: Pool, verify: VerifyToken): Promise<void> {
@@ -57,11 +59,12 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
   const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant));
 
   /** Authenticates, checks the scope and checks membership for the tenant in the path. Throws AuthorizationError otherwise. */
-  async function authorise(request: FastifyRequest, tenantId: string): Promise<VerifiedPrincipal> {
+  async function authorise(request: FastifyRequest, tenantId: string, permission: 'read:cases' | 'write:cases' = 'read:cases'): Promise<VerifiedPrincipal> {
     const principal = principals.get(request);
     if (!principal) throw new AuthorizationError(401);
-    requireScope(principal, 'read:cases');
-    await withAuthenticatedTransaction(pool, principal, tenantId, 'read:cases', async () => undefined);
+    requireScope(principal, permission);
+    // write:cases also requires the operator role; the transaction helper enforces that.
+    await withAuthenticatedTransaction(pool, principal, tenantId, permission, async () => undefined);
     return principal;
   }
 
@@ -175,5 +178,31 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
         updatedAt: row.updatedAt.toISOString(),
       })),
     });
+  });
+
+  app.post<{ Params: ExecutionParams; Body: RequeueBody }>('/api/tenants/:tenantId/workflows/dead-letters/:executionId/requeue', {
+    schema: {
+      params: {
+        type: 'object', required: ['tenantId', 'executionId'], additionalProperties: false,
+        properties: { tenantId: uuid, executionId: uuid },
+      },
+      body: {
+        type: 'object', required: ['reason'], additionalProperties: false,
+        properties: { reason: { type: 'string', minLength: 1, maxLength: 500, pattern: '\\S' } },
+      },
+    },
+  }, async (request, reply) => {
+    const { tenantId, executionId } = request.params;
+    const principal = await authorise(request, tenantId, 'write:cases');
+    const outcome = await store.requeue(executionId, tenantId, principal.subject, request.body.reason, new Date());
+    console.info(JSON.stringify({
+      event: 'workflow_request', route: 'dead_letter_requeue', requestId: request.id, correlationId: correlations.get(request),
+      outcome: outcome.outcome, executionId,
+    }));
+    if (outcome.outcome === 'not_found') return reply.code(404).send({ error: 'Execution not found.' });
+    if (outcome.outcome === 'not_failed') {
+      return reply.code(409).send({ error: 'Only a failed execution without a cancellation request can be requeued.' });
+    }
+    return reply.send({ executionId, state: 'retry_wait', version: outcome.version, attempts: outcome.attempts });
   });
 }

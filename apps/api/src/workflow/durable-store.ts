@@ -1,5 +1,5 @@
 import type { TenantRunner } from '../security/tool-approval-store.js';
-import type { ExecutionState } from './execution-state.js';
+import { type ExecutionState, nextState as transitionTo } from './execution-state.js';
 
 /** Postgres-backed execution state. Every lease-holding write is conditional on the lease owner and the expected version. */
 
@@ -88,6 +88,11 @@ function approvalColumns(change: ApprovalChange | undefined): { setId: boolean; 
     default: return { setId: false, id: null, setGranted: false, granted: false };
   }
 }
+
+export type RequeueOutcome =
+  | { readonly outcome: 'requeued'; readonly version: number; readonly attempts: number }
+  | { readonly outcome: 'not_found' }
+  | { readonly outcome: 'not_failed' };
 
 export function createDurableStore(runTenant: TenantRunner) {
   return {
@@ -259,6 +264,43 @@ export function createDurableStore(runTenant: TenantRunner) {
           executionId: row.execution_id, attempts: row.attempts, maxAttempts: row.max_attempts,
           lastErrorClass: row.last_error_class, updatedAt: row.updated_at,
         }));
+      });
+    },
+
+    /**
+     * Operator requeue: moves a failed execution to retry_wait for one more attempt and writes an audited checkpoint in
+     * the same transaction. Refused unless the execution is failed and no cancellation was requested. The attempt count
+     * is kept. An execution that used its whole budget therefore gets exactly one more attempt, because a failure at or
+     * past the budget is permanent (decideAfterFailure). One that failed permanently keeps its remaining budget, but its
+     * next permanent failure ends it as before.
+     */
+    async requeue(executionId: string, tenantId: string, actor: string, reason: string, now: Date): Promise<RequeueOutcome> {
+      assertUuid(executionId, 'executionId');
+      assertUuid(tenantId, 'tenantId');
+      if (actor.length === 0 || actor.length > 256) throw new RangeError('actor must be 1 to 256 characters');
+      if (reason.trim().length === 0 || reason.length > 500) throw new RangeError('reason must be 1 to 500 characters');
+      // The state machine is the single source of truth for this move: only 'failed' may requeue.
+      if (transitionTo('failed', 'operator_requeue') !== 'retry_wait') throw new Error('operator requeue must lead to retry_wait');
+      return runTenant(tenantId, async (client): Promise<RequeueOutcome> => {
+        const moved = await client.query<{ version: number; attempts: number }>(
+          `UPDATE aegis.workflow_executions
+              SET state = 'retry_wait', next_attempt_at = $3, lease_owner = NULL, lease_expires_at = NULL,
+                  version = version + 1, updated_at = $3
+            WHERE execution_id = $1 AND tenant_id = $2 AND state = 'failed' AND cancel_requested = false
+            RETURNING version, attempts`,
+          [executionId, tenantId, now],
+        );
+        const row = moved.rows[0];
+        if (!row) {
+          const present = await client.query('SELECT 1 FROM aegis.workflow_executions WHERE execution_id = $1 AND tenant_id = $2', [executionId, tenantId]);
+          return present.rows.length === 0 ? { outcome: 'not_found' } : { outcome: 'not_failed' };
+        }
+        await client.query(
+          `INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts, actor, reason)
+           VALUES ($1, $2, $3, 'retry_wait', $4, $5, $6)`,
+          [executionId, tenantId, row.version, row.attempts, actor, reason],
+        );
+        return { outcome: 'requeued', version: row.version, attempts: row.attempts };
       });
     },
 

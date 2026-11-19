@@ -8,6 +8,7 @@ import { AuthorizationError, type VerifiedPrincipal } from '../auth/token.js';
 import { registerProtectedWorkflowRoutes } from './workflow-routes.js';
 import { createDurableStore } from './durable-store.js';
 import type { TenantQueryable } from '../security/tool-approval-store.js';
+import { runDurableAttempt } from './durable-driver.js';
 
 // Real PostgreSQL + Fastify injection tests for the authenticated triage workflow route.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
@@ -26,8 +27,14 @@ let app: FastifyInstance;
 const readerPrincipal: VerifiedPrincipal = { issuer, subject: readerSubject, scopes: new Set(['read:cases']) };
 const noScopePrincipal: VerifiedPrincipal = { issuer, subject: readerSubject, scopes: new Set() };
 const stranger: VerifiedPrincipal = { issuer, subject: noReadSubject, scopes: new Set(['read:cases']) };
+const operatorSubject = `operator-${randomUUID()}`;
+const operatorPrincipal: VerifiedPrincipal = { issuer, subject: operatorSubject, scopes: new Set(['read:cases', 'write:cases']) };
+// The reader's token with the write scope: the scope passes, the reader role must still be refused.
+const readerWritePrincipal: VerifiedPrincipal = { issuer, subject: readerSubject, scopes: new Set(['read:cases', 'write:cases']) };
 
 const verify = async (authorization: string | undefined): Promise<VerifiedPrincipal> => {
+  if (authorization === 'Bearer operator') return operatorPrincipal;
+  if (authorization === 'Bearer reader-write') return readerWritePrincipal;
   if (authorization === 'Bearer reader') return readerPrincipal;
   if (authorization === 'Bearer no-scope') return noScopePrincipal;
   if (authorization === 'Bearer stranger') return stranger;
@@ -75,6 +82,7 @@ beforeAll(async () => {
   await migrateDatabase(adminUrl, process.env.DATABASE_APP_PASSWORD ?? '', process.env.DATABASE_INGEST_PASSWORD ?? '');
   await admin.query("INSERT INTO aegis.tenants (id, name) VALUES ($1, 'Synthetic North'), ($2, 'Synthetic South')", [tenantNorth, tenantSouth]);
   await admin.query("INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, $2, $3, 'reader')", [issuer, readerSubject, tenantNorth]);
+  await admin.query("INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, $2, $3, 'operator')", [issuer, operatorSubject, tenantNorth]);
   app = Fastify();
   await app.register(async (scoped) => registerProtectedWorkflowRoutes(scoped, pool, verify));
   await app.ready();
@@ -243,5 +251,71 @@ describe('correlation ids', () => {
     expect(typeof header).toBe('string');
     expect(header).not.toBe(unsafe);
     expect(header).toMatch(/^[A-Za-z0-9._:-]{1,128}$/);
+  });
+});
+
+/** Drives one execution to 'failed' with its whole attempt budget used, the usual shape of a dead letter. */
+async function createExhaustedExecution(tenantId: string): Promise<string> {
+  const store = createDurableStore(runTenant);
+  const { executionId } = await store.createExecution(tenantId, key(), 3);
+  const now = new Date();
+  const claimed = await store.claim(executionId, tenantId, 'test-owner', now, new Date(now.getTime() + 30_000));
+  if (!claimed) throw new Error('test execution was not claimable');
+  await store.transition({
+    executionId, tenantId, owner: 'test-owner', expectedVersion: claimed.version, state: 'failed', attempts: 3,
+    nextAttemptAt: null, lastErrorClass: 'retryable', keepLease: false, leaseExpiresAt: now, now,
+  });
+  return executionId;
+}
+
+describe('POST /api/tenants/:tenantId/workflows/dead-letters/:executionId/requeue', () => {
+  const requeue = (tenant: string, executionId: string, authorization: string, body: unknown, headers: Record<string, string> = {}) =>
+    app.inject({ method: 'POST', url: `/api/tenants/${tenant}/workflows/dead-letters/${executionId}/requeue`, headers: { 'content-type': 'application/json', authorization, ...headers }, payload: body as object });
+
+  it('refuses unauthenticated requests and readers, even with the write scope', async () => {
+    const executionId = await createFailedExecution(tenantNorth);
+    expect((await requeue(tenantNorth, executionId, '', { reason: 'retry' })).statusCode).toBe(401);
+    expect((await requeue(tenantNorth, executionId, 'Bearer reader', { reason: 'retry' })).statusCode).toBe(403);
+    expect((await requeue(tenantNorth, executionId, 'Bearer reader-write', { reason: 'retry' })).statusCode).toBe(403);
+  });
+
+  it('refuses a blank or missing reason', async () => {
+    const executionId = await createFailedExecution(tenantNorth);
+    expect((await requeue(tenantNorth, executionId, 'Bearer operator', { reason: '   ' })).statusCode).toBe(400);
+    expect((await requeue(tenantNorth, executionId, 'Bearer operator', {})).statusCode).toBe(400);
+  });
+
+  it('lets an operator requeue a failed execution once, records who and why, and removes it from the dead letters', async () => {
+    const executionId = await createFailedExecution(tenantNorth);
+    const first = await requeue(tenantNorth, executionId, 'Bearer operator', { reason: 'Upstream fixed, retry it' });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ executionId, state: 'retry_wait', attempts: 1 });
+
+    const audit = await admin.query<{ actor: string; reason: string }>(
+      "SELECT actor, reason FROM aegis.workflow_checkpoints WHERE execution_id = $1 AND state = 'retry_wait'", [executionId]);
+    expect(audit.rows).toEqual([{ actor: operatorSubject, reason: 'Upstream fixed, retry it' }]);
+
+    const second = await requeue(tenantNorth, executionId, 'Bearer operator', { reason: 'again' });
+    expect(second.statusCode).toBe(409);
+
+    const deadLetters = (await get(tenantNorth, 'dead-letters', 'Bearer reader')).json() as { items: Array<{ executionId: string }> };
+    expect(deadLetters.items.map((item) => item.executionId)).not.toContain(executionId);
+  });
+
+  it('gives an exhausted execution exactly one more attempt; if that fails, it is permanent', async () => {
+    const executionId = await createExhaustedExecution(tenantNorth);
+    expect((await requeue(tenantNorth, executionId, 'Bearer operator', { reason: 'Vendor outage is over' })).statusCode).toBe(200);
+
+    const store = createDurableStore(runTenant);
+    const outcome = await runDurableAttempt({
+      store, executionId, tenantId: tenantNorth, owner: 'operator-test-owner',
+      policy: { maxAttempts: 3, baseDelayMs: 1000, maxDelayMs: 8000 }, leaseMs: 30_000, timeoutMs: 5_000, clock: () => new Date(),
+      step: async () => { throw new Error('still failing'); },
+    });
+    expect(outcome).toMatchObject({ status: 'failed', attempt: 4 });
+  });
+
+  it('returns 404 for an unknown execution', async () => {
+    expect((await requeue(tenantNorth, randomUUID(), 'Bearer operator', { reason: 'retry' })).statusCode).toBe(404);
   });
 });
