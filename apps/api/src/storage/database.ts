@@ -13,7 +13,7 @@ export function createDatabasePool(url: string, max = 4): Pool {
 export async function verifyRuntimeRole(pool: Pool): Promise<void> {
   const result = await pool.query<{ safe: boolean }>(`
     WITH expected_tables(name) AS (VALUES
-      ('tenants'), ('support_cases'), ('audit_events'), ('memberships'), ('documents'), ('document_chunks'), ('case_reviews'), ('tool_approvals')),
+      ('tenants'), ('support_cases'), ('audit_events'), ('memberships'), ('documents'), ('document_chunks'), ('case_reviews'), ('tool_approvals'), ('workflow_executions'), ('workflow_checkpoints')),
     aegis_tables AS (
       SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, c.relowner
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -28,7 +28,7 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
       AND NOT has_table_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_any_column_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,REFERENCES')
-      AND (SELECT count(*) = 8 AND bool_and(t.relrowsecurity AND t.relforcerowsecurity AND t.relowner <> r.oid)
+      AND (SELECT count(*) = 10 AND bool_and(t.relrowsecurity AND t.relforcerowsecurity AND t.relowner <> r.oid)
         FROM aegis_tables t JOIN expected_tables e ON e.name = t.relname)
       AND NOT EXISTS (SELECT 1 FROM expected_tables e WHERE NOT EXISTS
         (SELECT 1 FROM aegis_tables t WHERE t.relname = e.name))
@@ -63,6 +63,17 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND NOT has_table_privilege(current_user, 'aegis.case_reviews', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_any_column_privilege(current_user, 'aegis.case_reviews', 'UPDATE,REFERENCES')
       AND has_table_privilege(current_user, 'aegis.tool_approvals', 'SELECT')
+      AND has_table_privilege(current_user, 'aegis.workflow_executions', 'SELECT')
+      AND NOT has_table_privilege(current_user, 'aegis.workflow_executions', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      AND NOT has_any_column_privilege(current_user, 'aegis.workflow_executions', 'REFERENCES')
+      AND has_column_privilege(current_user, 'aegis.workflow_executions', 'lease_owner', 'UPDATE')
+      AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'tenant_id', 'UPDATE')
+      AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'idempotency_key', 'UPDATE')
+      AND NOT has_column_privilege(current_user, 'aegis.workflow_executions', 'max_attempts', 'UPDATE')
+      AND has_table_privilege(current_user, 'aegis.workflow_checkpoints', 'SELECT')
+      AND NOT has_table_privilege(current_user, 'aegis.workflow_checkpoints', 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      AND NOT has_any_column_privilege(current_user, 'aegis.workflow_checkpoints', 'UPDATE,REFERENCES')
+      AND has_column_privilege(current_user, 'aegis.workflow_checkpoints', 'seq', 'INSERT')
       AND NOT has_table_privilege(current_user, 'aegis.tool_approvals', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_any_column_privilege(current_user, 'aegis.tool_approvals', 'REFERENCES')
       AND has_column_privilege(current_user, 'aegis.tool_approvals', 'tenant_id', 'INSERT')
