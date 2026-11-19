@@ -72,7 +72,7 @@ describe('transaction and failure handling', () => {
     const end = vi.spyOn(Pool.prototype, 'end').mockResolvedValue(undefined);
     try {
       await expect(migrateDatabase('postgres://localhost/aegis_test', 'synthetic-app-password', 'synthetic-ingest-password'))
-        .resolves.toBe(6);
+        .resolves.toBe(7); // migrations 001–007 pending on a fresh database
       const ingestionSafetyQuery = queries.find((sql) => sql.includes("FROM pg_roles WHERE rolname = 'aegis_ingest'"));
       expect(ingestionSafetyQuery).toContain("to_regclass('aegis.documents')");
       expect(ingestionSafetyQuery).toContain("to_regclass('aegis.document_chunks')");

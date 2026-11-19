@@ -46,7 +46,7 @@ export interface RequestContext {
 export interface ApprovalRecord {
   readonly approvalId: string;
   readonly actionDigest: string;
-  readonly status: 'pending' | 'approved' | 'rejected';
+  readonly status: 'pending' | 'approved' | 'rejected' | 'consumed';
   readonly approvedBy: string;
   readonly expiresAt: Date;
   readonly tenantId: string;
@@ -54,8 +54,13 @@ export interface ApprovalRecord {
 
 /** Approval lookups are performed by the gateway from its trusted store. Model output never supplies one. */
 export interface ApprovalStore {
-  get(approvalId: string): ApprovalRecord | undefined;
-  consume(approvalId: string): boolean;
+  /** Tenant-scoped read. Returns undefined for other tenants' approvals. */
+  get(approvalId: string, tenantId: string): Promise<ApprovalRecord | undefined>;
+  /**
+   * Atomically marks an approved, unexpired approval as consumed. Returns true only for the single call that wins.
+   * Implementations must make this a single conditional write, not a read followed by a write.
+   */
+  consume(approvalId: string, tenantId: string, now: Date): Promise<boolean>;
 }
 
 export interface ToolCall {
@@ -119,7 +124,7 @@ export class ToolGateway {
     private readonly approvals: ApprovalStore,
   ) {}
 
-  authorise(call: ToolCall, context: RequestContext): Decision {
+  async authorise(call: ToolCall, context: RequestContext): Promise<Decision> {
     const digest = actionDigest(context.tenantId, call.toolName, call.arguments);
     const reasons: DenyReason[] = [];
     const agent = this.agents.get(context.agentId);
@@ -140,19 +145,20 @@ export class ToolGateway {
     if (findKeys(call.arguments, SECRET_KEYS).length > 0) reasons.push('secret_in_arguments');
 
     if (tool?.requiresApproval) {
-      reasons.push(...this.checkApproval(call, context, digest));
+      reasons.push(...(await this.checkApproval(call, context, digest)));
     }
 
     const allowed = reasons.length === 0 && tool !== undefined && agent !== undefined;
     let runId: string | undefined;
     if (allowed) {
-      runId = randomUUID();
-      this.runs.set(runId, { tenantId: context.tenantId, consumed: false });
-      if (tool?.requiresApproval && call.approvalId !== undefined && !this.approvals.consume(call.approvalId)) {
-        // Approval was valid at check time but could not be consumed: fail closed.
-        this.runs.delete(runId);
-        runId = undefined;
-        reasons.push('approval_consumed');
+      if (tool?.requiresApproval && call.approvalId !== undefined) {
+        // Single atomic consume. If another request won the race, fail closed.
+        const consumed = await this.approvals.consume(call.approvalId, context.tenantId, context.now);
+        if (!consumed) reasons.push('approval_consumed');
+      }
+      if (reasons.length === 0) {
+        runId = randomUUID();
+        this.runs.set(runId, { tenantId: context.tenantId, consumed: false });
       }
     }
     const outcome = runId !== undefined ? 'allow' : 'deny';
@@ -179,9 +185,9 @@ export class ToolGateway {
     return { accepted: true };
   }
 
-  private checkApproval(call: ToolCall, context: RequestContext, digest: string): DenyReason[] {
+  private async checkApproval(call: ToolCall, context: RequestContext, digest: string): Promise<DenyReason[]> {
     if (call.approvalId === undefined) return ['approval_required'];
-    const approval = this.approvals.get(call.approvalId);
+    const approval = await this.approvals.get(call.approvalId, context.tenantId);
     if (!approval) return ['approval_required'];
     const reasons: DenyReason[] = [];
     if (approval.tenantId !== context.tenantId) reasons.push('tenant_mismatch');

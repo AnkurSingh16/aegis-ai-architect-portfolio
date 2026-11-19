@@ -17,7 +17,7 @@ export type DispatchResult<Output = unknown> =
   | { readonly status: 'error'; readonly message: string };
 
 export interface ToolDispatcher {
-  dispatch(call: ToolCall, context: RequestContext): DispatchResult;
+  dispatch(call: ToolCall, context: RequestContext): Promise<DispatchResult>;
 }
 
 export function createToolDispatcher(
@@ -25,8 +25,8 @@ export function createToolDispatcher(
   handlers: ReadonlyMap<string, ToolHandler<unknown, unknown>>,
 ): ToolDispatcher {
   return {
-    dispatch(call, context) {
-      const decision = gateway.authorise(call, context);
+    async dispatch(call, context) {
+      const decision = await gateway.authorise(call, context);
       if (!decision.allowed || decision.runId === undefined) {
         return { status: 'denied', reasons: decision.reasons };
       }
