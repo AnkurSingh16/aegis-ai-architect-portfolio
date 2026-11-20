@@ -101,3 +101,16 @@ a code change to `apps/api/src/rag/answer-routes.ts` and needs the owner's go-ah
 - The rules do not check that an answer is true to the document. Several answers are close restatements of one sentence
   of the source. A human reading is needed before the route claims answer quality.
 - Same-author set, one run, one model. The owner decides whether this is enough for the route change.
+
+## Route check after the switch to prompt v5 (not an evaluation)
+
+Run once on 2026-11-20 with `apps/api/src/rag/answer-routes.live.integration.test.ts` (`AEGIS_LIVE_OLLAMA=1`, disposable
+PostgreSQL container removed after the run). Two questions through the real route, no injected functions.
+
+- North question ("Which details should be recorded for a sign-in interruption?"): answered in one round, citing
+  `SYNTHETIC-NORTH-LOGIN-INCIDENT` only. The answer text is almost a verbatim copy of the source sentence, with the Sources line.
+  It passes the rules but is not a paraphrase in the model's own words, which prompt v5 asked for.
+- Off-topic question ("What is the capital of France?"): abstained, `insufficient_evidence`, one round.
+- The placeholder-text assertion in the test passed.
+
+This is two checks, not a quality measure. It confirms the route runs on prompt v5 and that the shape and citation rules hold.
