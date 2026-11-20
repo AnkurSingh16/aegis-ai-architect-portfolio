@@ -39,7 +39,7 @@ Earlier in the branch: `38dffc9` (echo v1), `f81d190` (echo v1 tests, route and 
 
 Specific new tests: echo v2 (16 tests: v8 regression, short answers, restatements, paraphrased question-only answers,
 punctuation, negation, empty text, a known false positive, known limits); copy measure (6); Wilson interval (4); guard
-de-duplication (2 added); independent-set validator (12).
+de-duplication (2 added); independent-set validator (11).
 
 ## Known limits of what was built
 
