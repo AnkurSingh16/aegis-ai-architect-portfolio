@@ -50,3 +50,35 @@ band. This round asks the boundary question on fresh questions, with a larger ca
 - The result applies to the current synthetic corpus and the local embedding model only.
 - Retrieval scores only. The generator and the loop's citation checks are not part of the floor decision.
 - The earlier sets and their results remain on record and are not re-run.
+
+## Result (one run, as pre-registered)
+
+Run once: floor chosen on calibration v4 with the fixed rule, then holdout v4 run once through the real loop at that floor.
+All cases completed, and the holdout sweep agreed with the real loop case by case.
+
+**Calibration v4** (20 answerable, 20 unanswerable). Floors 0.63, 0.64 and 0.65 each score 0.900 on recall minus false-answer
+rate (recall 18 of 20, false answers 0 of 20). The rule breaks ties toward the higher floor, so the rule chooses **0.65**.
+At 0.70 on calibration, recall falls to 13 of 20 (0.650), so 0.70 is not the rule's choice on this set.
+
+**Holdout v4 at 0.65, real loop** (12 answerable, 12 unanswerable): answer recall **12 of 12 (1.000)**, false answers
+**0 of 12**, wrong-source answers **0**, abstention precision **1.000**.
+
+**Acceptance rule, applied as written:** the candidate floor 0.65 has zero false answers and zero wrong-source answers on the
+holdout, so it is **accepted for the current corpus**, as the protocol defined that outcome.
+
+**Holdout sweep, for reading only:**
+- 0.64 to 0.68: zero false answers, recall 1.000.
+- 0.63: one false answer. 0.60 to 0.62: two or three false answers.
+- 0.70: recall 7 of 12 (0.583), zero false answers.
+
+**Holdout margins:** the lowest answerable top score was 0.684 (`floor4h-answer-mfa-automated`), and the highest unanswerable
+top score was 0.634 (`floor4h-abstain-south-notice`). The gap between them is small (0.05 wide), and it sits on one author's
+12 questions.
+
+**What this does and does not settle:**
+- The owner set the floor at 0.70 earlier. This round supports 0.65 on fresh questions, but it does not replace 0.70 in the
+  code. Changing the floor is the owner's decision.
+- The sets are same-author, so this result is weaker than an independent set would be.
+- The calibration set had two answerable misses below 0.65, so the rule's recall is 0.90, not 1.00.
+
+The report is kept in the scratchpad (`c4-floor-v4-run1.json`), not in the repository.
