@@ -52,3 +52,17 @@ Otherwise, reject it and record the result as it stands. No second candidate is 
 - Same-author set; one run; twelve answerable questions, so one question moves top-one accuracy by about 8 points.
 - A three-billion-parameter reranker. It may be wrong in ways a larger model is not.
 - The candidate does not touch the six boundary misses. Passing this rule does not show the floor is right.
+
+## Implementation (recorded before the run)
+
+- Reranker: `apps/api/src/rag/ollama-reranker.ts`, prompt `rr1`, pinned model as above, temperature 0, 32 output tokens. A
+  reply that is not exactly one retrieved source id (brackets allowed) keeps the order and is reported as `unparsed`.
+  A service failure keeps the order and is reported as `failed`. Outcomes are counted in the report.
+- Set: `apps/api/src/rag/retrieval-rerank-cases-v1.ts`. Its rank position is not checked before the run; the run reports each
+  question's actual rank of the expected document, before and after rerank.
+- Runner: `apps/api/src/rag/retrieval-rerank.integration.test.ts`, gated by `AEGIS_LIVE_OLLAMA=1`, writing to
+  `C4_RERANK_OUTPUT`. It runs raw and reranked retrieval on the same retrievals, so the comparison is paired.
+- Safety: the answer loop with the route's policy (`ANSWER_POLICY`, including the answer-text guard) and the answer prompt
+  v4, on the reranked order. The route's prompt is the one measured, because it is the one that would ship.
+- Measures reported: top-one accuracy and mean reciprocal rank before and after, outcome counts, rerank latency (median and
+  maximum, measured), and the safety report from the scorer.
