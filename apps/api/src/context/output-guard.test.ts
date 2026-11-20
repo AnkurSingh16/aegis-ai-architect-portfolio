@@ -26,4 +26,14 @@ describe('deterministic output guard', () => {
   it('rejects empty answers', () => {
     expect(guardAnswer('   ', policy).violations).toEqual(['empty_answer']);
   });
+
+  it('lists each cited source once, in first-cited order, without changing which sources were checked', () => {
+    const result = guardAnswer('Refunds take 30 days [policy-refunds]. Store hours apply [store-hours]. Refunds again [policy-refunds].', policy);
+    expect(result).toEqual({ ok: true, violations: [], citedSourceIds: ['policy-refunds', 'store-hours'] });
+  });
+
+  it('still rejects an unknown citation even when a known one repeats', () => {
+    const result = guardAnswer('Refunds [policy-refunds] and shipping [policy-shipping] and refunds [policy-refunds].', policy);
+    expect(result.violations).toEqual(['unknown_citation']);
+  });
 });

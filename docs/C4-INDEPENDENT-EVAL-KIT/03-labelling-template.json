@@ -1,0 +1,26 @@
+{
+  "_note": "TEMPLATE ONLY. Replace every <fill in> value. The validator rejects this file unfilled. One object per item.",
+  "corpusVersion": "<fill in, e.g. ind-corpus-v1>",
+  "role": "calibration or holdout",
+  "items": [
+    {
+      "id": "<fill in, letters digits dots dashes underscores, e.g. A001>",
+      "question": "<fill in the question as a person would ask it>",
+      "kind": "answerable",
+      "category": "paraphrase or direct",
+      "supportingDocumentId": "<fill in, e.g. IND-ACCESS-01>",
+      "keyPoints": ["<fill in one key point a complete answer must contain>"],
+      "author": "<fill in the question author>",
+      "writtenOn": "<YYYY-MM-DD>"
+    },
+    {
+      "id": "<fill in, e.g. U001>",
+      "question": "<fill in the question>",
+      "kind": "unanswerable",
+      "category": "near_miss, unavailable_info, restricted_source or unrelated",
+      "unanswerableReason": "<fill in why the documents cannot answer it>",
+      "author": "<fill in the question author>",
+      "writtenOn": "<YYYY-MM-DD>"
+    }
+  ]
+}
