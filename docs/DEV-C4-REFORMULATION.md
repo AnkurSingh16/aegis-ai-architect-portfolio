@@ -81,9 +81,10 @@ run, with no generation failures.
 - **Abstention precision:** 0.57 in both runs (12 true abstentions, 9 false abstentions).
 - **Retry effect:** in run B, nine cases retried with a reworded query. None of the nine was answered on the retry. The
   same three answerable questions were correct in both runs.
-- **Retry scores:** in run B, a retried case's recorded top score is the score from the second retrieval. Those scores
-  were not higher than the first-round scores for the same cases, so the reworded queries did not lift relevant documents
-  above 0.70.
+- **Retry scores:** in run B, a retried case's recorded top score is the score from the second retrieval. Most retries
+  scored lower than the first round, but two rose: `reform-abstain-south-*` cases were not among them. The two that rose
+  were `reform-answer-mfa-provider-outage` (0.658 to 0.678) and `reform-answer-recovery-ticket-claim` (0.641 to 0.697).
+  No retry reached 0.70, so the reworded queries did not lift a relevant document above the floor.
 
 **Decision rule, applied as written:**
 - Safety rule (zero false answers, zero wrong-source answers) in run B: **met.**
