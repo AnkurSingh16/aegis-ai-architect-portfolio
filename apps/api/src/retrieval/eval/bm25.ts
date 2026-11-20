@@ -10,6 +10,11 @@ export function tokenize(text: string): string[] {
 export interface Bm25Document { id: string; text: string }
 
 export function bm25Rank(query: string, documents: readonly Bm25Document[], k1 = 1.2, b = 0.75): string[] {
+  return bm25Scores(query, documents, k1, b).map((row) => row.id);
+}
+
+/** Documents with a positive BM25 score, best first, with the score. Ties break on id. */
+export function bm25Scores(query: string, documents: readonly Bm25Document[], k1 = 1.2, b = 0.75): { id: string; score: number }[] {
   if (documents.length === 0) return [];
   const docs = documents.map((doc) => ({ id: doc.id, tokens: tokenize(doc.text) }));
   const avgLength = docs.reduce((sum, doc) => sum + doc.tokens.length, 0) / docs.length || 1;
@@ -30,7 +35,7 @@ export function bm25Rank(query: string, documents: readonly Bm25Document[], k1 =
     }
     return { id: doc.id, score };
   });
-  return scored.filter((row) => row.score > 0).sort((a, c) => c.score - a.score || (a.id < c.id ? -1 : a.id > c.id ? 1 : 0)).map((row) => row.id);
+  return scored.filter((row) => row.score > 0).sort((a, c) => c.score - a.score || (a.id < c.id ? -1 : a.id > c.id ? 1 : 0));
 }
 
 export { STOPWORDS };
