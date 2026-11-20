@@ -57,3 +57,11 @@ which measure it aims to change, which rank positions it can affect, and its acc
 - The selection step removes questions the candidate could not improve. That makes the set good for ranking tests and
   unsuitable for measuring overall recall. Recall must be reported separately, on an unselected set.
 - Synthetic corpus, one embedding model.
+
+## Step 1 done: set written (no retrieval run)
+
+- `apps/api/src/rag/retrieval-set-v2-cases.ts`, 24 questions with ids `rs2-*`: 12 answerable (three per North document)
+  and 12 unanswerable (six off-topic, six South-domain).
+- Written before any retrieval was run on it. The shape and no-overlap test passes, including against the rerank set v1.
+- Step 2 (the rank check) has not run. Every question is still kept. Drops will be recorded when step 2 runs.
+- Same-author. Step 2 and any candidate need their own record and pre-registration.
