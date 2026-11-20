@@ -66,3 +66,45 @@ Otherwise, reject it and record the result as it stands. No second candidate is 
   v4, on the reranked order. The route's prompt is the one measured, because it is the one that would ship.
 - Measures reported: top-one accuracy and mean reciprocal rank before and after, outcome counts, rerank latency (median and
   maximum, measured), and the safety report from the scorer.
+
+## Result (one paired run, set retrieval-rerank-v1)
+
+Run on 2026-11-20 with `C4_RERANK_OUTPUT` set. Model `qwen2.5:3b-instruct` (pinned digest), rerank prompt `rr1`, answer prompt
+v4 with the route policy. The protocol above was not changed before or after the run.
+
+| Measure | Raw order | Reranked |
+| --- | --- | --- |
+| Top-one accuracy (answerable, 12) | 10 of 12 | 10 of 12 |
+| Mean reciprocal rank (answerable) | 0.903 | 0.917 |
+
+- Rerank outcomes over 24 questions: 7 moved, 9 kept, 8 unparsed, 0 failed.
+- Rerank latency, measured on this machine: median 882 ms, maximum 3311 ms.
+- Safety (answer loop, route policy, reranked order): 5 of 12 answerable answered correctly, 0 wrong-source answers,
+  0 false answers, 7 false abstentions. Abstention precision 0.63. Four of the seven false abstentions were round-one guard
+  failures (`reformulation_unavailable`, with reformulation off); three had no usable evidence (`insufficient_evidence`).
+
+### Decision rule
+
+- **Acceptance condition 1 (top-one accuracy higher after rerank): not met.** It is the same, 10 of 12.
+- **Acceptance condition 2 (zero false and zero wrong-source answers): met.**
+- **Acceptance condition 3 (latency reported): met.**
+
+**The candidate is rejected under the rule.** The route is not changed. No second candidate is run on this set.
+
+### What the run shows
+
+- **The set did not test what it was built to test.** The protocol said the expected document would be in the top five but
+  not first. In fact ten of twelve were already first in the raw order. The set design was not checked before the run,
+  and the protocol said it was not. The run therefore could not show a ranking gain, even if one existed.
+- **Two answerable questions were ranked second or third in the raw order** (`rr1-answer-mfa-status-page`,
+  `rr1-answer-recovery-named`, and `rr1-answer-network-*` after reranking). The rerank moved one of them to first and
+  moved the other off first. This is too small to read as a trend.
+- **Eight of the 24 rerank replies were unparsed.** All eight were on unanswerable questions, where the reply does not affect
+  the decision. The 3B model did not reliably return a single source id.
+- Recall on this set (5 of 12) is not comparable with the earlier sets. It is a different set, and this is one run.
+
+### What would be needed for a new candidate
+
+A fresh set whose expected documents are verified before the run to sit outside the first position, and a new protocol that
+records that check. Any new candidate also needs its own pre-registration. Nothing here argues for or against a reranker in
+general.
