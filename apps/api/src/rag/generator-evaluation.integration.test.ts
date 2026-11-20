@@ -16,7 +16,8 @@ import { answerWithSelfCorrection, type Evidence } from './self-correcting-answe
 import { vectorEvidenceRetriever, type ClientRunner } from './document-evidence.js';
 import type { LabelledCase } from './abstention-cases.js';
 import { generatorEvalCases } from './generator-cases.js';
-import { createOllamaGenerator, GenerationError, GENERATOR_MODEL } from './ollama-generator.js';
+import { generatorEvalCasesV2 } from './generator-cases-v2.js';
+import { createOllamaGenerator, GenerationError, GENERATOR_MODEL, type PromptVersion } from './ollama-generator.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
 
 // Gated: the pre-registered run of the live generator (docs/DEV-C4-GENERATOR-EVALUATION.md). It runs once per set. It
@@ -46,6 +47,11 @@ const retrieve = vectorEvidenceRetriever({ run, tenantId: north.tenantId, embedQ
 // Fixed for this run. Identical to the floor evaluation and to docs/DEV-C4-GENERATOR-EVALUATION.md.
 const FLOOR = 0.7;
 const POLICY = { maxRounds: 2, minScore: FLOOR, forbiddenSubstrings: ['SENTINEL-XYZ'] };
+// Which pre-registered run this is. The default is the first run: set v1 with prompt v1. The citation fix is set v2
+// with prompt v2 (docs/DEV-C4-CITATION-FIX.md). Nothing else changes between the two.
+const RUN = process.env.C4_GENERATOR_RUN === 'v2' ? 'v2' : 'v1';
+const EVAL_SET = RUN === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
+const PROMPT: PromptVersion = RUN === 'v2' ? 'v2' : 'v1';
 
 beforeAll(async () => {
   if (!live) return;
@@ -95,14 +101,14 @@ interface CaseRecord {
 describe.skipIf(!live)('live generator evaluation: one pre-registered run', () => {
   it('runs the real loop once over the set and writes the report', async () => {
     const records: CaseRecord[] = [];
-    for (const labelled of generatorEvalCases) {
+    for (const labelled of EVAL_SET) {
       let lastEvidence: readonly Evidence[] = [];
       const deps = {
         retrieve: async (query: string): Promise<Evidence[]> => {
           lastEvidence = await retrieve(query);
           return lastEvidence as Evidence[];
         },
-        generate: createOllamaGenerator(),
+        generate: createOllamaGenerator(undefined, PROMPT),
         reformulate: async () => null,
       };
       const top = (): { topScore: number | null; topSourceId: string | null } => ({
@@ -142,13 +148,15 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
         model: GENERATOR_MODEL,
         floor: FLOOR,
         policy: POLICY,
-        setSize: generatorEvalCases.length,
+        run: RUN,
+        promptVersion: PROMPT,
+        setSize: EVAL_SET.length,
         generationFailures: records.filter((record) => record.status === 'generation_failed').length,
         scoredCases: scored.length,
         report,
         records,
       }, null, 2)}\n`);
     }
-    expect(records).toHaveLength(generatorEvalCases.length);
+    expect(records).toHaveLength(EVAL_SET.length);
   }, 1_800_000);
 });
