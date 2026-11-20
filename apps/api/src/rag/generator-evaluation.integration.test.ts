@@ -20,7 +20,9 @@ import { generatorEvalCasesV2 } from './generator-cases-v2.js';
 import { generatorEvalCasesV3 } from './generator-cases-v3.js';
 import { generatorEvalCasesV4 } from './generator-cases-v4.js';
 import { generatorEvalCasesV5 } from './generator-cases-v5.js';
+import { generatorEvalCasesV6 } from './generator-cases-v6.js';
 import { createOllamaGenerator, GenerationError, GENERATOR_MODEL, type PromptVersion } from './ollama-generator.js';
+import { createOllamaReformulator, REFORMULATOR_MODEL, REFORMULATOR_PROMPT_VERSION } from './ollama-reformulator.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
 
 // Gated: the pre-registered run of the live generator (docs/DEV-C4-GENERATOR-EVALUATION.md). It runs once per set. It
@@ -57,8 +59,11 @@ const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v4' ? 'v4'
 // The set can be chosen separately from the prompt, for the independent-set run (docs/DEV-C4-INDEPENDENT-SET.md).
 // Unset, the set follows the prompt, as before.
 const SET_NAME = process.env.C4_GENERATOR_SET ?? RUN;
-const EVAL_SET = SET_NAME === 'v5' ? generatorEvalCasesV5
-  : SET_NAME === 'v4' ? generatorEvalCasesV4 : SET_NAME === 'v3' ? generatorEvalCasesV3
+// Reformulation is off unless C4_LOOP_REFORMULATE=1 (docs/DEV-C4-REFORMULATION.md). Off, the loop is exactly as before.
+const REFORMULATE = process.env.C4_LOOP_REFORMULATE === '1';
+const EVAL_SET = SET_NAME === 'v6' ? generatorEvalCasesV6
+  : SET_NAME === 'v5' ? generatorEvalCasesV5
+    : SET_NAME === 'v4' ? generatorEvalCasesV4 : SET_NAME === 'v3' ? generatorEvalCasesV3
     : SET_NAME === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
 const PROMPT: PromptVersion = RUN;
 
@@ -118,14 +123,14 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
           return lastEvidence as Evidence[];
         },
         generate: createOllamaGenerator(undefined, PROMPT),
-        reformulate: async () => null,
+        reformulate: REFORMULATE ? createOllamaReformulator() : async () => null,
       };
       const top = (): { topScore: number | null; topSourceId: string | null } => ({
         topScore: lastEvidence[0]?.score ?? null,
         topSourceId: lastEvidence[0]?.sourceId ?? null,
       });
       try {
-        const result = await answerWithSelfCorrection(labelled.question, deps, POLICY);
+        const result = await answerWithSelfCorrection(labelled.question, deps, { ...POLICY, retryOnInsufficientEvidence: REFORMULATE });
         if (result.status === 'answered') {
           records.push({
             id: labelled.id, expected: labelled.expected, status: 'answered', citations: result.citations,
@@ -160,6 +165,7 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
         run: RUN,
         promptVersion: PROMPT,
         setName: SET_NAME,
+        reformulation: REFORMULATE ? { enabled: true, model: REFORMULATOR_MODEL, prompt: REFORMULATOR_PROMPT_VERSION } : { enabled: false },
         setSize: EVAL_SET.length,
         generationFailures: records.filter((record) => record.status === 'generation_failed').length,
         scoredCases: scored.length,

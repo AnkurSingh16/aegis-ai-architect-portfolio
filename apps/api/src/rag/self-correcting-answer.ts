@@ -35,6 +35,11 @@ export interface SelfCorrectionPolicy {
   readonly minScore: number;
   /** Strings that must not appear in an answer. */
   readonly forbiddenSubstrings: readonly string[];
+  /**
+   * When true, a round with no usable evidence asks reformulate for one new query and tries again, if rounds remain.
+   * Default false: the loop then behaves exactly as before. See docs/DEV-C4-REFORMULATION.md.
+   */
+  readonly retryOnInsufficientEvidence?: boolean;
 }
 
 export type Problem = 'empty_answer' | 'forbidden_substring' | 'unknown_citation' | 'no_citation';
@@ -67,7 +72,16 @@ export async function answerWithSelfCorrection(
   for (let round = 1; round <= policy.maxRounds; round += 1) {
     const usable = (await deps.retrieve(query)).filter((item) => item.score >= policy.minScore);
     if (usable.length === 0) {
-      return { status: 'abstained', reason: 'insufficient_evidence', rounds: round, problemHistory };
+      // Off by default. When on, a round with no usable evidence asks for one reworded query before it gives up.
+      if (!policy.retryOnInsufficientEvidence || round === policy.maxRounds) {
+        return { status: 'abstained', reason: 'insufficient_evidence', rounds: round, problemHistory };
+      }
+      const next = await deps.reformulate({ question, query, feedback: ['insufficient_evidence'] });
+      if (next === null || next.trim().length === 0 || next.length > MAX_QUERY_LENGTH) {
+        return { status: 'abstained', reason: 'insufficient_evidence', rounds: round, problemHistory };
+      }
+      query = next.trim();
+      continue;
     }
 
     const answer = await deps.generate({ question, query, evidence: usable, feedback });
