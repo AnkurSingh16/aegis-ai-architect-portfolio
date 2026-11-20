@@ -41,9 +41,18 @@ const SYSTEM_PROMPT_V2 = [
   'An answer without that final Sources line is invalid.',
 ].join(' ');
 
-export type PromptVersion = 'v1' | 'v2';
+/**
+ * Version 3 is the next version in docs/DEV-C4-CITATION-FIX-V3.md. The only change from version 2 is one rule against
+ * extra citations, prompted by the wrong-source answer in the version 2 run.
+ */
+const SYSTEM_PROMPT_V3 = [
+  SYSTEM_PROMPT_V2,
+  'Cite only the sources that directly support a statement. Do not add a source because it is related to the question.',
+].join(' ');
 
-const SYSTEM_PROMPTS: Record<PromptVersion, string> = { v1: SYSTEM_PROMPT_V1, v2: SYSTEM_PROMPT_V2 };
+export type PromptVersion = 'v1' | 'v2' | 'v3';
+
+const SYSTEM_PROMPTS: Record<PromptVersion, string> = { v1: SYSTEM_PROMPT_V1, v2: SYSTEM_PROMPT_V2, v3: SYSTEM_PROMPT_V3 };
 
 /** Builds the user message. Feedback is problem names only, never the offending text. */
 export function buildPrompt(input: GenerateInput): string {
