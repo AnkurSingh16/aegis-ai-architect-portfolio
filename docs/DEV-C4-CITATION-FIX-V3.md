@@ -51,3 +51,28 @@ It is one author's set, written after seeing the version 2 failure, so it is not
 - A stricter citation rule can cause more abstentions. Those are reported as abstentions, not treated as safety wins.
 - The scorer checks citations, not whether the answer text is true to the document.
 - The earlier sets and their results remain on record and are not re-run.
+
+## Result (one run, as pre-registered)
+
+Run once through the real loop with `C4_GENERATOR_RUN=v3`: set v3, prompt v3, the same model, floor, retrieval and policy.
+All 24 cases completed. No generation failures.
+
+- **Answer recall:** 10 of 12 (0.83). **False answers:** 0 of 12. **Wrong-source answers:** 0.
+- **Abstention precision:** 0.86 (12 true abstentions, 2 false abstentions).
+- **Citation rejections (`no_citation`):** 2 (`gen3-answer-login-token-request` and `gen3-answer-mfa-status-reference`).
+  Version 2 had 1.
+- Two answers repeated the same source id twice (`gen3-answer-login-timeline-window`, `gen3-answer-mfa-test-factor-clock`,
+  and `gen3-answer-network-symptom-timestamp`). The scorer counts these as correct, because every citation names the expected source.
+
+**Decision rule, applied as written:**
+- Citation format: **not met.** Two `no_citation` rejections, where the rule requires zero.
+- Safety: **met.** Zero false answers and zero wrong-source answers.
+
+**Reading:** the extra-citation rule removed the wrong-source answer seen in version 2. It did not remove the missing Sources
+lines. Both `no_citation` cases reached the loop's second check (after the answer was generated) and then abstained, because
+reformulation is disabled. These two cases sit above the floor, so they are citation misses, not retrieval misses.
+
+Under the protocol the result is reported as it stands. The prompt is not changed and this set is not re-run. Any further
+change is a new prompt version with a new pre-registered set.
+
+The report is kept in the scratchpad (`c4-citation-fix-v3-run1.json`), not in the repository.
