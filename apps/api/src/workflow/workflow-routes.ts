@@ -110,6 +110,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       },
       owner: `api-${request.id}`,
       correlationId: correlations.get(request),
+      log: (record) => console.info(JSON.stringify({ ...record, requestId: request.id })),
       policy, leaseMs: LEASE_MS, timeoutMs: TIMEOUT_MS, clock: () => new Date(),
     });
 

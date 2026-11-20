@@ -206,6 +206,20 @@ describe('correlation id on the execution', () => {
     }
   });
 
+  it('logs the driver record for a triage request with the same correlation id and execution id', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      const response = await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': key(), 'x-correlation-id': 'driver-trace-11' }, { caseId: 'SYNTHETIC-LOGIN-001' });
+      const { executionId, outcome } = response.json() as { executionId: string; outcome: string };
+      const lines = info.mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+      expect(lines).toContainEqual(expect.objectContaining({
+        event: 'durable_attempt', correlationId: 'driver-trace-11', executionId, outcome, requestId: expect.any(String),
+      }));
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('keeps the first correlation id when a repeated key arrives with a different one', async () => {
     const idKey = key();
     const first = (await post(tenantNorth, { authorization: 'Bearer reader', 'idempotency-key': idKey, 'x-correlation-id': 'first-trace' }, { caseId: 'SYNTHETIC-LOGIN-001' })).json() as { executionId: string };

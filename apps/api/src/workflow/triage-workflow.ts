@@ -1,7 +1,7 @@
 import type { ToolDispatcher, DispatchResult } from '../agents/tool-dispatcher.js';
 import type { RequestContext } from '../security/tool-policy-gateway.js';
 import type { createDurableStore } from './durable-store.js';
-import { type DriverOutcome, runDurableAttempt } from './durable-driver.js';
+import { type DriverLog, type DriverOutcome, runDurableAttempt } from './durable-driver.js';
 import type { RetryPolicy } from './retry-policy.js';
 
 /**
@@ -24,6 +24,8 @@ export interface TriageWorkflowInput {
   readonly owner: string;
   /** Recorded on the execution when it is created. */
   readonly correlationId?: string;
+  /** Optional driver log. Receives one record per attempt call, with the correlation id. */
+  readonly log?: DriverLog;
   readonly policy: RetryPolicy;
   readonly leaseMs: number;
   readonly timeoutMs: number;
@@ -54,6 +56,8 @@ export async function runTriageWorkflow(input: TriageWorkflowInput): Promise<Tri
     leaseMs: input.leaseMs,
     timeoutMs: input.timeoutMs,
     clock: input.clock,
+    correlationId: input.correlationId ?? null,
+    ...(input.log ? { log: input.log } : {}),
     step: async () => {
       const result: DispatchResult = await input.dispatcher.dispatch(
         { toolName: 'case.triage', arguments: input.args },

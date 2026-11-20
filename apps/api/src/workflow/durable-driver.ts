@@ -21,6 +21,23 @@ export type DriverOutcome =
   | { readonly status: 'approval_requested'; readonly approvalId: string }
   | { readonly status: 'cancelled'; readonly reason: 'requested' | 'approval_rejected' | 'approval_expired' | 'approval_already_consumed' };
 
+/**
+ * One record per driver call. It carries ids, the outcome and the error class only. It never carries step input, error
+ * messages or approval ids, so a log line cannot leak what an attempt was working on.
+ */
+export interface DriverLogRecord {
+  readonly event: 'durable_attempt';
+  readonly executionId: string;
+  readonly correlationId: string | null;
+  readonly outcome: DriverOutcome['status'] | 'error';
+  readonly attempt?: number;
+  readonly errorClass?: string;
+  readonly reason?: string;
+  readonly errorName?: string;
+}
+
+export type DriverLog = (record: DriverLogRecord) => void;
+
 export interface DriverInput {
   readonly store: ReturnType<typeof createDurableStore>;
   readonly executionId: string;
@@ -31,6 +48,10 @@ export interface DriverInput {
   readonly timeoutMs: number;
   readonly clock: () => Date;
   readonly approvalGate?: ApprovalGate;
+  /** Optional. Receives one record per call. A logging failure never changes the outcome. */
+  readonly log?: DriverLog;
+  /** Carried on every log record, so one request can be followed through the driver. */
+  readonly correlationId?: string | null;
   /** Performs one attempt. Must be idempotent under the execution id and attempt number, because attempts can be repeated after a crash. */
   readonly step: (attempt: number, signal: AbortSignal) => Promise<void>;
 }
@@ -57,6 +78,32 @@ async function withTimeout(work: Promise<void>, timeoutMs: number, controller: A
  * Call it again after a crash, a retry delay or an approval. It resumes from the persisted state.
  */
 export async function runDurableAttempt(input: DriverInput): Promise<DriverOutcome> {
+  const correlationId = input.correlationId ?? null;
+  const emit = (record: Omit<DriverLogRecord, 'event' | 'executionId' | 'correlationId'>) => {
+    if (!input.log) return;
+    try {
+      input.log({ event: 'durable_attempt', executionId: input.executionId, correlationId, ...record });
+    } catch {
+      // Logging must not turn a committed outcome into an error for the caller.
+    }
+  };
+  let outcome: DriverOutcome;
+  try {
+    outcome = await attemptOnce(input);
+  } catch (error) {
+    emit({ outcome: 'error', errorName: error instanceof Error ? error.name : 'unknown' });
+    throw error;
+  }
+  emit({
+    outcome: outcome.status,
+    ...('attempt' in outcome ? { attempt: outcome.attempt } : {}),
+    ...('errorClass' in outcome ? { errorClass: outcome.errorClass } : {}),
+    ...('reason' in outcome ? { reason: outcome.reason } : {}),
+  });
+  return outcome;
+}
+
+async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   validateRetryPolicy(input.policy);
   const { store, tenantId, executionId, owner } = input;
   const now = input.clock();

@@ -5,7 +5,7 @@ import { createDatabasePool } from '../storage/database.js';
 import { migrateDatabase } from '../storage/migrations.js';
 import type { TenantQueryable } from '../security/tool-approval-store.js';
 import { createDurableStore } from './durable-store.js';
-import { runDurableAttempt } from './durable-driver.js';
+import { type DriverLogRecord, runDurableAttempt } from './durable-driver.js';
 
 // Real PostgreSQL checks for migration 008 and the durable execution driver.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
@@ -160,5 +160,25 @@ describe('durable execution in real PostgreSQL', () => {
       await client.query('ROLLBACK').catch(() => undefined);
       client.release();
     }
+  });
+
+  it('logs one record per call with ids and the outcome, and never the error message', async () => {
+    const records: DriverLogRecord[] = [];
+    const { executionId } = await store.createExecution(tenantA, `log-${randomUUID()}`, 3);
+    const base = driver(executionId, tenantA, 'w', { now: 0 }, async () => { throw new Error('payload SENTINEL-LOG-1'); });
+    const outcome = await runDurableAttempt({ ...base, log: (record) => { records.push(record); }, correlationId: 'corr-driver-1' });
+    expect(outcome).toEqual({ status: 'failed', attempt: 1, errorClass: 'permanent' });
+    expect(records).toEqual([{
+      event: 'durable_attempt', executionId, correlationId: 'corr-driver-1', outcome: 'failed', attempt: 1, errorClass: 'permanent',
+    }]);
+    expect(JSON.stringify(records)).not.toContain('SENTINEL-LOG-1');
+  });
+
+  it('keeps the committed outcome when the logger throws', async () => {
+    const { executionId } = await store.createExecution(tenantA, `logthrow-${randomUUID()}`, 3);
+    const base = driver(executionId, tenantA, 'w', { now: 0 }, async () => undefined);
+    const outcome = await runDurableAttempt({ ...base, log: () => { throw new Error('log sink unavailable'); }, correlationId: null });
+    expect(outcome).toEqual({ status: 'succeeded', attempt: 1 });
+    expect((await store.load(executionId, tenantA))?.execution.state).toBe('succeeded');
   });
 });
