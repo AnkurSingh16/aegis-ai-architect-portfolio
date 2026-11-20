@@ -77,7 +77,7 @@ Run once on 2026-11-20 with the command above, against a disposable PostgreSQL c
 | False abstentions | 5 |
 | Abstention precision | 0.71 |
 | `no_citation` rejections | 0 |
-| `no_answer_text` rejections (round level) | 3 (`gen8-answer-recovery-doubt`, `gen8-answer-network-symptoms`, and one more answer-text rejection in round 1, all abstained) |
+| `no_answer_text` rejections (round level) | 2 (`gen8-answer-recovery-doubt`, `gen8-answer-network-symptoms`; both abstained in round 1) |
 | `answerTextProblems` | none |
 | `sourcesOnlyProblems` | none |
 
