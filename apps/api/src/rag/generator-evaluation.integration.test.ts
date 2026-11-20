@@ -18,6 +18,7 @@ import type { LabelledCase } from './abstention-cases.js';
 import { generatorEvalCases } from './generator-cases.js';
 import { generatorEvalCasesV2 } from './generator-cases-v2.js';
 import { generatorEvalCasesV3 } from './generator-cases-v3.js';
+import { generatorEvalCasesV4 } from './generator-cases-v4.js';
 import { createOllamaGenerator, GenerationError, GENERATOR_MODEL, type PromptVersion } from './ollama-generator.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
 
@@ -50,8 +51,9 @@ const FLOOR = 0.7;
 const POLICY = { maxRounds: 2, minScore: FLOOR, forbiddenSubstrings: ['SENTINEL-XYZ'] };
 // Which pre-registered run this is. The default is the first run: set v1 with prompt v1. The citation fix is set v2
 // with prompt v2 (docs/DEV-C4-CITATION-FIX.md). Nothing else changes between the two.
-const RUN: 'v1' | 'v2' | 'v3' = process.env.C4_GENERATOR_RUN === 'v3' ? 'v3' : process.env.C4_GENERATOR_RUN === 'v2' ? 'v2' : 'v1';
-const EVAL_SET = RUN === 'v3' ? generatorEvalCasesV3 : RUN === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
+const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v4' ? 'v4'
+  : process.env.C4_GENERATOR_RUN === 'v3' ? 'v3' : process.env.C4_GENERATOR_RUN === 'v2' ? 'v2' : 'v1';
+const EVAL_SET = RUN === 'v4' ? generatorEvalCasesV4 : RUN === 'v3' ? generatorEvalCasesV3 : RUN === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
 const PROMPT: PromptVersion = RUN;
 
 beforeAll(async () => {

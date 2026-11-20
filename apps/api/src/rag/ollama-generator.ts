@@ -50,9 +50,25 @@ const SYSTEM_PROMPT_V3 = [
   'Cite only the sources that directly support a statement. Do not add a source because it is related to the question.',
 ].join(' ');
 
-export type PromptVersion = 'v1' | 'v2' | 'v3';
+/**
+ * Version 4 is the next version in docs/DEV-C4-CITATION-FIX-V4.md. The only change from version 3 is a layout example, aimed
+ * at the missing Sources lines in the version 3 run. The example id is a placeholder that is not in any evidence, so if it
+ * were copied the output guard would reject the answer as an unknown citation. It cannot pass as a real citation.
+ */
+const SYSTEM_PROMPT_V4 = [
+  SYSTEM_PROMPT_V3,
+  'Layout: write the answer text, then a blank line, then the Sources line. For example:',
+  'answer text here.',
+  '',
+  'Sources: [EXAMPLE-ID]',
+  'EXAMPLE-ID is a placeholder and is never a valid source. Use only the ids given in the evidence.',
+].join('\n');
 
-const SYSTEM_PROMPTS: Record<PromptVersion, string> = { v1: SYSTEM_PROMPT_V1, v2: SYSTEM_PROMPT_V2, v3: SYSTEM_PROMPT_V3 };
+export type PromptVersion = 'v1' | 'v2' | 'v3' | 'v4';
+
+const SYSTEM_PROMPTS: Record<PromptVersion, string> = {
+  v1: SYSTEM_PROMPT_V1, v2: SYSTEM_PROMPT_V2, v3: SYSTEM_PROMPT_V3, v4: SYSTEM_PROMPT_V4,
+};
 
 /** Builds the user message. Feedback is problem names only, never the offending text. */
 export function buildPrompt(input: GenerateInput): string {
