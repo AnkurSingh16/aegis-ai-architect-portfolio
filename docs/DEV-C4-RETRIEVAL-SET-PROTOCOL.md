@@ -1,0 +1,59 @@
+# C4 retrieval: a fresh set with each expected document checked before any run (pre-registered, not yet built)
+
+Recorded before any set is written. Nothing here has been run.
+
+## Why
+
+The rerank run (`docs/DEV-C4-RERANK-PROTOCOL.md`, result section) was rejected, partly because its set did not test what
+its protocol said. Ten of twelve expected documents were already ranked first, and that was not checked before the run. A
+ranking test is only meaningful if the expected document is in a position a candidate could change. This protocol makes that
+check a fixed, recorded step, before any candidate is measured on the set.
+
+It also does not change the floor. The six boundary misses (`docs/DEV-C4-BELOW-FLOOR-MISSES.md`) are not something this set
+can fix. The set measures where the expected document ranks and what score it gets. Setting a floor from it would be tuning.
+
+## Step 1: write the questions (no retrieval yet)
+
+- Twelve answerable questions, three per North document, written before any retrieval is run on them.
+- Twelve unanswerable questions: six off-topic, six South-domain.
+- No question repeats wording from any earlier set (the existing no-overlap test is extended to include this set).
+- Same-author. The result must say so.
+
+## Step 2: the selection check (raw retrieval only)
+
+Before the set is frozen, run raw vector retrieval, top five, with the same embedding model and digest as the route. No
+reranker, no generator, no floor applied. For each answerable question, record:
+
+- the rank of the expected document in the top five (or absent), and
+- the score of the top-ranked item.
+
+The rule, fixed now:
+
+- **Keep** an answerable question whose expected document ranks second to fifth, or is absent. (Absent is kept so the set
+  shows misses as well as ranking problems.)
+- **Drop** an answerable question whose expected document ranks first, and say so in the record. Replace it with a new
+  question written before the check, not a reworded one.
+- Unanswerable questions are kept as written, but their top score is recorded.
+
+The frozen set and the record of every dropped question are committed before any candidate is run.
+
+## Step 3: candidates (separate protocol)
+
+No candidate is measured on this set until a candidate is pre-registered in its own document. The candidate must state
+which measure it aims to change, which rank positions it can affect, and its acceptance rule, all before any run.
+
+## Measures (fixed now)
+
+- Top-one accuracy and mean reciprocal rank of the expected document, on the kept answerable questions.
+- The distribution of top scores on answerable and unanswerable questions, to show where the floor boundary sits. This is
+  reported, not used to choose a floor.
+- Count of dropped questions and the reason for each.
+
+## Limits
+
+- Same-author. A fresh, independent author would be a stronger test; the result must state this limit.
+- Twelve answerable questions. One question moves top-one accuracy by about eight points, so small differences are not
+  evidence of anything.
+- The selection step removes questions the candidate could not improve. That makes the set good for ranking tests and
+  unsuitable for measuring overall recall. Recall must be reported separately, on an unselected set.
+- Synthetic corpus, one embedding model.
