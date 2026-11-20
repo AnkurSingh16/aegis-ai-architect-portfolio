@@ -96,9 +96,9 @@ v4 with the route policy. The protocol above was not changed before or after the
 - **The set did not test what it was built to test.** The protocol said the expected document would be in the top five but
   not first. In fact ten of twelve were already first in the raw order. The set design was not checked before the run,
   and the protocol said it was not. The run therefore could not show a ranking gain, even if one existed.
-- **Two answerable questions were ranked second or third in the raw order** (`rr1-answer-mfa-status-page`,
-  `rr1-answer-recovery-named`, and `rr1-answer-network-*` after reranking). The rerank moved one of them to first and
-  moved the other off first. This is too small to read as a trend.
+- **Four answerable questions changed rank.** Two improved: `rr1-answer-mfa-status-page` (2 to 1) and
+  `rr1-answer-recovery-named` (3 to 1). Two got worse: `rr1-answer-network-record` and `rr1-answer-network-health` (1 to 2).
+  Top-one accuracy is unchanged because the gains and the losses cancel. This is too small to read as a trend.
 - **Eight of the 24 rerank replies were unparsed.** All eight were on unanswerable questions, where the reply does not affect
   the decision. The 3B model did not reliably return a single source id.
 - Recall on this set (5 of 12) is not comparable with the earlier sets. It is a different set, and this is one run.
