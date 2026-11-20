@@ -1,0 +1,83 @@
+# AEGIS Enterprise AI Requirements Register
+
+Status labels: COMPLETE, PARTIAL, MISSING, BLOCKED, NOT JUSTIFIED, UNVERIFIED.
+Baseline: `origin/main` at `281926974c9b` (PR #68). Evidence is file-level, from a targeted search of `apps/api/src` on 19 Nov 2026.
+
+This register tracks implementation status only. It does not record human approval, benchmark qualification, or production readiness.
+
+## Technical capabilities (1–12)
+
+| ID | Capability | Status | Repository evidence | Missing work | Next step |
+|---|---|---|---|---|---|
+| C1 | Context assembler engine | PARTIAL | `context/context-assembler.ts`: budgeted assembly, priority ordering, duplicate removal, provenance, trace, overflow error (16 tests incl. metrics). Dev live benchmark in `docs/DEV-CONTEXT-ASSEMBLY-BENCHMARK.md` | Approximate tokenizer only (exact counts need the model tokenizer); not wired into a workflow; no memory or summarisation | Wire into the grounded analysis path behind a flag |
+| C2 | Hybrid retrieval and reranking | PARTIAL | Lexical: `documents/retrieval.ts` (tenant-scoped full-text). Vector: `retrieval/ollama-embeddings.ts` (loopback `nomic-embed-text`, validated, bounded), `retrieval/vector-retrieval.ts`, migration 009 (`chunk_embeddings`, pgvector, HNSW, RLS). Hybrid: reciprocal rank fusion. Live measurement on the paraphrase set (`docs/DEV-RETRIEVAL-PARAPHRASE-MEASUREMENT.md`): MRR lexical 0.125, vector 0.542, hybrid 0.625. Recall@5 is saturated on a four-document pool | No reranker. A 50-document development benchmark (`docs/DEV-LARGE-RETRIEVAL-BENCHMARK.md`) shows vector MRR 0.882 and hybrid 0.487 on pure paraphrases, and BM25 zero by construction. Equal-weight fusion hurts here. Mixed 100-query set with dev/test split (`docs/DEV-LARGE-RETRIEVAL-BENCHMARK.md`): on held-out test, vector MRR 0.931, equal-weight RRF 0.740, tuned weighted RRF selects w = 0 (vector only). No fusion weight beat vector on dev. Synthetic data, one model, one run. Not wired into a workflow or route. Latency not benchmarked. Single embedding model | Build a larger synthetic corpus, add a reranker, benchmark latency |
+| C3 | GraphRAG | MISSING | None | Not evaluated. A NOT JUSTIFIED verdict needs comparative evidence against C2 first | Defer until C2 benchmarks exist |
+| C4 | Self-correcting agentic RAG | PARTIAL | `rag/self-correcting-answer.ts` and 9 unit tests: bounded loop (1 to 3 rounds) with injected retrieve, generate and reformulate. Abstains on insufficient evidence (score floor), on guard failure after the last round, or when no reformulation exists. Citation verification uses the output guard and requires at least one citation. Feedback passes problem names only, never the offending text. `rag/document-evidence.ts` adapts tenant-scoped lexical retrieval to the loop; `rag/answer-loop.integration.test.ts` (3 real-PostgreSQL tests) shows answers cite only the caller's tenant documents, cross-tenant questions abstain without generation, and an invalid reformulation abstains. A labelled abstention evaluation (15 development cases, `rag/abstention-cases.ts`, `rag/abstention-evaluation.ts`, `rag/abstention-evaluation.integration.test.ts`, results in `docs/DEV-C4-ABSTENTION-EVALUATION.md`) measures answer recall 3 of 8 on paraphrased answerable questions, 0 of 7 false answers and abstention precision 7 of 12. It measures decisions with a stub generator, not generated quality | A live generator exists (`rag/ollama-generator.ts`, loopback Ollama, `qwen2.5:3b-instruct` pinned by digest, deterministic, bounded prompt and output; 8 unit tests and one gated smoke test that checks the digest and the response shape, not quality). It is not yet wired into the loop by default, and it has not been evaluated. Vector retrieval is wired to the loop (`vectorEvidenceRetriever`, live-gated). The similarity floor is set to 0.70 by the owner (`docs/DEV-C4-FLOOR-CALIBRATION.md`, decision recorded after the third holdout). It is chosen for the current synthetic corpus and the local embedding model only. The fixed rule gives 0.70 on the calibration set v2 (a floating-point tie bug that chose 0.66 is fixed). Results at 0.70: 0 false answers on holdouts v2 and v3, answer recall 9 of 12 on each. All three holdouts are spent. The floor is not validated on an independent set. The 0.5 floor answered 4 of 7 unanswerable questions (`docs/DEV-C4-ABSTENTION-EVALUATION.md`). Route `POST /api/tenants/:tenantId/answers` (`rag/answer-routes.ts`, bearer token, read scope, tenant membership; returns the answer and citations or an abstention with its reason; 503 with no detail when a model service is unavailable; logs outcome and correlation id, never the question or the answer; 9 real-PostgreSQL tests with the model calls injected). It uses the owner's 0.70 floor, prompt v5 (moved from v4 after set v8 met its pre-registered rules, `docs/DEV-C4-ANSWER-QUALITY-V8-PROTOCOL.md`), two rounds, the answer-text check, and no retry on insufficient evidence (not accepted). Mounted only with auth configuration, like the workflow routes. Prompt v4 was NOT READY: its live check found the layout placeholder `answer text here.` returned as the answer (`docs/DEV-C4-CITATION-FIX-V4.md`). Prompt v5 removed that example. On the one-run set v8 (24 cases, same author) it met the citation, safety and answer-text rules, with answer recall 7 of 12. A two-question live smoke check on v5 passed, but its answer copied its source sentence. Answer quality is not measured by an independent set, and no human has checked the answers against their sources. No query analysis (reformulation is injected, off in the route); answer quality not measured; the evaluation is 15 cases, one author, one run | Validate the 0.70 floor on a new, independently written labelled set (pre-registered, run once); a human review of the v8 answers for truth to their sources; improve retrieval for paraphrased questions (below-floor misses, `docs/DEV-C4-BELOW-FLOOR-MISSES.md`); an independently authored evaluation of the route's end-to-end answers |
+| C5 | Durable agent state machine | PARTIAL | In-memory: `workflow/execution-state.ts`, `retry-policy.ts`, `execution-runner.ts` (20 tests). Durable: migration 008 (`workflow_executions` with leases, version, approval and cancel flags; append-only `workflow_checkpoints`; RLS), `workflow/durable-store.ts`, `workflow/durable-driver.ts`. The driver runs one step per call, recovers lost attempts, schedules retries, waits for a per-attempt approval gate backed by the tool approval store (granted, rejected, expired or already consumed), and honours cancellation. Real-PostgreSQL tests: 10 durability and 9 approval/cancellation (76 integration tests total, all passing on a fresh database) | Connected to the triage tool as `workflow/triage-workflow.ts` (6 real-PostgreSQL tests) and exposed at `POST /api/tenants/:tenantId/workflows/triage` behind bearer authentication, a read-scope check and tenant membership, with a required Idempotency-Key (7 real-PostgreSQL route tests). Status route `GET .../workflows/executions/:executionId` (state, attempts, version, last error class, checkpoints; read scope and membership). Dead-letter view `GET .../workflows/dead-letters` lists failed executions per tenant, newest first, limit 1 to 100; read-only. `x-correlation-id` is echoed on every response and recorded on the execution at creation (migration 010; the runtime role can insert it but not change it); unsafe values are replaced by the request id. The status route returns it. 16 real-PostgreSQL route tests. The triage route's JSON log line records the correlation id, execution id and driver status for each success, and the correlation id for each failure. The status and dead-letter routes log the correlation id and outcome. Operator requeue `POST .../workflows/dead-letters/:executionId/requeue` (write scope and operator role; body needs a non-blank reason up to 500 characters): moves a failed execution without a cancel request to retry_wait, keeps the attempt count, and writes an audited checkpoint with actor and reason (migration 011). Refused with 409 otherwise. An exhausted execution gets one more attempt; its next failure is permanent. Real-PostgreSQL tests: 5. Lease clock is the caller's clock. Each attempt needs a new approval, so retries need a human | The driver emits one record per call (`durable_attempt`: execution id, correlation id, outcome, attempt, error class, reason) through an injected logger. It never logs step input, error messages or approval ids, and a throwing logger cannot change the outcome. The triage route supplies the logger and the request id. 3 real-PostgreSQL tests. Still missing: metrics and trace export, and log retention or shipping |
+| C6 | MCP tool server | MISSING | None found | Tool schemas, permission enforcement, audit logging | Depends on C10 |
+| C7 | Three-tier memory | MISSING | None found | All three tiers, retention, deletion, poisoning defences | Defer; needs privacy design decision |
+| C8 | Typed multi-agent orchestration | MISSING | None found | Roles, delegation, messaging, bounded loops, approval integration | Depends on C5 and C10 |
+| C9 | Trajectory evaluation and CI gates | PARTIAL | Grounded and exploratory evaluation runners and scorers under `ai/evaluation/`; CI workflows exist in `.github/` | Trajectory metrics, cost per successful task, CI regression gate verified on the exact PR head | Verify CI gate definitions before claiming any gate |
+| C10 | Inter-agent security proxy | PARTIAL | `security/tool-policy-gateway.ts`: deny-by-default tool authorisation, least-privilege scope intersection, trusted-context tenant binding, argument screening (tenant, privilege, secret), approval bound to action digest, no self-approval, single-use approvals, issued single-use run ids for results. 18 adversarial tests. `context/output-guard.ts` checks answers (4 tests); live dev run showed the model echoed a planted sentinel in 4 of 8 runs | Wired to one read-only tool (`case.triage`) through `agents/tool-dispatcher.ts` with 6 tests. Not exposed on any HTTP route. Approvals are persisted in `aegis.tool_approvals` (migration 007, additive, RLS-scoped, DB trigger for legal transitions). Store and gateway are async with atomic single-use consume. No side-effecting tool is registered yet; the approval path is tested with a test-only tool. Verified against a disposable PostgreSQL 17 container: `npm run test:integration` passes 57 of 57 on a fresh database, including 4 approval tests (atomic single consume under concurrency, tenant isolation, expiry, and database-level transition rejection). Identity is passed in, not verified. No network or rate-limit controls | High priority; wire to C6 and C8 |
+| C11 | Semantic cache and model routing | MISSING | Only `auth/` cache-like code (not related) | All components | Defer; measure first |
+| C12 | Public architecture teardown | PARTIAL | Existing `docs/` architecture and evaluation notes | Teardown document covering all sections of the directive | Write once C1–C10 status is final |
+
+## Director-level capabilities (L1–L6)
+
+| ID | Capability | Status | Repository evidence | Next step |
+|---|---|---|---|---|
+| L1 | Reliability, SLIs and SLOs | MISSING | Metrics references in `ai/` and `auth/` only; no SLI definitions | Define SLIs from telemetry that actually exists |
+| L2 | FinOps and commercial governance | MISSING | None | Requires measured token and cost data first |
+| L3 | Capacity and scalability | MISSING | None | Bounded local load test only, after C5 |
+| L4 | Responsible AI governance | MISSING | Evaluation provenance rules exist in `docs/` and `.claude/rules/` | Governance register once C9 provenance is verified |
+| L5 | Engineering operating model | MISSING | `AGENTS.md` and `.claude/` standards | Operating model document |
+| L6 | Investment and technology strategy | MISSING | None | Written only from measured evidence; no invented ROI |
+
+## Changes in the previous slice (C5)
+
+- `apps/api/src/workflow/execution-state.ts`: typed states and legal transitions.
+- `apps/api/src/workflow/retry-policy.ts`: policy validation, deterministic backoff, fail-closed failure classification.
+- `apps/api/src/workflow/execution-runner.ts`: retry driver with timeout, cancellation, audit trail, and an idempotent runner.
+- `apps/api/src/workflow/execution-runner.test.ts`: 20 deterministic tests.
+
+## Limitations
+
+- The state machine is in-memory. A process restart loses all state, so C5 is not durable yet.
+- No database migration or HTTP route uses this module.
+- Discovery was a keyword search, not a complete code audit. Statuses marked MISSING mean no matching implementation was found in that search.
+
+## Changes in the current slice (C1, C2, C10)
+
+- `apps/api/src/context/context-assembler.ts` and tests (approximate tokenizer declared).
+- `apps/api/src/retrieval/ranking-metrics.ts` and tests (recall@K, MRR, nDCG, RRF).
+- `apps/api/src/context/output-guard.ts` and tests.
+- `apps/api/scripts/dev-context-benchmark.ts` with synthetic fixtures `apps/api/scripts/fixtures/dev-context-fixtures.json` (non-protected, loopback Ollama, bounded to 8 requests).
+- Results and limits: `docs/DEV-CONTEXT-ASSEMBLY-BENCHMARK.md`.
+
+- `apps/api/src/security/tool-policy-gateway.ts` and 18 adversarial tests (C10).
+- `apps/api/src/agents/tool-dispatcher.ts`, `default-tools.ts` and 6 tests: tool execution only through the gateway.
+- `apps/api/db/migrations/007_tool_approvals.sql`: approval table, RLS, grants, transition trigger (additive).
+- `apps/api/src/security/tool-approval-store.ts` and tests: Postgres store with a tenant-scoped runner.
+- Gateway and dispatcher are now async. Migration count expectation in `storage.test.ts` changed from 6 to 7.
+- Migration `008_workflow_executions.sql` (additive), `workflow/durable-store.ts`, `workflow/durable-driver.ts`, real-PostgreSQL tests in `workflow/durable-execution.integration.test.ts`.
+- Runtime verifier and integration table list now expect 10 AEGIS tables. Migration count expectation is 8.
+- Migration 008 now also has `awaiting_approval`, `approval_id`, `approval_granted`, `cancel_requested`. Migration 008 is on an unmerged branch and was not applied to any shared database, so it was edited in place.
+- `workflow/durable-approval.integration.test.ts`: approval gate and cancellation tests. Workflow integration files now apply pending migrations themselves.
+- `workflow/triage-workflow.ts` and `workflow/triage-workflow.integration.test.ts`: triage tool run as a durable execution, authorised on every attempt.
+- `workflow/workflow-routes.ts` and `workflow/workflow-routes.integration.test.ts`: authenticated triage route. Registered in `app.ts` next to the protected case routes.
+- Migration `009_chunk_embeddings.sql` (additive; pgvector extension and derived embeddings table), `retrieval/ollama-embeddings.ts`, `retrieval/vector-retrieval.ts`, vector and hybrid tests inside `documents/documents.integration.test.ts`.
+- `retrieval/eval/` (50-document corpus, BM25 baseline, tests) and `scripts/large-retrieval-benchmark.ts`; results in `docs/DEV-LARGE-RETRIEVAL-BENCHMARK.md`.
+- `retrieval/eval/mixed-queries.ts` and tests; `scripts/mixed-retrieval-benchmark.ts`; `weightedReciprocalRankFusion` in `retrieval/ranking-metrics.ts`.
+
+## Changes in the C5 operations slice
+
+- `workflow/workflow-routes.ts`: status route, dead-letter view, correlation IDs.
+- Migration `010_workflow_correlation.sql` (additive): `correlation_id` on `workflow_executions`, insert-only for the runtime role. The runtime role verifier checks it. Migration count expectation in `storage.test.ts` is now 10.
+- `workflow/durable-store.ts`: `lastErrorClass` on execution rows, `listDeadLetters` (bounded, tenant-scoped, read-only).
+- `workflow/workflow-routes.integration.test.ts`: 6 new real-PostgreSQL tests (13 in the file).
+
+## Test-isolation fix (documents and storage files)
+
+- Previously `documents/documents.integration.test.ts` left its catalog rows in the shared test database, so `storage/storage.integration.test.ts` failed 4 assertions when both ran together.
+- Its `afterAll` now deletes its own chunk embeddings, chunks and documents for the two test tenants and the catalog's source identities, then its memberships.
+- Verified on one fresh disposable PostgreSQL 17 database: full integration suite 99 passed, 1 skipped (the live local-embedding measurement, gated by an environment flag).

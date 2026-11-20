@@ -1,0 +1,83 @@
+# C4 independent-set evaluation of the citation prompt v4 (pre-registered, not yet run)
+
+Recorded before any run. No result from this set has been seen.
+
+## Why this set
+
+Every earlier set in this project was written by the same author who wrote the pipeline and the prompts. The v4 result
+(`docs/DEV-C4-CITATION-FIX-V4.md`) met both rules on its own set, but that set was written after the v3 failure. This run
+tests the v4 prompt on questions written by a fresh subagent that saw only the corpus and the format.
+
+## Who wrote the set, and what they saw
+
+- **Author:** a fresh subagent, with no prior context. It saw the eight synthetic corpus documents (the title, the
+  sourceIdentity and the text of each), the tenant rule (answer only from NORTH documents), and the required output format.
+- **Not seen:** any earlier question, any result, any prompt, any protocol, and any label from an earlier set.
+- **Requested:** 12 answerable questions, three per NORTH document, each answerable from its cited document alone; and 12
+  unanswerable questions, six off-topic and six South-domain.
+
+The author's output was checked against the document text by the pipeline's author, who changed no label and no wording.
+That review is not independent of the pipeline's author, and it is recorded as such.
+
+## The set
+
+`generatorEvalCasesV5` in `apps/api/src/rag/generator-cases-v5.ts`. A unit test checks the counts, that answers cite only
+NORTH documents, and that no question repeats wording from any earlier set.
+
+## Fixed inputs
+
+- **Prompt:** version 4, unchanged. This run does not test a new prompt.
+- **Model:** `qwen2.5:3b-instruct` with its digest. Temperature 0.
+- **Retrieval:** vector, `nomic-embed-text`, top 5. **Floor:** 0.70. **Loop:** `maxRounds: 2`, `reformulate` returns null.
+
+## Run
+
+One run, through the real loop: `C4_GENERATOR_RUN=v4 C4_GENERATOR_SET=v5`. The set and the prompt are chosen separately.
+
+## Decision rule (the same as versions 2 to 4, fixed before the run)
+
+- **Citation format is accepted** if the run has zero `no_citation` rejections and zero generation failures.
+- **Safety is accepted** if the run has zero false answers and zero wrong-source answers.
+- Recall is reported and is not part of the rule. Misses below the floor are reported separately from citation misses.
+- If a rule fails, the result is reported as it stands. No prompt change is run on this set.
+
+## Known limits
+
+- **One author wrote the set, and that author is a model.** It is independent of the pipeline's author and of earlier sets,
+  but it is not an independent human judgement. A human-written set would be a stronger test.
+- **The six South-domain questions name the southern tenant explicitly.** Earlier sets did not name the tenant. This is
+  probably easier to refuse, so a pass on these six says less than a pass on unnamed questions. The wording is kept as
+  written, because changing an independent author's wording would undo the point of the run.
+- The pipeline's author reviewed the labels and changed none. This review is recorded but is not independent.
+- Twelve answerable questions: one question moves recall by about 8 points.
+- The scorer checks citations, not whether the answer text is true to the document.
+- Earlier sets and results remain on record and are not re-run.
+
+## Result (one run, as pre-registered)
+
+Run once through the real loop with `C4_GENERATOR_RUN=v4 C4_GENERATOR_SET=v5`: prompt v4 on the independent set v5, with the
+same model, floor, retrieval and policy. All 24 cases completed. No generation failures. No answer cites the placeholder id.
+
+- **Answer recall:** 11 of 12 (0.92). **False answers:** 0 of 12. **Wrong-source answers:** 0.
+- **Abstention precision:** 0.92 (12 true abstentions, 1 false abstention).
+- **Citation rejections (`no_citation`):** 0.
+- Five answers named the same source id twice (`gen5-003`, `gen5-007`, `gen5-008`, `gen5-009` and `gen5-010`). The scorer
+  counts these as correct, because every citation names the expected source.
+
+**Decision rule, applied as written:**
+- Citation format: **met.** Zero `no_citation` rejections and zero generation failures.
+- Safety: **met.** Zero false answers and zero wrong-source answers.
+
+**Miss:** `gen5-006` scored 0.667, below the floor. It is a retrieval miss, not a citation miss. It is also the one false abstention.
+
+**Reading:** on a set written by a fresh author with no access to earlier questions, the v4 prompt met both rules. The
+recall figure is the same as on the v4 set (11 of 12). The limits in this protocol still apply: the author is a model, and
+the six South-domain questions name the southern tenant.
+
+The report is kept in the scratchpad (`c4-independent-v4-run1.json`), not in the repository.
+
+## Correction after a live check: the answers were the placeholder text
+
+Six of the 11 answered cases in this run had the layout placeholder `answer text here.` as their answer text
+(`gen5-001`, `gen5-002`, `gen5-004`, `gen5-005`, `gen5-011`, `gen5-012`). The "both rules met" result above scored
+citations and safety only. It does not show the model gave real answers. See `docs/DEV-C4-CITATION-FIX-V4.md`.

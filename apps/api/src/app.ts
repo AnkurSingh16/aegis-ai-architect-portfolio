@@ -8,6 +8,8 @@ import type { Pool } from 'pg';
 import { resolveAuthConfig, type AuthConfig } from './auth/config.js';
 import { createTokenVerifier } from './auth/token.js';
 import { registerProtectedCaseRoutes } from './auth/routes.js';
+import { registerProtectedWorkflowRoutes } from './workflow/workflow-routes.js';
+import { registerProtectedAnswerRoutes } from './rag/answer-routes.js';
 import { createDatabasePool, verifyRuntimeRole } from './storage/database.js';
 import { createOllamaProvider, resolveOllamaConfig, type AnalysisProvider } from './ai/provider.js';
 import { createGroundedOllamaProvider } from './ai/grounded-provider.js';
@@ -46,6 +48,8 @@ export function createApp(options: AppOptions = {}) {
     });
     app.addHook('onClose', closeDatabase);
     app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider, groundedAnalysisProvider));
+    app.register(async (workflowApp) => registerProtectedWorkflowRoutes(workflowApp, pool, verify));
+    app.register(async (answerApp) => registerProtectedAnswerRoutes(answerApp, pool, verify));
   }
 
   // Do NOT enable unauthenticated demo routes in production.
