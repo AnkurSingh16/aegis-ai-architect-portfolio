@@ -46,4 +46,42 @@ describe('question echo check v1', () => {
   it('ignores case and punctuation differences', () => {
     expect(isQuestionEcho('how do i reset my PASSWORD?', 'How do I reset my password!!')).toBe(true);
   });
+
+  describe('valid short answers are never flagged', () => {
+    const question = 'Can I approve a refund myself after a billing review?';
+    it.each(['Yes.', 'No.', 'No [SYNTHETIC-SOUTH-BILLING-DISCREPANCY]', 'Not without approval. Sources: [SYNTHETIC-SOUTH-BILLING-DISCREPANCY]'])(
+      'keeps %s', (answer) => { expect(isQuestionEcho(question, answer)).toBe(false); });
+  });
+
+  describe('a restatement followed by a real answer is not an echo', () => {
+    it('does not flag the question, then a supported answer', () => {
+      expect(isQuestionEcho(
+        'Is the name written in a recovery case description sufficient evidence of identity?',
+        'Is the name written in a recovery case description sufficient evidence of identity? No. Human verification is required. Sources: [SYNTHETIC-NORTH-ACCOUNT-RECOVERY]',
+      )).toBe(false);
+    });
+
+    it('does not flag a question with an answer that adds one new content word', () => {
+      expect(isQuestionEcho(
+        'Should I check whether a sign-in interruption is limited to one account?',
+        'Should I check whether a sign-in interruption is limited to one account? Yes, first. [SYNTHETIC-NORTH-LOGIN-INCIDENT]',
+      )).toBe(false);
+    });
+  });
+
+  describe('known limits of v1 (documented, not claimed as caught)', () => {
+    it('misses a paraphrased echo that uses new words, so v1 does not catch it', () => {
+      expect(isQuestionEcho(
+        'Is the name written in a recovery case description sufficient evidence of identity?',
+        'Is the name in a recovery case description enough to prove who the requester is? [SYNTHETIC-NORTH-ACCOUNT-RECOVERY]',
+      )).toBe(false);
+    });
+
+    it('flags a real answer whose words all come from the question (known false positive)', () => {
+      expect(isQuestionEcho(
+        'Verify the account before any change?',
+        'Verify the account before any change. [SYNTHETIC-NORTH-ACCOUNT-RECOVERY]',
+      )).toBe(true);
+    });
+  });
 });

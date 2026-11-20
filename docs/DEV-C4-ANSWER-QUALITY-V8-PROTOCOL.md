@@ -168,3 +168,18 @@ Decisions:
 Accurate statement for the record:
 
 > The v8 run satisfied the answer-text checks as originally implemented. However, two of the seven responses merely repeated their questions, demonstrating that the checks did not establish answer responsiveness. The result therefore does not demonstrate satisfactory overall answer quality.
+
+## Owner decisions on the route and the floor
+
+- The answer route stays on prompt v5 as the development configuration. It is not reverted to v4 because of the v4 placeholder defect.
+- The route is development-only. It is not for production promotion while the answer-responsiveness gap is open.
+- The similarity floor stays at 0.70.
+- The question-echo check (`apps/api/src/rag/question-echo.ts`, version `echo-v1`) stays development-only. It is not called by the route until its own pre-registered evaluation is completed and reviewed.
+- Historical evaluation results are not changed, and answer quality is not claimed to be independently qualified.
+
+Known limits of `echo-v1`, recorded by its tests:
+
+- It misses paraphrased echoes that use new words.
+- It flags a real answer whose words all come from the question. This is a known false positive.
+- It does not flag short supported answers ("Yes", "No", or a three-word answer with new words).
+- It does not flag a restatement followed by a real answer.
