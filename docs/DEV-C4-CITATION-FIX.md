@@ -74,7 +74,7 @@ All 24 cases completed. No generation failures.
 `SYNTHETIC-NORTH-ACCOUNT-RECOVERY`. The expected source is the login document only, so the scorer counts it as wrong.
 
 **The other two misses:** `gen2-answer-recovery-credentials` scored 0.694, below the floor, so it is a retrieval miss.
-`gen2-answer-mfa-policy-change` was the second `no_citation` rejection.
+`gen2-answer-mfa-policy-change` was the one `no_citation` rejection.
 
 **Reading:** the Sources-line rule reduced citation failures from three to one. It did not remove them, and it introduced an
 extra citation on one answer. Under the protocol, the result is reported as it stands. The prompt is not changed and this
