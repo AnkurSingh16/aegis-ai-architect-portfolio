@@ -8,6 +8,7 @@ import { withAuthenticatedTransaction } from '../auth/transaction.js';
 import { createDurableStore } from './durable-store.js';
 import { runTriageWorkflow } from './triage-workflow.js';
 import { parseTraceparent } from './trace-context.js';
+import { createTokenBucketLimiter } from '../security/rate-limiter.js';
 
 const uuid = { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' };
 
@@ -57,7 +58,9 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
   const correlations = new WeakMap<FastifyRequest, string>();
   const runTenant = tenantRunner(pool);
   const store = createDurableStore(runTenant);
-  const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant));
+  // Policy values chosen for development, not measured: a burst of 60 triage calls, refilled at 20 per second, per tenant and agent.
+  const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant),
+    createTokenBucketLimiter({ capacity: 60, refillPerSecond: 20 }));
 
   /** Authenticates, checks the scope and checks membership for the tenant in the path. Throws AuthorizationError otherwise. */
   async function authorise(request: FastifyRequest, tenantId: string, permission: 'read:cases' | 'write:cases' = 'read:cases'): Promise<VerifiedPrincipal> {
@@ -107,7 +110,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       store, dispatcher, tenantId, idempotencyKey,
       args: { caseId: request.body.caseId },
       context: {
-        tenantId, userId: principal.subject, userScopes: ['cases:read'], agentId: 'triage-agent', requestedBy: principal.subject,
+        tenantId, userId: principal.subject, userScopes: [...principal.scopes], agentId: 'triage-agent', requestedBy: principal.subject,
       },
       owner: `api-${request.id}`,
       correlationId: correlations.get(request),

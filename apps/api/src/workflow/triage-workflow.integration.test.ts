@@ -38,9 +38,9 @@ const runTenant = async <T>(tenantId: string, operation: (client: TenantQueryabl
 
 const store = createDurableStore(runTenant);
 const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant));
-const context = { tenantId: '', userId: 'user-1', userScopes: ['cases:read'], agentId: 'triage-agent', requestedBy: 'user-1' };
+const context = { tenantId: '', userId: 'user-1', userScopes: ['read:cases'], agentId: 'triage-agent', requestedBy: 'user-1' };
 
-function input(tenantId: string, args: Record<string, unknown>, scopes = ['cases:read'], key = `triage-${randomUUID()}`) {
+function input(tenantId: string, args: Record<string, unknown>, scopes = ['read:cases'], key = `triage-${randomUUID()}`) {
   return {
     store, dispatcher, tenantId, idempotencyKey: key, args,
     context: { ...context, tenantId, userScopes: scopes }, owner: 'worker-1', policy, leaseMs: 5000, timeoutMs: 2000, clock: () => at(0),
@@ -86,8 +86,8 @@ describe('triage tool as a durable, authorised execution', () => {
 
   it('is idempotent: the same key returns the same execution, and a completed one is not run again', async () => {
     const key = `same-${randomUUID()}`;
-    const first = await runTriageWorkflow(input(tenantA, { caseId: 'SYNTHETIC-BILLING-002' }, ['cases:read'], key));
-    const second = await runTriageWorkflow(input(tenantA, { caseId: 'SYNTHETIC-BILLING-002' }, ['cases:read'], key));
+    const first = await runTriageWorkflow(input(tenantA, { caseId: 'SYNTHETIC-BILLING-002' }, ['read:cases'], key));
+    const second = await runTriageWorkflow(input(tenantA, { caseId: 'SYNTHETIC-BILLING-002' }, ['read:cases'], key));
     expect(second.executionId).toBe(first.executionId);
     expect(second.created).toBe(false);
     expect(second.driver).toEqual({ status: 'not_claimable' });

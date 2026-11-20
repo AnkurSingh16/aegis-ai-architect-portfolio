@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { RateLimiter } from './rate-limiter.js';
 
 /**
  * Deterministic tool-authorisation gateway for AI agents (C10).
@@ -17,7 +18,7 @@ export const DENY_REASONS = [
   'unknown_agent', 'inactive_agent', 'unknown_tool', 'tenant_mismatch', 'tenant_in_arguments',
   'missing_scope', 'privilege_in_arguments', 'secret_in_arguments', 'approval_required',
   'approval_digest_mismatch', 'approval_not_approved', 'approval_self_approved', 'approval_consumed',
-  'approval_expired', 'result_unknown_run', 'result_replayed',
+  'approval_expired', 'result_unknown_run', 'result_replayed', 'rate_limited',
 ] as const;
 export type DenyReason = typeof DENY_REASONS[number];
 
@@ -122,10 +123,21 @@ export class ToolGateway {
     private readonly tools: ReadonlyMap<string, ToolDefinition>,
     private readonly agents: ReadonlyMap<string, AgentRegistration>,
     private readonly approvals: ApprovalStore,
+    /** Optional. Limits calls per tenant and agent. A limited call is denied before any other check or any approval use. */
+    private readonly limiter?: RateLimiter,
   ) {}
 
   async authorise(call: ToolCall, context: RequestContext): Promise<Decision> {
     const digest = actionDigest(context.tenantId, call.toolName, call.arguments);
+    if (this.limiter !== undefined && !this.limiter.take(`${context.tenantId}|${context.agentId}`, context.now)) {
+      return {
+        allowed: false, reasons: ['rate_limited'], actionDigest: digest, effectiveScopes: [],
+        audit: {
+          tenantId: context.tenantId, userId: context.userId, agentId: context.agentId, toolName: call.toolName,
+          actionDigest: digest, outcome: 'deny', reasons: ['rate_limited'], at: context.now.toISOString(),
+        },
+      };
+    }
     const reasons: DenyReason[] = [];
     const agent = this.agents.get(context.agentId);
     const tool = this.tools.get(call.toolName);

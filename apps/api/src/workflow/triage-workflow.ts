@@ -71,6 +71,10 @@ export async function runTriageWorkflow(input: TriageWorkflowInput): Promise<Tri
         captured = true;
         return;
       }
+      if (result.status === 'denied' && result.reasons.includes('rate_limited')) {
+        // A rate limit is temporary: the step is retried after the driver's backoff, not failed permanently.
+        throw Object.assign(new Error('tool rate limited'), { name: 'RateLimitedError', retryable: true });
+      }
       if (result.status === 'denied') throw new PermanentToolError(`denied: ${result.reasons.join(', ')}`);
       throw new PermanentToolError(result.message);
     },
