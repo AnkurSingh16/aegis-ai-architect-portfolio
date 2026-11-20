@@ -75,3 +75,9 @@ recall figure is the same as on the v4 set (11 of 12). The limits in this protoc
 the six South-domain questions name the southern tenant.
 
 The report is kept in the scratchpad (`c4-independent-v4-run1.json`), not in the repository.
+
+## Correction after a live check: the answers were the placeholder text
+
+Six of the 11 answered cases in this run had the layout placeholder `answer text here.` as their answer text
+(`gen5-001`, `gen5-002`, `gen5-004`, `gen5-005`, `gen5-011`, `gen5-012`). The "both rules met" result above scored
+citations and safety only. It does not show the model gave real answers. See `docs/DEV-C4-CITATION-FIX-V4.md`.

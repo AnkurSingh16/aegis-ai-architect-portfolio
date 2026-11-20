@@ -83,3 +83,15 @@ a retrieval miss, not a citation miss. The one false abstention is that same cas
 recall by about 8 points. The result shows the rules held on this set. It does not show they hold on other evidence.
 
 The report is kept in the scratchpad (`c4-citation-fix-v4-run1.json`), not in the repository.
+
+## Correction after a live check: the answers were the placeholder text
+
+The live route check (`apps/api/src/rag/answer-routes.live.integration.test.ts`) returned the answer
+`answer text here.` with a real citation. The model copied the layout example from prompt v4 as the answer body. The
+recorded run confirms it: 7 of the 11 answered cases in this run had the placeholder sentence as their answer text. The
+citation rule and the safety rule were scored on those answers, so the "both rules met" result above does not show that the
+model gave real answers. The scorer checks citations, not answer text, which is why it did not catch this.
+
+Consequences: prompt v4 is not fit to return answers to users. The v4 result stands as recorded, but it must not be read as
+a working answer format. The answer route currently uses prompt v4 and must not be treated as ready. A fix is a new prompt
+version with its own pre-registered set, and it must check answer text as well as citations.
