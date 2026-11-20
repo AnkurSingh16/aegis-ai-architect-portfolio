@@ -76,15 +76,16 @@ run, with no generation failures.
 | Run | Answer recall | False answers | Wrong-source | `no_citation` | Retried cases |
 |---|---|---|---|---|---|
 | A: baseline (reformulation off) | 3 of 12 (0.25) | 0 of 12 | 0 | 1 | 0 |
-| B: reformulation on | 3 of 12 (0.25) | 0 of 12 | 0 | 1 | 9 |
+| B: reformulation on | 3 of 12 (0.25) | 0 of 12 | 0 | 1 | 21 (9 answerable, 12 unanswerable) |
 
 - **Abstention precision:** 0.57 in both runs (12 true abstentions, 9 false abstentions).
-- **Retry effect:** in run B, nine cases retried with a reworded query. None of the nine was answered on the retry. The
-  same three answerable questions were correct in both runs.
-- **Retry scores:** in run B, a retried case's recorded top score is the score from the second retrieval. Most retries
-  scored lower than the first round, but two rose: `reform-abstain-south-*` cases were not among them. The two that rose
-  were `reform-answer-mfa-provider-outage` (0.658 to 0.678) and `reform-answer-recovery-ticket-claim` (0.641 to 0.697).
-  No retry reached 0.70, so the reworded queries did not lift a relevant document above the floor.
+- **Retry effect:** in run B, 21 cases retried with a reworded query: nine answerable and twelve unanswerable. None of the
+  21 was answered on the retry. The same three answerable questions were correct in both runs.
+- **Retry scores:** in run B, a retried case's recorded top score is the score from the second retrieval. Against the
+  baseline's first-round score for the same case, the retry score was lower for 13 of 21 cases, higher for 7 and equal
+  for 1. Of the answerable cases, the two that rose were `reform-answer-mfa-provider-outage` (0.658 to 0.678) and
+  `reform-answer-recovery-ticket-claim` (0.641 to 0.697). No retry reached 0.70, so the reworded queries did not lift a
+  relevant document above the floor.
 
 **Decision rule, applied as written:**
 - Safety rule (zero false answers, zero wrong-source answers) in run B: **met.**
@@ -96,7 +97,7 @@ run, with no generation failures.
 as it stands and no further change is run on this set.
 
 **Reading:** on this set, one reworded query per retry did not recover any of the nine retried answerable questions. It
-also did not admit any unanswerable question, so the retry is safe here but does not help. The baseline recall on this set
+also did not admit any of the twelve retried unanswerable questions, so the retry is safe here but does not help. The baseline recall on this set
 (0.25) is much lower than on earlier sets, which is expected from the paraphrasing, and it means this set is a hard test
 of retrieval rather than of the answer step.
 
