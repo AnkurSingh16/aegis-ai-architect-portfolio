@@ -52,3 +52,26 @@ One run, through the real loop: `C4_GENERATOR_RUN=v4 C4_GENERATOR_SET=v5`. The s
 - Twelve answerable questions: one question moves recall by about 8 points.
 - The scorer checks citations, not whether the answer text is true to the document.
 - Earlier sets and results remain on record and are not re-run.
+
+## Result (one run, as pre-registered)
+
+Run once through the real loop with `C4_GENERATOR_RUN=v4 C4_GENERATOR_SET=v5`: prompt v4 on the independent set v5, with the
+same model, floor, retrieval and policy. All 24 cases completed. No generation failures. No answer cites the placeholder id.
+
+- **Answer recall:** 11 of 12 (0.92). **False answers:** 0 of 12. **Wrong-source answers:** 0.
+- **Abstention precision:** 0.92 (12 true abstentions, 1 false abstention).
+- **Citation rejections (`no_citation`):** 0.
+- Five answers named the same source id twice (`gen5-003`, `gen5-007`, `gen5-008`, `gen5-009` and `gen5-010`). The scorer
+  counts these as correct, because every citation names the expected source.
+
+**Decision rule, applied as written:**
+- Citation format: **met.** Zero `no_citation` rejections and zero generation failures.
+- Safety: **met.** Zero false answers and zero wrong-source answers.
+
+**Miss:** `gen5-006` scored 0.667, below the floor. It is a retrieval miss, not a citation miss. It is also the one false abstention.
+
+**Reading:** on a set written by a fresh author with no access to earlier questions, the v4 prompt met both rules. The
+recall figure is the same as on the v4 set (11 of 12). The limits in this protocol still apply: the author is a model, and
+the six South-domain questions name the southern tenant.
+
+The report is kept in the scratchpad (`c4-independent-v4-run1.json`), not in the repository.
