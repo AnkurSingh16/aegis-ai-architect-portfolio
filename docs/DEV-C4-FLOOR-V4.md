@@ -82,3 +82,12 @@ top score was 0.634 (`floor4h-abstain-south-notice`). The gap between them is sm
 - The calibration set had two answerable misses below 0.65, so the rule's recall is 0.90, not 1.00.
 
 The report is kept in the scratchpad (`c4-floor-v4-run1.json`), not in the repository.
+
+## Owner decision: keep 0.70
+
+The owner decided to keep the similarity floor at 0.70, and not to move it to the 0.65 candidate. Reasons, as given in the
+review: 0.70 has produced zero false answers on every set measured; 0.65 let false answers through on the second calibration
+set (2) and 0.66 on the second holdout (1); the 0.65 result rests on one calibration set and one same-author holdout; and a
+false answer costs more than an abstention. The cost is recall (7 of 12 on holdout v4 at 0.70). The code is unchanged.
+
+Revisit only with an independently written calibration and holdout set where a lower floor holds with zero false answers.
