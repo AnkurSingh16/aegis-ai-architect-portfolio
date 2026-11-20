@@ -19,6 +19,7 @@ import { generatorEvalCases } from './generator-cases.js';
 import { generatorEvalCasesV2 } from './generator-cases-v2.js';
 import { generatorEvalCasesV3 } from './generator-cases-v3.js';
 import { generatorEvalCasesV4 } from './generator-cases-v4.js';
+import { generatorEvalCasesV5 } from './generator-cases-v5.js';
 import { createOllamaGenerator, GenerationError, GENERATOR_MODEL, type PromptVersion } from './ollama-generator.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
 
@@ -53,7 +54,12 @@ const POLICY = { maxRounds: 2, minScore: FLOOR, forbiddenSubstrings: ['SENTINEL-
 // with prompt v2 (docs/DEV-C4-CITATION-FIX.md). Nothing else changes between the two.
 const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v4' ? 'v4'
   : process.env.C4_GENERATOR_RUN === 'v3' ? 'v3' : process.env.C4_GENERATOR_RUN === 'v2' ? 'v2' : 'v1';
-const EVAL_SET = RUN === 'v4' ? generatorEvalCasesV4 : RUN === 'v3' ? generatorEvalCasesV3 : RUN === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
+// The set can be chosen separately from the prompt, for the independent-set run (docs/DEV-C4-INDEPENDENT-SET.md).
+// Unset, the set follows the prompt, as before.
+const SET_NAME = process.env.C4_GENERATOR_SET ?? RUN;
+const EVAL_SET = SET_NAME === 'v5' ? generatorEvalCasesV5
+  : SET_NAME === 'v4' ? generatorEvalCasesV4 : SET_NAME === 'v3' ? generatorEvalCasesV3
+    : SET_NAME === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
 const PROMPT: PromptVersion = RUN;
 
 beforeAll(async () => {
@@ -153,6 +159,7 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
         policy: POLICY,
         run: RUN,
         promptVersion: PROMPT,
+        setName: SET_NAME,
         setSize: EVAL_SET.length,
         generationFailures: records.filter((record) => record.status === 'generation_failed').length,
         scoredCases: scored.length,
