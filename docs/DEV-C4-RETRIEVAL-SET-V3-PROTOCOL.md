@@ -53,3 +53,41 @@ unanswerable question, record the top score.
 ## Status
 
 Set written and tested. The rank check has not been run. It is not run by this document.
+
+## Result: rank check run once (raw vector retrieval, top five)
+
+Run on 2026-11-20 with `apps/api/src/rag/retrieval-set-v3-rank-check.integration.test.ts`, which checks every primary and every
+spare. The output is kept outside the repository. This was one run, and the rule below was applied to its output without change.
+
+### Primary answerable questions
+
+Nine of twelve were ranked first. Their pre-assigned spares were also ranked first, so each one was dropped and not replaced again:
+
+- `rs3-answer-login-stalled-sign-in`, `rs3-answer-login-isolated-or-tenant`, `rs3-answer-login-sensitive-items`
+- `rs3-answer-mfa-prompt-failing`
+- `rs3-answer-recovery-before-change`, `rs3-answer-recovery-unclear-caller`
+- `rs3-answer-network-symptom-note`, `rs3-answer-network-health-authorised`, `rs3-answer-network-settings-before-signoff`
+
+Three were ranked second and were kept without replacement: `rs3-answer-mfa-disable-check` (rank 2, top score 0.647),
+`rs3-answer-mfa-provider-outage` (rank 2, top score 0.707), `rs3-answer-recovery-named-requester` (rank 2, top score 0.646).
+
+Spare `rs3-spare-recovery-description-not-proof` was also ranked first. The spares were not used for any primary that was kept.
+
+### Result
+
+- **Final kept answerable set: three questions.** Twelve unanswerable questions were kept as written.
+- **Replacements made: none.** Every pre-assigned spare was ranked first, so none could replace its primary.
+- **Top scores on unanswerable questions:** 0.466 to 0.567. None reached the 0.70 floor.
+
+### What this means
+
+- **This set cannot test ranking on this corpus.** Retrieval put the expected document first for nine of twelve questions, and
+  for their spares too. Pre-writing spares did not help, because the spares were written in the same style and were just as
+  easy. The result is not a fault in the protocol, but the set can't answer the question it was designed for.
+- **The four-document corpus is too small to test ranking.** With four documents and distinct topics, the expected document
+  is almost always first. The measurable ranking problem needs more competing documents.
+- **The earlier, larger corpus is the place to look.** `docs/DEV-LARGE-RETRIEVAL-BENCHMARK.md` uses a 50-document development
+  corpus, where vector MRR was 0.882. A ranking test would need the owner's decision to use that corpus, or to build a larger
+  North corpus. It should be pre-registered.
+
+Nothing is accepted or rejected here. The route stays on v4 and "not ready".
