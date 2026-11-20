@@ -87,3 +87,43 @@ If a candidate fails any condition, it is rejected on this test. No second candi
   the overlap test, before any measurement, and it is recorded here.
 - Same-author. Step 2 (measurement) is not run. The candidate in
   `docs/DEV-RETRIEVAL-CANDIDATE-GATED-LEXICAL.md` is not implemented or measured.
+
+## Step 2 result: one run, gated lexical candidate against vector baseline (no change to the protocol)
+
+Run once on 2026-11-20 with `apps/api/scripts/gated-lexical-ranking-benchmark.ts` (commit `ace2aed`; candidate in commit `cbbb3c9`).
+Model `nomic-embed-text` (digest as in the route), loopback Ollama, 50 queries against the 50-document corpus. Paired bootstrap:
+10,000 resamples, seed 20261120. Raw per-query evidence is kept outside the repository.
+
+| Measure | Baseline (vector) | Candidate (gated lexical) |
+| --- | --- | --- |
+| Top-one, all 50 | 0.90 | 0.90 |
+| MRR, all 50 | 0.938 | 0.938 |
+| Recall@10, all 50 | 0.98 | 0.98 |
+| nDCG@10, all 50 | 0.948 | 0.948 |
+| MRR, paraphrase (25) | 0.876 | 0.876 |
+| MRR, augmented (25) | 1.000 | 1.000 |
+| Promotions by the gate | — | 0 |
+
+- **MRR difference (candidate minus baseline):** 0, 95% paired bootstrap interval [0, 0].
+- **Top-one difference:** 0, interval [0, 0].
+- **Latency** (BM25 pass plus gate, excluding embedding, per query): median 0.15 ms, maximum 1.38 ms.
+
+### Acceptance rule
+
+1. **Not met.** The MRR interval does not exclude zero in the positive direction. It is exactly zero.
+2. **Met, trivially.** The paraphrase group is unchanged. Nothing moved in either group.
+3. **Met.** Latency is measured and reported above.
+
+### What the result means
+
+- The gate **never fired** on these 50 queries. The candidate and the baseline give identical rankings.
+- This is the null result the protocol predicted. The vector ranking already puts 45 of 50 targets first, and the gate needs a
+  near-tie with a confident lexical lead, which did not occur.
+- The result does not show that the gate harms ranking. It shows that it did nothing here, so it cannot be credited with any gain.
+- Per the run rules, the candidate is rejected on this test. No second candidate is run on this set, and the gate's margin and
+  factor are not tuned after seeing the result.
+- The result says nothing about real support text. The corpus is synthetic, and the set is same-author.
+
+### Status
+
+Step 2 run. Candidate rejected on this test (rule condition 1 not met; no promotions). The route and its floor are unchanged.
