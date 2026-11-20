@@ -126,3 +126,14 @@ after the run, so it is not a basis for choosing a new floor. A future floor nee
 **The holdout is now spent.** v3 has been seen, so it cannot choose or test a floor again. Holdouts v2 and v3 are both
 spent. The C4 floor is still not settled as a general value. It is settled only for the current corpus and this rule, pending
 an independent set.
+
+## Owner decision: similarity floor 0.70
+
+- **Chosen by the owner** on the evidence above, not by a further run. The value matches the fixed rule's answer on
+  calibration v2, and no false answers were seen on that set or on holdouts v2 and v3.
+- **Scope:** this floor applies to the current synthetic North corpus, the local nomic-embed-text vectors and this
+  rule. It is not a general floor.
+- **Known costs:** recall is 0.75 on both holdouts (9 of 12). Three answerable questions on holdout v3 fell just below
+  0.70. Any change of floor needs a new pre-registered set, because holdouts v2 and v3 are spent.
+- **Still open:** an independently written labelled set, to test whether 0.70 holds when the author is not the one
+  who tuned it.
