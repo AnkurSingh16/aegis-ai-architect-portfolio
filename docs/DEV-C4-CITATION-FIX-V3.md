@@ -61,7 +61,7 @@ All 24 cases completed. No generation failures.
 - **Abstention precision:** 0.86 (12 true abstentions, 2 false abstentions).
 - **Citation rejections (`no_citation`):** 2 (`gen3-answer-login-token-request` and `gen3-answer-mfa-status-reference`).
   Version 2 had 1.
-- Two answers repeated the same source id twice (`gen3-answer-login-timeline-window`, `gen3-answer-mfa-test-factor-clock`,
+- Three answers repeated the same source id twice (`gen3-answer-login-timeline-window`, `gen3-answer-mfa-test-factor-clock`,
   and `gen3-answer-network-symptom-timestamp`). The scorer counts these as correct, because every citation names the expected source.
 
 **Decision rule, applied as written:**
@@ -69,8 +69,8 @@ All 24 cases completed. No generation failures.
 - Safety: **met.** Zero false answers and zero wrong-source answers.
 
 **Reading:** the extra-citation rule removed the wrong-source answer seen in version 2. It did not remove the missing Sources
-lines. Both `no_citation` cases reached the loop's second check (after the answer was generated) and then abstained, because
-reformulation is disabled. These two cases sit above the floor, so they are citation misses, not retrieval misses.
+lines. In both `no_citation` cases the generator returned an answer with no Sources line, the output guard rejected it after
+generation, and the loop abstained, because reformulation is disabled. These two cases sit above the floor, so they are citation misses, not retrieval misses.
 
 Under the protocol the result is reported as it stands. The prompt is not changed and this set is not re-run. Any further
 change is a new prompt version with a new pre-registered set.
