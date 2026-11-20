@@ -65,3 +65,51 @@ which measure it aims to change, which rank positions it can affect, and its acc
 - Written before any retrieval was run on it. The shape and no-overlap test passes, including against the rerank set v1.
 - Step 2 (the rank check) has not run. Every question is still kept. Drops will be recorded when step 2 runs.
 - Same-author. Step 2 and any candidate need their own record and pre-registration.
+
+## Step 2 done: rank check (raw vector retrieval, top five)
+
+Run on 2026-11-20 with `apps/api/src/rag/retrieval-set-v2-rank-check.integration.test.ts`: embedding model `nomic-embed-text`
+(the route's model), vector retrieval only, no reranker, no generator, no floor. Output kept outside the repository.
+
+Note on the runs: the first attempt failed, and its error was not captured. A second attempt passed but wrote no output
+because the output path was left out. The record below is from a third run that passed and wrote the output. Embeddings and the
+database are deterministic, so the three should agree, but this was not separately checked.
+
+### Drop rule applied
+
+Dropped (expected document ranked first): seven answerable questions.
+`rs2-answer-login-first-entry`, `rs2-answer-login-everyone-or-one`, `rs2-answer-recovery-before-alter`,
+`rs2-answer-recovery-unknown-caller`, `rs2-answer-network-report-details`, `rs2-answer-network-status-endpoint`,
+`rs2-answer-network-config-edit`.
+
+Kept (expected document second or third): five answerable questions.
+
+| Question | Expected rank | Top score |
+| --- | --- | --- |
+| `rs2-answer-login-never-share` | 3 | 0.682 |
+| `rs2-answer-mfa-enrolled-method` | 2 | 0.683 |
+| `rs2-answer-mfa-rule-change` | 2 | 0.681 |
+| `rs2-answer-mfa-official-resource` | 2 | 0.745 |
+| `rs2-answer-recovery-name-enough` | 2 | 0.660 |
+
+No answerable question was absent from the top five.
+
+Unanswerable questions were all kept. Their highest top score is 0.583 (`rs2-abstain-south-dispute-window`); the next highest are
+0.580 and 0.572. None reached the 0.70 floor.
+
+### What this means
+
+- **The set does not meet its own design.** After the drop rule, five answerable questions remain, not twelve. Seven of the
+  twelve were already ranked first, so retrieval handled most of these phrasings. The protocol said to replace each dropped
+  question with one written before the check. None were written, and writing replacements now, after seeing the ranks, would
+  be selection on the results. So none were added.
+- **Five questions cannot support a ranking comparison.** One question moves top-one accuracy by 20 points. This set is not a
+  basis for accepting or rejecting a candidate.
+- **The retrieval result itself is informative.** On this phrasing, expected documents are first for most questions and
+  second or third for the rest, and nothing is absent from the top five. The boundary question is different: no
+  unanswerable question reaches 0.70, and the answerable scores that were kept sit at 0.66 to 0.75. This is for the owner to read.
+
+### Next step, not started
+
+A new set needs spare questions written before its own rank check, so that replacements are real and not chosen from the
+results. Its protocol needs its own pre-registration. Nothing has been run for that.
