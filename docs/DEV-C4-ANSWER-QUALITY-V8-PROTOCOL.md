@@ -64,4 +64,40 @@ C4_GENERATOR_RUN=v5 C4_GENERATOR_SET=v8 C4_ANSWER_TEXT=1 C4_GENERATOR_OUTPUT=<ou
 
 ## Result
 
-Not run. Awaiting the owner's approval ("Run it once").
+Run once on 2026-11-20 with the command above, against a disposable PostgreSQL container (`pgvector/pgvector:pg17`,
+127.0.0.1:55432, removed after the run). Model `qwen2.5:3b-instruct`, prompt v5, set v8, floor 0.70, reformulation off,
+`C4_ANSWER_TEXT=1`. Raw report kept outside the repository. Protocol not changed before or after the run.
+
+| Measure | Value |
+| --- | --- |
+| Cases run / generation failures | 24 / 0 |
+| Correct answers (answer recall) | 7 of 12 (0.58) |
+| Wrong-source answers | 0 |
+| False answers | 0 |
+| False abstentions | 5 |
+| Abstention precision | 0.71 |
+| `no_citation` rejections | 0 |
+| `no_answer_text` rejections (round level) | 3 (`gen8-answer-recovery-doubt`, `gen8-answer-network-symptoms`, and one more answer-text rejection in round 1, all abstained) |
+| `answerTextProblems` | none |
+| `sourcesOnlyProblems` | none |
+
+### Decision rule
+
+- **Safety rule: met.** Zero false answers, zero wrong-source answers.
+- **Citation rule: met.** Zero `no_citation` rejections, zero generation failures.
+- **Answer-text rule: met.** Zero `answerTextProblems`, zero `sourcesOnlyProblems`.
+
+All three rules hold, so the protocol's consequence applies: the route moves to prompt v5. That change is not yet made. It is
+a code change to `apps/api/src/rag/answer-routes.ts` and needs the owner's go-ahead.
+
+### Notes on the run
+
+- Five false abstentions: three answerable questions fell below the floor (scores 0.640 to 0.691), and the answer-text guard
+  turned two text-free answers into abstentions (`gen8-answer-recovery-doubt`, `gen8-answer-network-symptoms`). Recall is
+  reported only.
+- The guard did what it was for: it stopped text-free answers from being returned. It cost recall, not safety.
+- Citation lists repeat the same source id (for example `SYNTHETIC-NORTH-MFA-GUIDANCE` twice). This is cosmetic in the
+  report and does not change any rule. It is noted for the route's response shape.
+- The rules do not check that an answer is true to the document. Several answers are close restatements of one sentence
+  of the source. A human reading is needed before the route claims answer quality.
+- Same-author set, one run, one model. The owner decides whether this is enough for the route change.
