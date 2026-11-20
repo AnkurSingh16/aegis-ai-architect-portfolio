@@ -128,3 +128,43 @@ Found on review after the run. The result above is not changed. Its recorded fig
 - Consequence: the statement "met the answer-text rule" overstates answer quality. The route's answer-text guard does not
   reject question echoes. Changing it needs a new pre-registered change and a re-check, not an edit to this result.
 - Human review of the seven answers and the boundary cases is listed in the register and is still open.
+
+## Owner review of the seven answered cases and five boundary decisions (recorded, not a new run)
+
+Decisions recorded from the owner's review. The v8 numbers above are historical and are not changed.
+
+| Case | Owner decision |
+| --- | --- |
+| `gen8-answer-login-one-account` | **Fail.** Repeats the question; no answer |
+| `gen8-answer-recovery-name-proof` | **Fail.** Repeats the question; should have said no and that human verification is required |
+| `gen8-answer-mfa-factor-check` | **Partial.** Accurate, but omits the device-clock check and the no-codes instruction |
+| `gen8-answer-mfa-no-disable` | **Pass,** with a wording note: the prohibition is on automated support actions, not every human process |
+| `gen8-answer-mfa-status-page` | **Pass.** Near-verbatim source wording, recorded as a prompt-compliance concern |
+| `gen8-answer-recovery-verify-first` | **Pass.** Supported, responsive, follows the source closely |
+| `gen8-answer-network-health-allowed` | **Pass.** Supported, responsive, copied wording |
+
+Boundary and guard cases:
+
+- `gen8-answer-login-first-note` (0.691): abstention correct under the policy. False abstention and retrieval-boundary miss.
+- `gen8-answer-login-no-secrets` (0.678): abstention appropriate. Retrieval ranked a different document first.
+- `gen8-answer-network-config-edit` (0.640): false abstention, retrieval limitation.
+- `gen8-answer-recovery-doubt` (0.776): abstention agreed if the generated text had no meaningful answer. Classed as an output-quality failure, not retrieval.
+- `gen8-answer-network-symptoms` (0.734): abstention appropriate if no meaningful answer was produced. Classed as an output-quality failure.
+
+Overall: four pass, one partial, two fail. The seven are not accepted as seven verified correct answers.
+
+Decisions:
+
+1. The 0.70 floor is retained. The owner does not lower it on this evidence.
+2. The v8 results stay as historical evaluation evidence.
+3. The question-echo guard may be developed as a separate, versioned change. Its protocol is recorded before any fresh evaluation.
+4. The answer-text check must not reject legitimate short answers such as "No" or "Yes" when they are supported.
+5. Four concerns are reported separately: question echo, incomplete answer, unsupported answer, source copying.
+6. Stronger quality claims need an independently authored evaluation: independent authorship, independent corpus, at least 40 answerable and 40 unanswerable questions in the final holdout, a separate calibration set, pre-registration, and answer-level validation.
+7. Minimum safety criteria: zero observed false answers, zero wrong-source answers, no answers that merely repeat the question, no citation-only or placeholder responses, answer recall and abstention precision reported with confidence intervals, and incomplete or unsupported responses reported explicitly.
+8. The false-answer rate is reported with a confidence interval. Zero observed failures does not prove a zero failure rate.
+9. Until that evidence exists, the 0.70 floor is described as an owner-approved conservative threshold supported by development evaluations, not an independently qualified threshold.
+
+Accurate statement for the record:
+
+> The v8 run satisfied the answer-text checks as originally implemented. However, two of the seven responses merely repeated their questions, demonstrating that the checks did not establish answer responsiveness. The result therefore does not demonstrate satisfactory overall answer quality.
