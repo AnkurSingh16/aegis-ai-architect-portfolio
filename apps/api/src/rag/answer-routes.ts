@@ -36,7 +36,8 @@ export async function registerProtectedAnswerRoutes(app: FastifyInstance, pool: 
   const principals = new WeakMap<FastifyRequest, VerifiedPrincipal>();
   const correlations = new WeakMap<FastifyRequest, string>();
   const embedQuery: QueryEmbedder = deps.embedQuery ?? (async (query) => (await embedTexts([query], 'search_query'))[0]!);
-  const generate = deps.generate ?? createOllamaGenerator(undefined, 'v4');
+  // Prompt v5 (docs/DEV-C4-ANSWER-QUALITY-V8-PROTOCOL.md): its pre-registered rules held on set v8. Earlier prompts are unchanged.
+  const generate = deps.generate ?? createOllamaGenerator(undefined, 'v5');
 
   /** Checks the scope and membership for the tenant in the path. Throws AuthorizationError otherwise. */
   async function authorise(request: FastifyRequest, tenantId: string): Promise<VerifiedPrincipal> {
