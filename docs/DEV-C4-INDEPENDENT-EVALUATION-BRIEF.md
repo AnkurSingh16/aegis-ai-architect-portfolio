@@ -1,3 +1,8 @@
+> **Superseded.** This brief was the first draft. It is kept unchanged for provenance. The current materials are in
+> `docs/C4-INDEPENDENT-EVAL-KIT/` (corpus brief, question instructions, labelling template, review sheet, acceptance
+> and report layout, execution and locking), with the validator in `apps/api/src/rag/independent-set.ts` and the runner
+> adapter in `apps/api/src/rag/independent-runner.ts`. Use the kit, not this file.
+
 # C4 independent evaluation: brief for the independent author
 
 Status: brief only. No questions, labels or results are in this document. The evaluation set must be written by a person
