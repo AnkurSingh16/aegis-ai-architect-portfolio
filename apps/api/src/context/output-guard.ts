@@ -26,7 +26,9 @@ export function guardAnswer(answer: string, policy: GuardPolicy): GuardResult {
   if (policy.forbiddenSubstrings.some((needle) => needle.length > 0 && lower.includes(needle.toLowerCase()))) {
     violations.push('forbidden_substring');
   }
-  const cited = [...trimmed.matchAll(CITATION)].map((match) => match[1]!);
-  if (cited.some((id) => !policy.allowedSourceIds.has(id))) violations.push('unknown_citation');
+  // Every citation is checked against the allowed sources. The returned list names each cited source once, in order.
+  const everyCitation = [...trimmed.matchAll(CITATION)].map((match) => match[1]!);
+  if (everyCitation.some((id) => !policy.allowedSourceIds.has(id))) violations.push('unknown_citation');
+  const cited = [...new Set(everyCitation)];
   return { ok: violations.length === 0, violations, citedSourceIds: cited };
 }
