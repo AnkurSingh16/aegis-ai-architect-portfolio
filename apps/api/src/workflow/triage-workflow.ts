@@ -24,6 +24,8 @@ export interface TriageWorkflowInput {
   readonly owner: string;
   /** Recorded on the execution when it is created. */
   readonly correlationId?: string;
+  /** Trace id from a valid traceparent header, or null. Carried on each driver log record. */
+  readonly traceId?: string | null;
   /** Optional driver log. Receives one record per attempt call, with the correlation id. */
   readonly log?: DriverLog;
   readonly policy: RetryPolicy;
@@ -57,6 +59,7 @@ export async function runTriageWorkflow(input: TriageWorkflowInput): Promise<Tri
     timeoutMs: input.timeoutMs,
     clock: input.clock,
     correlationId: input.correlationId ?? null,
+    traceId: input.traceId ?? null,
     ...(input.log ? { log: input.log } : {}),
     step: async () => {
       const result: DispatchResult = await input.dispatcher.dispatch(

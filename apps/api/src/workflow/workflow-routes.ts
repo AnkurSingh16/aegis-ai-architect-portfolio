@@ -7,6 +7,7 @@ import { AuthorizationError, requireScope, type VerifiedPrincipal, type VerifyTo
 import { withAuthenticatedTransaction } from '../auth/transaction.js';
 import { createDurableStore } from './durable-store.js';
 import { runTriageWorkflow } from './triage-workflow.js';
+import { parseTraceparent } from './trace-context.js';
 
 const uuid = { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' };
 
@@ -110,6 +111,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       },
       owner: `api-${request.id}`,
       correlationId: correlations.get(request),
+      traceId: parseTraceparent(request.headers.traceparent as string | undefined),
       log: (record) => console.info(JSON.stringify({ ...record, requestId: request.id })),
       policy, leaseMs: LEASE_MS, timeoutMs: TIMEOUT_MS, clock: () => new Date(),
     });

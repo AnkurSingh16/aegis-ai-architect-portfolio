@@ -169,7 +169,8 @@ describe('durable execution in real PostgreSQL', () => {
     const outcome = await runDurableAttempt({ ...base, log: (record) => { records.push(record); }, correlationId: 'corr-driver-1' });
     expect(outcome).toEqual({ status: 'failed', attempt: 1, errorClass: 'permanent' });
     expect(records).toEqual([{
-      event: 'durable_attempt', executionId, correlationId: 'corr-driver-1', outcome: 'failed', attempt: 1, errorClass: 'permanent',
+      event: 'durable_attempt', executionId, correlationId: 'corr-driver-1', traceId: null, durationMs: expect.any(Number),
+      outcome: 'failed', attempt: 1, errorClass: 'permanent',
     }]);
     expect(JSON.stringify(records)).not.toContain('SENTINEL-LOG-1');
   });
