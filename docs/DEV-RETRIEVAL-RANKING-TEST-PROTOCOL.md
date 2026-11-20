@@ -127,3 +127,10 @@ Model `nomic-embed-text` (digest as in the route), loopback Ollama, 50 queries a
 ### Status
 
 Step 2 run. Candidate rejected on this test (rule condition 1 not met; no promotions). The route and its floor are unchanged.
+
+## Status: ranking work stopped
+
+Recommendation accepted and carried out: ranking work stops here. The gated lexical candidate was measured once and rejected
+(step 2 result above). No further ranking candidate is pre-registered on this set, and the 50-document corpus is not used
+again for ranking. The next measured work is answer quality: `docs/DEV-C4-ANSWER-QUALITY-V8-PROTOCOL.md`. A ranking test on
+a larger, independently written corpus would need a separate protocol, and the owner has not asked for one.

@@ -12,7 +12,7 @@ import { syntheticDocuments } from '../documents/catalog.js';
 import { ingestSyntheticCatalog } from '../documents/ingestion.js';
 import { embedTexts } from '../retrieval/ollama-embeddings.js';
 import { storeChunkEmbeddings } from '../retrieval/vector-retrieval.js';
-import { answerWithSelfCorrection, type Evidence } from './self-correcting-answer.js';
+import { answerWithSelfCorrection, hasAnswerText, type Evidence } from './self-correcting-answer.js';
 import { vectorEvidenceRetriever, type ClientRunner } from './document-evidence.js';
 import type { LabelledCase } from './abstention-cases.js';
 import { generatorEvalCases } from './generator-cases.js';
@@ -22,6 +22,7 @@ import { generatorEvalCasesV4 } from './generator-cases-v4.js';
 import { generatorEvalCasesV5 } from './generator-cases-v5.js';
 import { generatorEvalCasesV6 } from './generator-cases-v6.js';
 import { generatorEvalCasesV7 } from './generator-cases-v7.js';
+import { generatorEvalCasesV8 } from './generator-cases-v8.js';
 import { createOllamaGenerator, GenerationError, GENERATOR_MODEL, type PromptVersion } from './ollama-generator.js';
 import { createOllamaReformulator, REFORMULATOR_MODEL, REFORMULATOR_PROMPT_VERSION } from './ollama-reformulator.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
@@ -52,7 +53,10 @@ const retrieve = vectorEvidenceRetriever({ run, tenantId: north.tenantId, embedQ
 
 // Fixed for this run. Identical to the floor evaluation and to docs/DEV-C4-GENERATOR-EVALUATION.md.
 const FLOOR = 0.7;
-const POLICY = { maxRounds: 2, minScore: FLOOR, forbiddenSubstrings: ['SENTINEL-XYZ'] };
+// The answer-text check is opt-in (C4_ANSWER_TEXT=1), as on the route (docs/DEV-C4-ANSWER-QUALITY-V8-PROTOCOL.md). Unset, the
+// loop is exactly as in the recorded runs.
+const ANSWER_TEXT_REQUIRED = process.env.C4_ANSWER_TEXT === '1';
+const POLICY = { maxRounds: 2, minScore: FLOOR, forbiddenSubstrings: ['SENTINEL-XYZ'], requireAnswerText: ANSWER_TEXT_REQUIRED };
 // Which pre-registered run this is. The default is the first run: set v1 with prompt v1. The citation fix is set v2
 // with prompt v2 (docs/DEV-C4-CITATION-FIX.md). Nothing else changes between the two.
 const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v5' ? 'v5'
@@ -63,7 +67,7 @@ const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v5' ? 'v5'
 const SET_NAME = process.env.C4_GENERATOR_SET ?? RUN;
 // Reformulation is off unless C4_LOOP_REFORMULATE=1 (docs/DEV-C4-REFORMULATION.md). Off, the loop is exactly as before.
 const REFORMULATE = process.env.C4_LOOP_REFORMULATE === '1';
-const EVAL_SET = SET_NAME === 'v7' ? generatorEvalCasesV7
+const EVAL_SET = SET_NAME === 'v8' ? generatorEvalCasesV8 : SET_NAME === 'v7' ? generatorEvalCasesV7
   : SET_NAME === 'v6' ? generatorEvalCasesV6
   : SET_NAME === 'v5' ? generatorEvalCasesV5
     : SET_NAME === 'v4' ? generatorEvalCasesV4 : SET_NAME === 'v3' ? generatorEvalCasesV3
@@ -175,6 +179,11 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
         run: RUN,
         promptVersion: PROMPT,
         setName: SET_NAME,
+        answerTextRequired: ANSWER_TEXT_REQUIRED,
+        // Answered cases whose text has no words of their own outside citations and the Sources label (the hasAnswerText rule).
+        sourcesOnlyProblems: scored
+          .filter((record) => record.status === 'answered' && !hasAnswerText(record.answer ?? ''))
+          .map((record) => record.id),
         reformulation: REFORMULATE ? { enabled: true, model: REFORMULATOR_MODEL, prompt: REFORMULATOR_PROMPT_VERSION } : { enabled: false },
         setSize: EVAL_SET.length,
         generationFailures: records.filter((record) => record.status === 'generation_failed').length,
