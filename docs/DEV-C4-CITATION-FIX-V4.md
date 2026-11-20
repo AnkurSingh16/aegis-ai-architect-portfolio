@@ -58,3 +58,28 @@ It is one author's set, written after seeing the version 3 failure, so it is not
   would show up as a `no_citation` or unknown-citation rejection, which the count above reports.
 - The scorer checks citations, not whether the answer text is true to the document.
 - The earlier sets and their results remain on record and are not re-run.
+
+## Result (one run, as pre-registered)
+
+Run once through the real loop with `C4_GENERATOR_RUN=v4`: set v4, prompt v4, the same model, floor, retrieval and policy.
+All 24 cases completed. No generation failures.
+
+- **Answer recall:** 11 of 12 (0.92). **False answers:** 0 of 12. **Wrong-source answers:** 0.
+- **Abstention precision:** 0.92 (12 true abstentions, 1 false abstention).
+- **Citation rejections (`no_citation`):** 0. Version 3 had 2.
+- **Placeholder leaks:** none. No answer cites `EXAMPLE-ID`, and every citation is a North id from the evidence.
+- Four answers named the same source id twice (`gen4-answer-login-what-to-note`, `gen4-answer-mfa-factor-device`,
+  `gen4-answer-recovery-verify-before` and `gen4-answer-recovery-unsure-identity`). The scorer counts these as correct,
+  because every citation names the expected source.
+
+**Decision rule, applied as written:**
+- Citation format: **met.** Zero `no_citation` rejections and zero generation failures.
+- Safety: **met.** Zero false answers and zero wrong-source answers.
+
+**Misses:** the one answerable miss is `gen4-answer-login-secret-requests`, which scored 0.646 and fell below the floor. It is
+a retrieval miss, not a citation miss. The one false abstention is that same case.
+
+**Caveats:** one author; this set was written after the v3 failure; one run; 12 answerable questions, so one question moves
+recall by about 8 points. The result shows the rules held on this set. It does not show they hold on other evidence.
+
+The report is kept in the scratchpad (`c4-citation-fix-v4-run1.json`), not in the repository.
