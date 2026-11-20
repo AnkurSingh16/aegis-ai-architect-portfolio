@@ -12,7 +12,7 @@ import { answerWithSelfCorrection, type GenerateInput, type SelfCorrectionPolicy
  * rounds, does not retry on insufficient evidence (docs/DEV-C4-REFORMULATION.md: not accepted), and checks citations with
  * the output guard. No forbidden substrings are configured for production; the evaluations used a sentinel for testing.
  */
-export const ANSWER_POLICY: SelfCorrectionPolicy = { maxRounds: 2, minScore: 0.7, forbiddenSubstrings: [] };
+export const ANSWER_POLICY: SelfCorrectionPolicy = { maxRounds: 2, minScore: 0.7, forbiddenSubstrings: [], requireAnswerText: true };
 
 /** Injected for tests. In production both default to the local loopback Ollama services. */
 export interface AnswerRouteDeps {

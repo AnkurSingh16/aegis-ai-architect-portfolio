@@ -40,9 +40,24 @@ export interface SelfCorrectionPolicy {
    * Default false: the loop then behaves exactly as before. See docs/DEV-C4-REFORMULATION.md.
    */
   readonly retryOnInsufficientEvidence?: boolean;
+  /**
+   * When true, an answer whose text is only citations or the Sources label (no words of its own) is a failed round.
+   * Default false, so the recorded evaluation runs stay reproducible. The answer route turns it on.
+   * See docs/DEV-C4-PROMPT-V5.md (the Sources-only answers found in the v5 run).
+   */
+  readonly requireAnswerText?: boolean;
 }
 
-export type Problem = 'empty_answer' | 'forbidden_substring' | 'unknown_citation' | 'no_citation';
+export type Problem = 'empty_answer' | 'forbidden_substring' | 'unknown_citation' | 'no_citation' | 'no_answer_text';
+
+const CITATION_TOKEN = /\[[a-z0-9][a-z0-9._-]*\]/gi;
+const SOURCES_LABEL = /sources?\s*:/gi;
+
+/** True when the answer has a run of three letters or digits outside its citations and its Sources label. */
+export function hasAnswerText(answer: string): boolean {
+  const body = answer.replace(CITATION_TOKEN, ' ').replace(SOURCES_LABEL, ' ');
+  return /[a-z0-9]{3,}/i.test(body);
+}
 
 export type SelfCorrectionResult =
   | { readonly status: 'answered'; readonly answer: string; readonly citations: readonly string[]; readonly rounds: number; readonly problemHistory: readonly (readonly Problem[])[] }
@@ -91,6 +106,7 @@ export async function answerWithSelfCorrection(
     });
     const problems: Problem[] = [...guard.violations];
     if (guard.ok && guard.citedSourceIds.length === 0) problems.push('no_citation');
+    if (policy.requireAnswerText && !hasAnswerText(answer)) problems.push('no_answer_text');
 
     if (problems.length === 0) {
       return { status: 'answered', answer: answer.trim(), citations: guard.citedSourceIds, rounds: round, problemHistory };

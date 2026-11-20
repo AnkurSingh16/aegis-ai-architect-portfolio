@@ -87,3 +87,11 @@ No further prompt change is run on this set. The gaps found here (one citation r
 - Recall is reported, not part of the rule. It is on a different set from the v4 runs, so the numbers are not directly comparable.
 - Twelve of the answerable cases abstained as `insufficient_evidence` in round 1, so most of the recall loss is in retrieval below the floor, not in generation.
 - The `reformulation_unavailable` reason on the one `no_citation` case is the loop's final reason when reformulation is off. It is not a reformulation failure.
+
+## Follow-up: answer-text guard (not measured)
+
+The answer route now sets `requireAnswerText: true` (`apps/api/src/rag/answer-routes.ts`). A round whose answer has no words outside its citations and Sources label is a failed round (`no_answer_text`), and the loop retries or abstains. It is a code check, so it needs no model run.
+
+- The v5 evaluation above was run without this check, and its result is not changed.
+- The evaluation runner's policy is unchanged, so the recorded runs stay reproducible. The route's behaviour now differs from the evaluated loop in this one respect.
+- The route stays on v4 and "not ready". Measuring the guard on a fresh set needs a new pre-registered protocol.

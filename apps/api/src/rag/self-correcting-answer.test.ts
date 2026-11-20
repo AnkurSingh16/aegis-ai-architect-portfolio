@@ -79,6 +79,28 @@ describe('answerWithSelfCorrection', () => {
     expect(await answerWithSelfCorrection('q', long, policy)).toMatchObject({ reason: 'reformulation_unavailable' });
   });
 
+  it('treats a citation-only answer as a failure when answer text is required', async () => {
+    const generate = vi.fn()
+      .mockResolvedValueOnce('Sources: [doc-a]')
+      .mockResolvedValueOnce('Reset from the help article [doc-a].');
+    const result = await answerWithSelfCorrection('question', deps({ generate }), { ...policy, requireAnswerText: true });
+    expect(result).toMatchObject({ status: 'answered', answer: 'Reset from the help article [doc-a].', rounds: 2 });
+    expect(result.status === 'answered' && result.problemHistory).toEqual([['no_answer_text']]);
+  });
+
+  it('abstains when every round is citation-only and answer text is required', async () => {
+    const d = deps({ generate: vi.fn(async () => 'Sources: [doc-a]') });
+    const result = await answerWithSelfCorrection('question', d, { ...policy, maxRounds: 1, requireAnswerText: true });
+    expect(result).toMatchObject({ status: 'abstained', reason: 'guard_failed', rounds: 1 });
+    expect(result.problemHistory).toEqual([['no_answer_text']]);
+  });
+
+  it('keeps citation-only answers when answer text is not required (recorded runs unchanged)', async () => {
+    const d = deps({ generate: vi.fn(async () => 'Sources: [doc-a]') });
+    const result = await answerWithSelfCorrection('question', d, { ...policy, maxRounds: 1 });
+    expect(result).toMatchObject({ status: 'answered', citations: ['doc-a'], rounds: 1 });
+  });
+
   it('rejects a round bound outside 1 to 3 and an empty question', async () => {
     await expect(answerWithSelfCorrection('q', deps(), { ...policy, maxRounds: 0 })).rejects.toThrow(RangeError);
     await expect(answerWithSelfCorrection('q', deps(), { ...policy, maxRounds: 4 })).rejects.toThrow(RangeError);
