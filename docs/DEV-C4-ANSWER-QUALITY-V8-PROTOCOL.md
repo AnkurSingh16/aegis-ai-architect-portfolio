@@ -85,7 +85,7 @@ Run once on 2026-11-20 with the command above, against a disposable PostgreSQL c
 
 - **Safety rule: met.** Zero false answers, zero wrong-source answers.
 - **Citation rule: met.** Zero `no_citation` rejections, zero generation failures.
-- **Answer-text rule: met.** Zero `answerTextProblems`, zero `sourcesOnlyProblems`.
+- **Answer-text rule: met as written, but overstated.** Zero `answerTextProblems`, zero `sourcesOnlyProblems`. See the correction below.
 
 All three rules hold, so the protocol's consequence applies: the route moves to prompt v5. That change is not yet made. It is
 a code change to `apps/api/src/rag/answer-routes.ts` and needs the owner's go-ahead.
@@ -114,3 +114,17 @@ PostgreSQL container removed after the run). Two questions through the real rout
 - The placeholder-text assertion in the test passed.
 
 This is two checks, not a quality measure. It confirms the route runs on prompt v5 and that the shape and citation rules hold.
+
+## Correction: the answer-text rule does not test answers
+
+Found on review after the run. The result above is not changed. Its recorded figures are as reported.
+
+- Two of the seven answered cases contain the question itself with a citation, and no answer:
+  `gen8-answer-login-one-account` and `gen8-answer-recovery-name-proof`.
+- The `hasAnswerText` check counts the question's words as answer text, so it passed both. The rule as written was met,
+  but it does not show that an answer answers the question.
+- Five of the seven other answers are a single source sentence, copied with little or no change. Their truth to the source
+  has not been checked by a human.
+- Consequence: the statement "met the answer-text rule" overstates answer quality. The route's answer-text guard does not
+  reject question echoes. Changing it needs a new pre-registered change and a re-check, not an edit to this result.
+- Human review of the seven answers and the boundary cases is listed in the register and is still open.
