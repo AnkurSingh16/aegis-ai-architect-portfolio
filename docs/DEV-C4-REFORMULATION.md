@@ -67,3 +67,36 @@ gain is never enough on its own.
   scored outcomes is measured.
 - The retry uses the same floor. This protocol does not test a floor change.
 - The earlier sets and their results remain on record and are not re-run.
+
+## Results (one run each, as pre-registered)
+
+Both runs used prompt v4 on set v6, with the same model, floor, retrieval and `maxRounds: 2`. All 24 cases completed in each
+run, with no generation failures.
+
+| Run | Answer recall | False answers | Wrong-source | `no_citation` | Retried cases |
+|---|---|---|---|---|---|
+| A: baseline (reformulation off) | 3 of 12 (0.25) | 0 of 12 | 0 | 1 | 0 |
+| B: reformulation on | 3 of 12 (0.25) | 0 of 12 | 0 | 1 | 9 |
+
+- **Abstention precision:** 0.57 in both runs (12 true abstentions, 9 false abstentions).
+- **Retry effect:** in run B, nine cases retried with a reworded query. None of the nine was answered on the retry. The
+  same three answerable questions were correct in both runs.
+- **Retry scores:** in run B, a retried case's recorded top score is the score from the second retrieval. Those scores
+  were not higher than the first-round scores for the same cases, so the reworded queries did not lift relevant documents
+  above 0.70.
+
+**Decision rule, applied as written:**
+- Safety rule (zero false answers, zero wrong-source answers) in run B: **met.**
+- Citation rule (zero `no_citation` rejections, zero generation failures) in run B: **not met.** The one `no_citation`
+  rejection, `reform-answer-network-observe-only`, is also present in run A, so it is not caused by the retry.
+- Recall gain: **none.** Run B recall equals run A recall.
+
+**Outcome:** the reformulation option is **not accepted**. The default stays off. Under the protocol, the result is reported
+as it stands and no further change is run on this set.
+
+**Reading:** on this set, one reworded query per retry did not recover any of the nine retried answerable questions. It
+also did not admit any unanswerable question, so the retry is safe here but does not help. The baseline recall on this set
+(0.25) is much lower than on earlier sets, which is expected from the paraphrasing, and it means this set is a hard test
+of retrieval rather than of the answer step.
+
+The reports are kept in the scratchpad (`c4-reform-baseline-run1.json` and `c4-reform-on-run1.json`), not in the repository.
