@@ -21,6 +21,7 @@ import { generatorEvalCasesV3 } from './generator-cases-v3.js';
 import { generatorEvalCasesV4 } from './generator-cases-v4.js';
 import { generatorEvalCasesV5 } from './generator-cases-v5.js';
 import { generatorEvalCasesV6 } from './generator-cases-v6.js';
+import { generatorEvalCasesV7 } from './generator-cases-v7.js';
 import { createOllamaGenerator, GenerationError, GENERATOR_MODEL, type PromptVersion } from './ollama-generator.js';
 import { createOllamaReformulator, REFORMULATOR_MODEL, REFORMULATOR_PROMPT_VERSION } from './ollama-reformulator.js';
 import { scoreAbstentionCases, type CaseOutcome } from './abstention-evaluation.js';
@@ -54,14 +55,16 @@ const FLOOR = 0.7;
 const POLICY = { maxRounds: 2, minScore: FLOOR, forbiddenSubstrings: ['SENTINEL-XYZ'] };
 // Which pre-registered run this is. The default is the first run: set v1 with prompt v1. The citation fix is set v2
 // with prompt v2 (docs/DEV-C4-CITATION-FIX.md). Nothing else changes between the two.
-const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v4' ? 'v4'
-  : process.env.C4_GENERATOR_RUN === 'v3' ? 'v3' : process.env.C4_GENERATOR_RUN === 'v2' ? 'v2' : 'v1';
+const RUN: PromptVersion = process.env.C4_GENERATOR_RUN === 'v5' ? 'v5'
+  : process.env.C4_GENERATOR_RUN === 'v4' ? 'v4'
+    : process.env.C4_GENERATOR_RUN === 'v3' ? 'v3' : process.env.C4_GENERATOR_RUN === 'v2' ? 'v2' : 'v1';
 // The set can be chosen separately from the prompt, for the independent-set run (docs/DEV-C4-INDEPENDENT-SET.md).
 // Unset, the set follows the prompt, as before.
 const SET_NAME = process.env.C4_GENERATOR_SET ?? RUN;
 // Reformulation is off unless C4_LOOP_REFORMULATE=1 (docs/DEV-C4-REFORMULATION.md). Off, the loop is exactly as before.
 const REFORMULATE = process.env.C4_LOOP_REFORMULATE === '1';
-const EVAL_SET = SET_NAME === 'v6' ? generatorEvalCasesV6
+const EVAL_SET = SET_NAME === 'v7' ? generatorEvalCasesV7
+  : SET_NAME === 'v6' ? generatorEvalCasesV6
   : SET_NAME === 'v5' ? generatorEvalCasesV5
     : SET_NAME === 'v4' ? generatorEvalCasesV4 : SET_NAME === 'v3' ? generatorEvalCasesV3
     : SET_NAME === 'v2' ? generatorEvalCasesV2 : generatorEvalCases;
@@ -156,6 +159,13 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
       : { status: 'abstained' }));
     const scoredCases = scored.map((record) => ({ id: record.id, question: '', expected: record.expected }));
     const report = scoreAbstentionCases(scoredCases, outcomes);
+    // Answer-text rule (docs/DEV-C4-PROMPT-V5.md): an answered case whose text is empty or is template text is a failure,
+    // even when its citations are correct. The scorer above checks citations only.
+    const templateText = /answer text here|EXAMPLE-ID|\[SOURCE-ID\]/i;
+    const answerTextProblems = scored
+      .filter((record) => record.status === 'answered' && (record.answer === undefined || record.answer.trim().length === 0
+        || templateText.test(record.answer)))
+      .map((record) => record.id);
 
     if (process.env.C4_GENERATOR_OUTPUT) {
       writeFileSync(process.env.C4_GENERATOR_OUTPUT, `${JSON.stringify({
@@ -170,6 +180,7 @@ describe.skipIf(!live)('live generator evaluation: one pre-registered run', () =
         generationFailures: records.filter((record) => record.status === 'generation_failed').length,
         scoredCases: scored.length,
         report,
+        answerTextProblems,
         records,
       }, null, 2)}\n`);
     }

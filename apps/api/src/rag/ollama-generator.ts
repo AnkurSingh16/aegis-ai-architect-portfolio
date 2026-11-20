@@ -64,10 +64,21 @@ const SYSTEM_PROMPT_V4 = [
   'EXAMPLE-ID is a placeholder and is never a valid source. Use only the ids given in the evidence.',
 ].join('\n');
 
-export type PromptVersion = 'v1' | 'v2' | 'v3' | 'v4';
+/**
+ * Version 5 is the next version in docs/DEV-C4-PROMPT-V5.md. It is version 3 with the layout example removed, because the
+ * model copied the example's placeholder sentence as the answer (docs/DEV-C4-CITATION-FIX-V4.md). The one addition is an
+ * answer-first rule: state the answer in your own words, from the evidence, before the Sources line.
+ */
+const SYSTEM_PROMPT_V5 = [
+  SYSTEM_PROMPT_V3,
+  'Begin with the answer to the question, in your own words, based on the evidence. Then end with the Sources line.',
+  'Do not write template or placeholder text.',
+].join(' ');
+
+export type PromptVersion = 'v1' | 'v2' | 'v3' | 'v4' | 'v5';
 
 const SYSTEM_PROMPTS: Record<PromptVersion, string> = {
-  v1: SYSTEM_PROMPT_V1, v2: SYSTEM_PROMPT_V2, v3: SYSTEM_PROMPT_V3, v4: SYSTEM_PROMPT_V4,
+  v1: SYSTEM_PROMPT_V1, v2: SYSTEM_PROMPT_V2, v3: SYSTEM_PROMPT_V3, v4: SYSTEM_PROMPT_V4, v5: SYSTEM_PROMPT_V5,
 };
 
 /** Builds the user message. Feedback is problem names only, never the offending text. */
