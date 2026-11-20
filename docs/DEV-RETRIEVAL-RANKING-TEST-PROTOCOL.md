@@ -75,3 +75,15 @@ If a candidate fails any condition, it is rejected on this test. No second candi
 1. Whether ranking work is worth continuing at all. The route's gaps are the boundary misses below the floor and the answer
    text, not only ranking.
 2. Which candidate, if any, to pre-register next.
+
+## Step 1 done: the 50-query set written (no retrieval run)
+
+- `apps/api/src/retrieval/eval/ranking-queries-v1.ts`: queries R01 to R50, one per document D01 to D50. Odd documents get a
+  paraphrase, even documents get an augmented query.
+- Written before any retrieval was run on them. Construction checks passed: 25 and 25; paraphrases have zero target content
+  words; augmented queries have one to three; no query repeats the mixed set or the paraphrases in `large-dev-corpus.ts`.
+- Overlap is computed from the text with the benchmark's stopword list, not typed in.
+- Two augmented queries were edited once, to bring their overlap from four to three. That was a construction fix found by
+  the overlap test, before any measurement, and it is recorded here.
+- Same-author. Step 2 (measurement) is not run. The candidate in
+  `docs/DEV-RETRIEVAL-CANDIDATE-GATED-LEXICAL.md` is not implemented or measured.
