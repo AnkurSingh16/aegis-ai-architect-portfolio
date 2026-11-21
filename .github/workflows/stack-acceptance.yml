@@ -1,0 +1,32 @@
+name: Local stack acceptance (opt-in)
+
+# Manual only. Runs the Compose stack on the runner: PostgreSQL, Keycloak, API and web, then the real browser lifecycle suite.
+# It creates local, generated secrets and needs no cloud credentials. It is not part of pull request or push checks, and it does not
+# touch any external environment.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Node LTS
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Start stack, reconcile identities, run acceptance
+        run: npm run test:stack -- --down
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose -p aegis-local --env-file .env.local logs --no-color --tail 200

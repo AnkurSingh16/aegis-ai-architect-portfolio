@@ -12,16 +12,32 @@ const authMocks = vi.hoisted(() => ({
   providerProps: undefined as Record<string, unknown> | undefined,
 }));
 
-vi.mock('@auth0/auth0-react', () => ({
-  Auth0Provider: (props: Record<string, unknown>) => {
+vi.mock('./session', () => ({
+  messageFor: (kind: string) => (kind === 'provider_unavailable' ? 'The identity provider is unavailable. Try again when it is back.'
+    : kind === 'callback_failed' ? 'Sign-in could not be completed. Start sign-in again.'
+      : 'Sign-in could not be completed. Check the identity provider configuration and try again.'),
+  SignInFailure: class SignInFailure extends Error { kind = 'sign_in_failed'; },
+  SessionProvider: (props: Record<string, unknown>) => {
     authMocks.providerProps = props;
     return props.children;
   },
-  useAuth0: () => ({ ...authMocks.state, loginWithRedirect: authMocks.loginWithRedirect,
-    logout: authMocks.logout, getAccessTokenSilently: authMocks.getAccessTokenSilently }),
+  useSession: () => {
+    const state = authMocks.state;
+    return {
+      status: state.isLoading ? 'loading' : state.error ? 'error' : state.isAuthenticated ? 'authenticated' : 'anonymous',
+      error: state.error ? 'callback_failed' : null,
+      subject: state.user?.sub ?? null,
+      scopes: state.isAuthenticated ? ['read:cases', 'write:cases'] : [],
+      signIn: authMocks.loginWithRedirect,
+      signOut: authMocks.logout,
+      getAccessToken: authMocks.getAccessTokenSilently,
+    };
+  },
 }));
 
-const config = { domain: 'dev-tzvthmve8npi2dw7.au.auth0.com', clientId: 'public-client-id', audience: 'https://aegis-ai.local/api' };
+const config = { environment: 'local', issuer: 'http://localhost:8180/realms/aegis', clientId: 'aegis-web', audience: 'aegis-api',
+  scopes: ['openid', 'read:cases', 'write:cases'], redirectPath: '/', postLogoutRedirectPath: '/', apiBasePath: '/api', silentRenew: true,
+  features: { demoRoutes: false } } as const;
 const northCase = { id: 'case-1', tenant_id: '10000000-0000-4000-8000-000000000001',
   synthetic_case_id: 'SYN-NORTH-001', status: 'open', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
 const analysis = { caseId: 'case-1', category: 'incident', priority: 'high', recommendedTeam: 'Platform support',
@@ -50,20 +66,18 @@ afterEach(() => {
   window.history.replaceState({}, '', '/');
 });
 
-describe('development Auth0 case experience', () => {
-  it('configures memory-only Authorization Code + PKCE SDK settings and pinned callback', () => {
+describe('protected case experience', () => {
+  it('hands the validated deployment settings to the session provider, not to a vendor SDK', () => {
     authMocks.state = { isAuthenticated: true, isLoading: false };
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] });
     render(<DevAuthExperience config={config} />);
-    expect(authMocks.providerProps).toMatchObject({ domain: config.domain, clientId: config.clientId,
-      cacheLocation: 'memory', useRefreshTokens: false,
-      authorizationParams: { redirect_uri: 'http://127.0.0.1:5173/', audience: config.audience, scope: 'read:cases write:cases' } });
+    expect(authMocks.providerProps).toMatchObject({ settings: config });
   });
 
   it('offers sign-in without calling the API when unauthenticated', () => {
     globalThis.fetch = vi.fn();
     render(<DevAuthExperience config={config} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Auth0' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     expect(authMocks.loginWithRedirect).toHaveBeenCalledOnce();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
@@ -89,7 +103,7 @@ describe('development Auth0 case experience', () => {
     authMocks.state = { isAuthenticated: false, isLoading: false, error: new Error('private callback code detail') };
     window.history.replaceState({}, '', '/?code=private-code&state=state-value');
     render(<DevAuthExperience config={config} />);
-    expect(screen.getByRole('alert').textContent).toMatch(/Auth0 sign-in could not be completed/);
+    expect(screen.getByRole('alert').textContent).toMatch(/Sign-in could not be completed/);
     expect(document.body.textContent).not.toContain('private callback code detail');
     expect(document.body.textContent).not.toContain('private-code');
   });
@@ -155,7 +169,7 @@ describe('development Auth0 case experience', () => {
   });
 
   it('invalidates a response when the authenticated identity changes', async () => {
-    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-a' } };
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'subject-reader-a' } };
     authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
     let resolveBody!: (body: unknown) => void;
     const body = new Promise<unknown>((resolve) => { resolveBody = resolve; });
@@ -167,7 +181,7 @@ describe('development Auth0 case experience', () => {
     const { container, rerender } = render(<DevAuthExperience config={config} />);
 
     await waitFor(() => expect(json).toHaveBeenCalledOnce());
-    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-b' } };
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'subject-reader-b' } };
     rerender(<DevAuthExperience config={config} />);
     await screen.findByText(/Access was denied/);
     await act(async () => { resolveBody([northCase]); await body; });
@@ -216,7 +230,7 @@ describe('development Auth0 case experience', () => {
     render(<DevAuthExperience config={config} />);
     expect(await screen.findByText('SYN-NORTH-001')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-    await waitFor(() => expect(authMocks.logout).toHaveBeenCalledWith({ logoutParams: { returnTo: 'http://127.0.0.1:5173' } }));
+    await waitFor(() => expect(authMocks.logout).toHaveBeenCalled());
   });
 
   it('rejects a response containing a foreign tenant record', async () => {
@@ -232,7 +246,7 @@ describe('development Auth0 case experience', () => {
     authMocks.state = { isAuthenticated: true, isLoading: false };
     authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
     const review = { review_id: 'review-1', tenant_id: northCase.tenant_id, case_id: northCase.id, decision: 'approve',
-      actor_issuer: 'https://synthetic.auth0.example/', actor_subject: 'auth0|operator', note: 'Verified synthetic facts.',
+      actor_issuer: 'https://synthetic.example/', actor_subject: 'subject-operator', note: 'Verified synthetic facts.',
       created_at: '2026-11-14T12:00:00.000Z' };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'true' }, json: async () => [northCase] })
@@ -251,7 +265,7 @@ describe('development Auth0 case experience', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm review' }));
 
     expect(await screen.findByText('Human review saved.')).toBeTruthy();
-    expect(await screen.findByText(/auth0\|operator/)).toBeTruthy();
+    expect(await screen.findByText(/subject-operator/)).toBeTruthy();
     const post = fetchMock.mock.calls.find(([url, options]) => String(url).endsWith('/reviews') && options?.method === 'POST');
     expect(post?.[1]).toMatchObject({ method: 'POST', headers: expect.objectContaining({
       Authorization: 'Bearer private-test-token', 'Idempotency-Key': expect.any(String) }),
@@ -264,7 +278,7 @@ describe('development Auth0 case experience', () => {
     authMocks.state = { isAuthenticated: true, isLoading: false };
     authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
     const review = { review_id: 'review-2', tenant_id: northCase.tenant_id, case_id: northCase.id, decision: 'defer',
-      actor_issuer: 'https://synthetic.auth0.example/', actor_subject: 'auth0|operator', note: null,
+      actor_issuer: 'https://synthetic.example/', actor_subject: 'subject-operator', note: null,
       created_at: '2026-11-14T12:00:00.000Z' };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'true' }, json: async () => [northCase] })
@@ -310,7 +324,7 @@ describe('development Auth0 case experience', () => {
     let resolveHistory!: (response: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
     const delayed = new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve) => { resolveHistory = resolve; });
     const oldReview = { review_id: 'review-old', tenant_id: northCase.tenant_id, case_id: northCase.id, decision: 'approve',
-      actor_issuer: 'https://synthetic.auth0.example/', actor_subject: 'old-tenant|operator', note: 'old tenant review',
+      actor_issuer: 'https://synthetic.example/', actor_subject: 'old-tenant-operator', note: 'old tenant review',
       created_at: '2026-11-14T12:00:00.000Z' };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'true' }, json: async () => [northCase] })
@@ -326,7 +340,7 @@ describe('development Auth0 case experience', () => {
     await delayed;
     expect(fetchMock.mock.calls[1]?.[1]?.signal?.aborted).toBe(true);
     expect(container.textContent).not.toContain('old tenant review');
-    expect(container.textContent).not.toContain('old-tenant|operator');
+    expect(container.textContent).not.toContain('old-tenant-operator');
   });
 
   it('does not persist tokens in browser storage', async () => {
@@ -415,7 +429,7 @@ describe('development Auth0 case experience', () => {
   });
 
   it('aborts and discards analysis when the authenticated identity changes during response parsing', async () => {
-    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-a' } };
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'subject-reader-a' } };
     authMocks.getAccessTokenSilently.mockResolvedValue('private-test-token');
     let resolveBody!: (value: unknown) => void;
     const delayedBody = new Promise<unknown>((resolve) => { resolveBody = resolve; });
@@ -428,7 +442,7 @@ describe('development Auth0 case experience', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Analyze with local AI' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
-    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'auth0|reader-b' } };
+    authMocks.state = { isAuthenticated: true, isLoading: false, user: { sub: 'subject-reader-b' } };
     rerender(<DevAuthExperience config={config} />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     await act(async () => { resolveBody(analysis); await delayedBody; });
@@ -441,8 +455,8 @@ describe('development Auth0 case experience', () => {
     authMocks.state = { isAuthenticated: false, isLoading: false };
     authMocks.loginWithRedirect.mockRejectedValue(new Error('token secret detail'));
     render(<DevAuthExperience config={config} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Auth0' }));
-    expect(await screen.findByText(/Sign-in could not be started/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByText(/Sign-in could not be completed/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('token secret detail');
   });
 

@@ -59,10 +59,30 @@ function requireEnv() {
   return readEnv(envFile);
 }
 
-function up() {
-  requireEnv();
+// Waits until the identity provider actually serves the application realm. A healthy container alone does not guarantee this, because the
+// realm is imported after the process starts. Only when the discovery document is served do dependent steps (user setup) proceed.
+async function waitForRealm(env, timeoutMs = 180000) {
+  const url = `http://127.0.0.1:${env.AEGIS_PORT_KEYCLOAK ?? 8180}/realms/aegis/.well-known/openid-configuration`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+      if (response.ok) return true;
+    } catch { /* not yet serving */ }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return false;
+}
+
+async function up() {
+  const env = requireEnv();
   const result = compose(['up', '-d', '--build', '--wait']);
-  return result.status ?? 1;
+  if ((result.status ?? 1) !== 0) return result.status ?? 1;
+  if (!(await waitForRealm(env))) {
+    console.error('The aegis realm was not served within the timeout. Check the keycloak service logs.');
+    return 1;
+  }
+  return 0;
 }
 
 function down() {

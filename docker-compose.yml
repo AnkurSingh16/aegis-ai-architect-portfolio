@@ -133,6 +133,18 @@ services:
       dockerfile: apps/web/Dockerfile
     image: aegis-web:local
     restart: unless-stopped
+    environment:
+      # Public browser configuration only. No secret is passed to the web tier.
+      AEGIS_WEB_OIDC_ENABLED: 'true'
+      AEGIS_WEB_ENVIRONMENT: local
+      AEGIS_WEB_OIDC_ISSUER: ${AEGIS_OIDC_ISSUER:-http://localhost:8180/realms/aegis}
+      AEGIS_WEB_OIDC_CLIENT_ID: aegis-web
+      AEGIS_WEB_OIDC_AUDIENCE: ${AEGIS_OIDC_AUDIENCE:-aegis-api}
+      AEGIS_WEB_OIDC_SCOPES: 'openid read:cases write:cases'
+      AEGIS_WEB_REDIRECT_PATH: /
+      AEGIS_WEB_POST_LOGOUT_PATH: /
+      AEGIS_WEB_SILENT_RENEW: 'true'
+      AEGIS_WEB_DEMO_ROUTES: 'false'
     depends_on:
       api:
         condition: service_healthy

@@ -57,6 +57,15 @@
           }
         }
       ]
+    },
+    {
+      "name": "write:cases",
+      "description": "Write access to case reviews. The API still requires an operator membership.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
     }
   ],
   "clients": [
@@ -73,10 +82,13 @@
         "http://localhost:5190"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5190/*",
+        "access.token.lifespan": "60"
       },
       "optionalClientScopes": [
-        "read:cases"
+        "read:cases",
+        "write:cases"
       ],
       "defaultClientScopes": [
         "basic",
@@ -92,7 +104,8 @@
       "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": false,
       "optionalClientScopes": [
-        "read:cases"
+        "read:cases",
+        "write:cases"
       ],
       "defaultClientScopes": [
         "basic",

@@ -2,7 +2,10 @@ import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import type { AuthConfig } from './config.js';
 import { validateIssuer, validateJwksUri } from './config.js';
 
-const JWKS_OPTIONS = { timeoutDuration: 5000, cooldownDuration: 30000, cacheMaxAge: 600000 } as const;
+// Key-set policy. A retired signing key is refused once the cached set expires, so the cache bounds the window in which a retired key
+// is still accepted: 60 s. Refresh after an unknown key identifier is allowed once per 30 s. This is the cost of prompt key retirement:
+// at most one JWKS request per process per minute in steady state. Immediate revocation is not claimed (see docs/KEY-ROTATION-POLICY.md).
+const JWKS_OPTIONS = { timeoutDuration: 5000, cooldownDuration: 30000, cacheMaxAge: 60000 } as const;
 const DISCOVERY_TIMEOUT_MS = 5000;
 const DISCOVERY_MAX_BYTES = 65536;
 

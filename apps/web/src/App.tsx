@@ -2,14 +2,27 @@ import { useEffect, useState } from 'react';
 import { portfolioProjects } from './content';
 import Triage from './Triage';
 import DevAuthExperience from './auth/DevAuthExperience';
-import { isApprovedLoopbackOrigin, readAuthConfig } from './auth/config';
+import { loadRuntimeConfig } from './auth/runtime-config';
+import type { RuntimeConfig } from './auth/oidc-config';
 
-const localAuthConfig = import.meta.env.DEV && isApprovedLoopbackOrigin(window.location.origin)
-  ? readAuthConfig(import.meta.env) : null;
+// Whether the deployment serves the protected area is decided by its runtime configuration, not by the build mode. A production build
+// and a development server behave the same way for the same configuration.
+type RuntimeState = { kind: 'loading' } | { kind: 'ready'; config: RuntimeConfig } | { kind: 'unavailable' };
 
 type ApiHealth = { ok: boolean; service: string; mode: string };
 
 export default function App() {
+  const [runtime, setRuntime] = useState<RuntimeState>({ kind: 'loading' });
+  useEffect(() => {
+    let active = true;
+    loadRuntimeConfig()
+      .then((config) => { if (active) setRuntime({ kind: 'ready', config }); })
+      .catch(() => { if (active) setRuntime({ kind: 'unavailable' }); });
+    return () => { active = false; };
+  }, []);
+  const oidc = runtime.kind === 'ready' ? runtime.config.oidc : null;
+  const demoRoutes = oidc?.features.demoRoutes === true;
+
   const [apiStatus, setApiStatus] = useState(import.meta.env.PROD ? 'Public portfolio — API demo not exposed' : 'Checking local API…');
   useEffect(() => {
     if (import.meta.env.PROD) return;
@@ -52,12 +65,15 @@ export default function App() {
             </article>)}
           </div>
         </section>
-        <Triage />
-        {import.meta.env.DEV && (localAuthConfig
-          ? <DevAuthExperience config={localAuthConfig} />
-          : <section className="auth-cases wrap" id="secure-cases"><p className="eyebrow">DEVELOPMENT AUTHENTICATION</p>
-            <h2>Protected case access</h2><p>Set the public Auth0 development values in <code>apps/web/.env.local</code> to enable sign-in.</p>
-          </section>)}
+        {demoRoutes && <Triage />}
+        {runtime.kind === 'loading' && <section className="auth-cases wrap" id="secure-cases"><p role="status">Loading configuration…</p></section>}
+        {runtime.kind === 'unavailable' && <section className="auth-cases wrap" id="secure-cases" role="alert">
+          <h2>Protected case access</h2><p>The application configuration could not be loaded. Try again later.</p>
+        </section>}
+        {oidc && <section className="auth-cases wrap" id="secure-cases"><DevAuthExperience config={oidc} /></section>}
+        {runtime.kind === 'ready' && !oidc && <section className="auth-cases wrap" id="secure-cases">
+          <h2>Protected case access</h2><p>Sign-in is not configured for this deployment.</p>
+        </section>}
         <section id="architecture" className="principles wrap">
           <div><p className="eyebrow">ENGINEERING APPROACH</p><h2>Intentional quality.<br />Not just a polished demo.</h2></div>
           <div className="principle-list">

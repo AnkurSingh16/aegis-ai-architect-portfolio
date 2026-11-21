@@ -97,15 +97,22 @@ async function adminToken() {
   return (await (await fetch(`${KC_ADMIN}/realms/master/protocol/openid-connect/token`, { method: 'POST', body })).json()).access_token;
 }
 
-// Signing-key rotation: add a new realm key with higher priority, then retire the old one. Each step records what the API accepts and when.
+// Signing-key rotation and emergency retirement.
+// Policy (docs/KEY-ROTATION-POLICY.md): a new key is added with a higher priority and becomes the signer. The old key is retired by
+// disabling it (enabled=false), which removes it from the published key set. Setting only active=false is NOT retirement: Keycloak keeps
+// passive keys in the set so that older tokens still verify. The verifier caches the key set for 60 s, so a disabled key is refused within
+// that window. The check identifies the key that signed the old token by its kid, then measures refusal.
+function headerOf(jwt) {
+  return JSON.parse(Buffer.from(jwt.split('.')[0], 'base64url').toString('utf8'));
+}
+
 async function rotateKey(oldAliceToken) {
+  const oldKid = headerOf(oldAliceToken).kid;
   const at = await adminToken();
   const h = { authorization: `Bearer ${at}`, 'content-type': 'application/json' };
   const realmId = (await (await fetch(`${KC_ADMIN}/admin/realms/aegis`, { headers: h })).json()).id;
-  const keys = await (await fetch(`${KC_ADMIN}/admin/realms/aegis/components?type=org.keycloak.keys.KeyProvider`, { headers: h })).json();
-  const retiring = keys.find((k) => k.providerId === 'rsa-generated' && k.config?.active?.[0] === 'true');
   const created = await fetch(`${KC_ADMIN}/admin/realms/aegis/components`, { method: 'POST', headers: h, body: JSON.stringify({
-    name: 'aegis-rotated-rsa', providerId: 'rsa-generated', providerType: 'org.keycloak.keys.KeyProvider', parentId: realmId,
+    name: `aegis-rotated-rsa-${Date.now()}`, providerId: 'rsa-generated', providerType: 'org.keycloak.keys.KeyProvider', parentId: realmId,
     config: { priority: ['200'], enabled: ['true'], active: ['true'], keySize: ['2048'], algorithm: ['RS256'] } }) });
   check('new signing key created in the realm', created.status === 201);
 
@@ -116,16 +123,28 @@ async function rotateKey(oldAliceToken) {
     if ((await listCases(NORTH, fresh)) === 200) acceptedAt = Date.now() - started;
     else await sleep(2000);
   }
-  check('token signed by the new key is accepted after JWKS refresh', acceptedAt !== null, acceptedAt === null ? 'not within 90s' : `after ${Math.round(acceptedAt / 1000)}s`);
+  check('token signed by the new key is accepted after JWKS refresh', acceptedAt !== null,
+    acceptedAt === null ? 'not within 90s' : `after ${Math.round(acceptedAt / 1000)}s`);
 
-  if (retiring) {
-    retiring.config.active = ['false'];
-    await fetch(`${KC_ADMIN}/admin/realms/aegis/components/${retiring.id}`, { method: 'PUT', headers: h, body: JSON.stringify(retiring) });
+  // Find the component that owns the old token's kid, using the realm key listing (kid -> component id).
+  const listing = await (await fetch(`${KC_ADMIN}/admin/realms/aegis/keys`, { headers: h })).json();
+  const owner = (listing.keys ?? []).find((key) => key.kid === oldKid);
+  check('the key that signed the old token is identified in the realm', owner !== undefined, owner ? `status ${owner.status}` : 'not found');
+  if (!owner) return;
+  const component = await (await fetch(`${KC_ADMIN}/admin/realms/aegis/components/${owner.providerId}`, { headers: h })).json();
+  component.config.enabled = ['false'];
+  component.config.active = ['false'];
+  const disabled = await fetch(`${KC_ADMIN}/admin/realms/aegis/components/${owner.providerId}`, { method: 'PUT', headers: h, body: JSON.stringify(component) });
+  check('old key disabled (emergency retirement)', disabled.ok);
+
+  const retiredAt = Date.now();
+  let refusedAt = null;
+  for (let attempt = 0; attempt < 45 && refusedAt === null; attempt += 1) {
+    if ((await listCases(NORTH, oldAliceToken)) === 401) refusedAt = Date.now() - retiredAt;
+    else await sleep(2000);
   }
-  // Measured, not assumed: the verifier caches the key set (cacheMaxAge 600000 ms), so retirement takes effect at the next cache refresh.
-  const stillAccepted = (await listCases(NORTH, oldAliceToken)) === 200;
-  console.log(`INFO old-key token immediately after retirement: ${stillAccepted ? 'still accepted (JWKS cache)' : 'refused'}`);
-  // Not asserted in this run: refusal after retirement depends on the JWKS cache window (see the INFO line and the review package).
+  check('token signed by the retired key is refused within the 60 s cache policy', refusedAt !== null,
+    refusedAt === null ? 'still accepted after 90s' : `refused after ${Math.round(refusedAt / 1000)}s`);
 }
 
 process.exit(await main());

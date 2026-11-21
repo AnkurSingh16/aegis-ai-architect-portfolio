@@ -17,6 +17,7 @@ const TENANT_SOUTH = '20000000-0000-4000-8000-000000000002';
 
 const USERS = [
   { username: 'alice.north', first: 'Alice', last: 'Synthetic', tenant: TENANT_NORTH, role: 'reader' },
+  { username: 'olivia.north', first: 'Olivia', last: 'Synthetic', tenant: TENANT_NORTH, role: 'operator' },
   { username: 'carol.south', first: 'Carol', last: 'Synthetic', tenant: TENANT_SOUTH, role: 'reader' },
   // Bob is a verified, real identity with no membership in any tenant. Used to prove membership is enforced.
   { username: 'bob.unlinked', first: 'Bob', last: 'Synthetic', tenant: null, role: null },
@@ -78,6 +79,52 @@ async function clientUuid(token, clientId) {
   return found[0].id;
 }
 
+// Converges a client to the realm file: attributes, redirect URIs, web origins and optional scopes. Values not declared in the file
+// are left alone except for the keys the file declares. Existing realm data is never reset or deleted.
+async function reconcileClient(token, declared) {
+  const uuid = await clientUuid(token, declared.clientId);
+  const current = await json(await admin(token, `/clients/${uuid}`));
+  const attributes = { ...(current.attributes ?? {}), ...(declared.attributes ?? {}) };
+  const body = { ...current, attributes, redirectUris: declared.redirectUris ?? current.redirectUris,
+    webOrigins: declared.webOrigins ?? current.webOrigins };
+  const put = await admin(token, `/clients/${uuid}`, { method: 'PUT', body: JSON.stringify(body) });
+  if (!put.ok) throw new Error(`client reconcile failed: ${declared.clientId}`);
+  const scopes = await json(await admin(token, '/client-scopes'));
+  for (const name of declared.optionalClientScopes ?? []) {
+    const scope = scopes.find((s) => s.name === name);
+    if (!scope) throw new Error(`client scope missing: ${name}`);
+    const response = await admin(token, `/clients/${uuid}/optional-client-scopes/${scope.id}`, { method: 'PUT' });
+    if (!response.ok && response.status !== 409) throw new Error(`optional scope failed: ${name}`);
+  }
+}
+
+// Brings a client scope's protocol mappers to exactly the declared set: creates missing ones, updates changed ones, and removes mappers
+// the file does not declare (this is how a duplicate audience mapper is removed).
+async function reconcileScopeMappers(token, declared) {
+  const scopes = await json(await admin(token, '/client-scopes'));
+  const scope = scopes.find((s) => s.name === declared.name);
+  if (!scope) throw new Error(`client scope missing: ${declared.name}`);
+  const live = await json(await admin(token, `/client-scopes/${scope.id}/protocol-mappers/models`));
+  const wanted = declared.protocolMappers ?? [];
+  for (const mapper of live) {
+    if (!wanted.some((w) => w.name === mapper.name)) {
+      const removed = await admin(token, `/client-scopes/${scope.id}/protocol-mappers/models/${mapper.id}`, { method: 'DELETE' });
+      if (!removed.ok) throw new Error(`mapper removal failed: ${declared.name}`);
+    }
+  }
+  for (const want of wanted) {
+    const match = live.find((m) => m.name === want.name);
+    if (!match) {
+      const created = await admin(token, `/client-scopes/${scope.id}/protocol-mappers/models`, { method: 'POST', body: JSON.stringify(want) });
+      if (created.status !== 201) throw new Error(`mapper create failed: ${want.name}`);
+    } else {
+      const body = { ...match, config: { ...(match.config ?? {}), ...want.config }, protocolMapper: want.protocolMapper };
+      const updated = await admin(token, `/client-scopes/${scope.id}/protocol-mappers/models/${match.id}`, { method: 'PUT', body: JSON.stringify(body) });
+      if (!updated.ok) throw new Error(`mapper update failed: ${want.name}`);
+    }
+  }
+}
+
 async function ensureUser(token, user) {
   let created = await admin(token, '/users', { method: 'POST', body: JSON.stringify({
     username: user.username, enabled: true, emailVerified: true, firstName: user.first, lastName: user.last,
@@ -108,6 +155,8 @@ const token = await adminToken();
 await ensureScopes(token);
 const realm = JSON.parse(readFileSync(join(root, 'infra', 'keycloak', 'aegis-realm.json'), 'utf8'));
 for (const client of realm.clients) await ensureDefaultScopes(token, await clientUuid(token, client.clientId), client.defaultClientScopes);
+for (const scope of realm.clientScopes) await reconcileScopeMappers(token, scope);
+for (const client of realm.clients) await reconcileClient(token, client);
 await setClientSecret(token, 'aegis-test-client', env.AEGIS_KC_TEST_CLIENT_SECRET);
 await setClientSecret(token, 'aegis-short-lived-client', env.AEGIS_KC_SHORT_CLIENT_SECRET);
 const subjects = {};

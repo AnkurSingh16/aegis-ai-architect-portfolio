@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { Auth0Provider, useAuth0 } from '@auth0/auth0-react';
-import type { AuthConfig } from './config';
-import { isApprovedLoopbackOrigin } from './config';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { messageFor, SessionProvider, SignInFailure, useSession } from './session';
+import type { OidcSettings } from './oidc-config';
 import { isAnalysisResult, type AnalysisResult } from '../../../api/src/ai/analysis.js';
 import { isGroundedAnalysisResult, type GroundedAnalysisResult } from '../../../api/src/ai/grounded-analysis.js';
 
@@ -65,7 +64,7 @@ function reviewErrorMessage(kind: ReviewSubmit['kind'] | ReviewView['kind']): st
 }
 
 function HumanCaseReview({ tenantId, item, canReview }: { tenantId: string; item: StoredCase; canReview: boolean }) {
-  const { getAccessTokenSilently } = useAuth0();
+  const { getAccessToken } = useSession();
   const [expanded, setExpanded] = useState(false);
   const [history, setHistory] = useState<ReviewView>({ kind: 'idle', history: [] });
   const [submission, setSubmission] = useState<ReviewSubmit>({ kind: 'idle', note: '' });
@@ -88,7 +87,7 @@ function HumanCaseReview({ tenantId, item, canReview }: { tenantId: string; item
     historyController.current = controller;
     setHistory({ kind: 'loading', history: [] });
     try {
-      const token = await getAccessTokenSilently();
+      const token = await getAccessToken();
       if (controller.signal.aborted || generation !== historyGeneration.current) return;
       if (!token) { setHistory({ kind: 'unauthenticated', history: [] }); return; }
       const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(item.id)}/reviews`, {
@@ -122,7 +121,7 @@ function HumanCaseReview({ tenantId, item, canReview }: { tenantId: string; item
     const request = { ...candidate, kind: 'submitting' as const, attempted: true };
     setSubmission(request);
     try {
-      const token = await getAccessTokenSilently();
+      const token = await getAccessToken();
       if (controller.signal.aborted) return;
       if (!token) { setSubmission({ ...request, kind: 'unauthenticated' }); return; }
       const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(item.id)}/reviews`, {
@@ -205,7 +204,12 @@ function isStoredCase(value: unknown, tenantId: string): value is StoredCase {
 }
 
 function CaseAccessPanel() {
-  const { isAuthenticated, isLoading, user, error, loginWithRedirect, logout, getAccessTokenSilently } = useAuth0();
+  const session = useSession();
+  const isAuthenticated = session.status === 'authenticated';
+  const isLoading = session.status === 'loading';
+  const user = useMemo(() => (session.subject ? { sub: session.subject } : undefined), [session.subject]);
+  const error = session.error;
+  const { getAccessToken } = session;
   const [tenantId, setTenantId] = useState<string>(tenants[0].id);
   const [view, setView] = useState<ViewState>({ kind: 'idle', cases: [] });
   const [analysis, setAnalysis] = useState<AnalysisState>({ kind: 'idle' });
@@ -235,7 +239,7 @@ function CaseAccessPanel() {
       try {
         let token: string | undefined;
         try {
-          token = await getAccessTokenSilently();
+          token = await getAccessToken();
         } catch {
           if (active && generation === requestGeneration.current) setView({ kind: 'unauthenticated', cases: [] });
           return;
@@ -277,7 +281,7 @@ function CaseAccessPanel() {
       groundedController.current?.abort();
       groundedController.current = undefined;
     };
-  }, [getAccessTokenSilently, isAuthenticated, tenantId, user?.sub]);
+  }, [getAccessToken, isAuthenticated, tenantId, user?.sub]);
 
   function changeTenant(nextTenant: string) {
     requestGeneration.current += 1;
@@ -303,7 +307,7 @@ function CaseAccessPanel() {
     setAnalysis({ kind: 'loading', caseId });
     const stillCurrent = () => generation === analysisGeneration.current && !controller.signal.aborted;
     try {
-      const token = await getAccessTokenSilently();
+      const token = await getAccessToken();
       if (!stillCurrent()) return;
       if (!token) { setAnalysis({ kind: 'unauthenticated', caseId }); return; }
       const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(caseId)}/ai-analysis`, {
@@ -342,7 +346,7 @@ function CaseAccessPanel() {
     setGrounded({ kind: 'loading', caseId });
     const stillCurrent = () => generation === analysisGeneration.current && !controller.signal.aborted;
     try {
-      const token = await getAccessTokenSilently();
+      const token = await getAccessToken();
       if (!stillCurrent()) return;
       if (!token) { setGrounded({ kind: 'unauthenticated', caseId }); return; }
       const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(caseId)}/grounded-analysis`, {
@@ -383,7 +387,7 @@ function CaseAccessPanel() {
     setGrounded({ kind: 'idle' });
     setView({ kind: 'idle', cases: [] });
     try {
-      await logout({ logoutParams: { returnTo: 'http://127.0.0.1:5173' } });
+      await session.signOut();
     } catch {
       setView({ kind: 'unavailable', cases: [], message: 'Sign-out could not be completed. Retry or close this development tab.' });
     }
@@ -391,9 +395,10 @@ function CaseAccessPanel() {
 
   async function signIn() {
     try {
-      await loginWithRedirect();
-    } catch {
-      setView({ kind: 'unavailable', cases: [], message: 'Sign-in could not be started. Check the local Auth0 development configuration and retry.' });
+      await session.signIn();
+    } catch (failure) {
+      const kind = failure instanceof SignInFailure ? failure.kind : 'sign_in_failed';
+      setView({ kind: 'unavailable', cases: [], message: messageFor(kind) });
     }
   }
 
@@ -408,8 +413,8 @@ function CaseAccessPanel() {
       </div>
       {isLoading ? <p role="status">{callbackPending ? 'Completing secure sign-in…' : 'Checking sign-in status…'}</p> : !isAuthenticated ? (
         <div className="auth-card"><p>Sign in to request access to synthetic cases. The API checks your identity, scope, tenant membership and row-level policy.</p>
-          {error && <p role="alert">Auth0 sign-in could not be completed. Check the local Auth0 settings and try again.</p>}
-          <button type="button" className="auth-button primary" onClick={() => void signIn()}>Sign in with Auth0</button>
+          {error && <p role="alert">{messageFor(error)}</p>}
+          <button type="button" className="auth-button primary" onClick={() => void signIn()}>Sign in</button>
           {view.kind === 'unavailable' && <p role="alert">{view.message ?? 'The development service is unavailable.'}</p>}
         </div>
       ) : (
@@ -492,15 +497,9 @@ function CaseAccessPanel() {
   );
 }
 
-export default function DevAuthExperience({ config }: { config: AuthConfig }) {
-  if (!isApprovedLoopbackOrigin(window.location.origin)) {
-    return <section className="auth-cases wrap" id="secure-cases" role="alert">
-      <h2>Sign-in is disabled on this origin</h2><p>Use the approved local address http://127.0.0.1:5173.</p>
-    </section>;
-  }
-  const redirectUri = 'http://127.0.0.1:5173/';
-  return <Auth0Provider domain={config.domain} clientId={config.clientId} cacheLocation="memory" useRefreshTokens={false}
-      authorizationParams={{ redirect_uri: redirectUri, audience: config.audience, scope: 'read:cases write:cases' }}>
+export default function DevAuthExperience({ config }: { config: OidcSettings }) {
+  // The session provider builds the redirect URI from this page's origin, so the callback can only return to the application.
+  return <SessionProvider settings={config}>
     <CaseAccessPanel />
-  </Auth0Provider>;
+  </SessionProvider>;
 }

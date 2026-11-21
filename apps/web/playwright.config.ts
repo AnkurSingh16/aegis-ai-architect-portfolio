@@ -1,18 +1,22 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// Browser acceptance tests against the locally deployed production build, Keycloak and the API (docker compose project aegis-local).
+// They run only when AEGIS_STACK_E2E=1, so ordinary test runs and CI jobs without the stack are unaffected. No cloud credentials are used.
+const enabled = process.env.AEGIS_STACK_E2E === '1';
+
 export default defineConfig({
-  testDir: './e2e',
-  testMatch: '**/*.spec.ts',
+  testDir: './e2e-stack',
+  // Without AEGIS_STACK_E2E=1 the suite is skipped entirely, so ordinary CI runs (which have no stack) are unaffected.
+  testIgnore: enabled ? [] : ['**/*.spec.ts'],
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  timeout: 120_000,
   reporter: 'list',
-  use: { baseURL: 'http://127.0.0.1:5174', ...devices['Desktop Chrome'] },
-  webServer: {
-    command: 'npm run dev:e2e',
-    url: 'http://127.0.0.1:5174',
-    reuseExistingServer: false,
-    timeout: 30_000,
-    env: { NODE_ENV: 'test' },
+  use: {
+    baseURL: process.env.AEGIS_WEB_BASE_URL ?? 'http://localhost:5190',
+    ...devices['Desktop Chrome'],
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
 });
