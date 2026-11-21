@@ -1,6 +1,7 @@
 import { classifyFailure, decideAfterFailure, type RetryPolicy, validateRetryPolicy } from './retry-policy.js';
 import type { ExecutionRow } from './durable-store.js';
 import { createDurableStore } from './durable-store.js';
+import type { WorkflowMetricsSink } from './workflow-metrics.js';
 
 /**
  * Approval gate for side-effecting attempts. Every attempt needs its own approval: once consumed, a retry asks again.
@@ -29,6 +30,10 @@ export interface DriverLogRecord {
   readonly event: 'durable_attempt';
   readonly executionId: string;
   readonly correlationId: string | null;
+  /** Trace id from a valid upstream traceparent header, or null. Joins the line to an upstream trace. */
+  readonly traceId: string | null;
+  /** Wall-clock duration of this driver call, in milliseconds. */
+  readonly durationMs: number;
   readonly outcome: DriverOutcome['status'] | 'error';
   readonly attempt?: number;
   readonly errorClass?: string;
@@ -47,11 +52,20 @@ export interface DriverInput {
   readonly leaseMs: number;
   readonly timeoutMs: number;
   readonly clock: () => Date;
+  /**
+   * Optional. When set, lease times and retry times come from PostgreSQL's clock instead of `clock`, so worker clock skew
+   * cannot change lease or retry decisions. Production passes the store's databaseNow.
+   */
+  readonly databaseTime?: (tenantId: string) => Promise<Date>;
   readonly approvalGate?: ApprovalGate;
   /** Optional. Receives one record per call. A logging failure never changes the outcome. */
   readonly log?: DriverLog;
   /** Carried on every log record, so one request can be followed through the driver. */
   readonly correlationId?: string | null;
+  /** Carried on every log record. Null when the request carried no valid traceparent. */
+  readonly traceId?: string | null;
+  /** Optional. Receives one sample per call. A metrics failure never changes the outcome. */
+  readonly metrics?: WorkflowMetricsSink;
   /** Performs one attempt. Must be idempotent under the execution id and attempt number, because attempts can be repeated after a crash. */
   readonly step: (attempt: number, signal: AbortSignal) => Promise<void>;
 }
@@ -79,10 +93,18 @@ async function withTimeout(work: Promise<void>, timeoutMs: number, controller: A
  */
 export async function runDurableAttempt(input: DriverInput): Promise<DriverOutcome> {
   const correlationId = input.correlationId ?? null;
-  const emit = (record: Omit<DriverLogRecord, 'event' | 'executionId' | 'correlationId'>) => {
+  const traceId = input.traceId ?? null;
+  const started = performance.now();
+  const emit = (record: Omit<DriverLogRecord, 'event' | 'executionId' | 'correlationId' | 'traceId' | 'durationMs'>) => {
+    const durationMs = Math.round((performance.now() - started) * 1000) / 1000;
+    try {
+      input.metrics?.recordAttempt({ outcome: record.outcome, durationMs });
+    } catch {
+      // Metrics must not turn a committed outcome into an error for the caller.
+    }
     if (!input.log) return;
     try {
-      input.log({ event: 'durable_attempt', executionId: input.executionId, correlationId, ...record });
+      input.log({ event: 'durable_attempt', executionId: input.executionId, correlationId, traceId, durationMs, ...record });
     } catch {
       // Logging must not turn a committed outcome into an error for the caller.
     }
@@ -106,7 +128,7 @@ export async function runDurableAttempt(input: DriverInput): Promise<DriverOutco
 async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   validateRetryPolicy(input.policy);
   const { store, tenantId, executionId, owner } = input;
-  const now = input.clock();
+  const now = input.databaseTime ? await input.databaseTime(tenantId) : input.clock();
   const leaseExpiresAt = addMs(now, input.leaseMs);
   const claimed: ExecutionRow | null = await store.claim(executionId, tenantId, owner, now, leaseExpiresAt);
   if (!claimed) return { status: 'not_claimable' };
@@ -165,7 +187,7 @@ async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   } catch (error) {
     const isTimeout = error instanceof Error && error.name === 'TimeoutError';
     const failure = isTimeout ? 'timeout' : classifyFailure(error);
-    const done = input.clock();
+    const done = input.databaseTime ? await input.databaseTime(tenantId) : input.clock();
     if (await store.isCancelRequested(executionId, tenantId)) {
       await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'cancelled', attempts: attempt,
         nextAttemptAt: null, lastErrorClass: 'cancelled', keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
@@ -186,7 +208,7 @@ async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   }
 
   // The side effect completed. Success is recorded even if cancellation was requested meanwhile.
-  const done = input.clock();
+  const done = input.databaseTime ? await input.databaseTime(tenantId) : input.clock();
   await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'succeeded', attempts: attempt,
     nextAttemptAt: null, lastErrorClass: null, keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
   return { status: 'succeeded', attempt };

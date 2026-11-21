@@ -20,6 +20,9 @@ export interface ExecutionRow {
   readonly lastErrorClass: 'retryable' | 'permanent' | 'timeout' | 'cancelled' | null;
   /** Set once, when the execution is created by the first request. Later requests with the same key do not change it. */
   readonly correlationId: string | null;
+  /** Who requested cancellation, and why. Set once, by the first request. Null if no cancellation was requested. */
+  readonly cancelRequestedBy: string | null;
+  readonly cancelReason: string | null;
 }
 
 export interface DeadLetterRow {
@@ -34,6 +37,9 @@ export interface CheckpointRow {
   readonly seq: number;
   readonly state: ExecutionState;
   readonly attempts: number;
+  /** Set on a cancelled checkpoint (who asked) and on an operator requeue (who asked). Null otherwise. */
+  readonly actor: string | null;
+  readonly reason: string | null;
 }
 
 export type ApprovalChange =
@@ -67,16 +73,17 @@ interface ExecutionDbRow extends Record<string, unknown> {
   execution_id: string; state: ExecutionState; attempts: number; max_attempts: number; version: number;
   next_attempt_at: Date | null; cancel_requested: boolean; approval_id: string | null; approval_granted: boolean;
   last_error_class: ExecutionRow['lastErrorClass']; updated_at: Date; correlation_id: string | null;
+  cancel_requested_by: string | null; cancel_reason: string | null;
 }
 
 const SELECT_EXECUTION = `execution_id, state, attempts, max_attempts, version, next_attempt_at,
-  cancel_requested, approval_id, approval_granted, last_error_class, correlation_id`;
+  cancel_requested, approval_id, approval_granted, last_error_class, correlation_id, cancel_requested_by, cancel_reason`;
 
 const toRow = (row: ExecutionDbRow): ExecutionRow => ({
   executionId: row.execution_id, state: row.state, attempts: row.attempts, maxAttempts: row.max_attempts,
   version: row.version, nextAttemptAt: row.next_attempt_at, cancelRequested: row.cancel_requested,
   approvalId: row.approval_id, approvalGranted: row.approval_granted, lastErrorClass: row.last_error_class,
-  correlationId: row.correlation_id,
+  correlationId: row.correlation_id, cancelRequestedBy: row.cancel_requested_by, cancelReason: row.cancel_reason,
 });
 
 /** Approval column values for a transition. Keeps the current value unless the change says otherwise. */
@@ -94,7 +101,15 @@ export type RequeueOutcome =
   | { readonly outcome: 'not_found' }
   | { readonly outcome: 'not_failed' };
 
-export function createDurableStore(runTenant: TenantRunner) {
+/**
+ * Test seams. Production passes none. afterCancelRead runs after the cancellation reads the execution and before it writes,
+ * which is where a concurrent writer can change the row. The regression test uses it to reproduce the race deterministically.
+ */
+export interface DurableStoreHooks {
+  readonly afterCancelRead?: () => Promise<void>;
+}
+
+export function createDurableStore(runTenant: TenantRunner, hooks: DurableStoreHooks = {}) {
   return {
     /** Idempotent on (tenant, key): a repeated request returns the existing execution with created = false. */
     async createExecution(tenantId: string, idempotencyKey: string, maxAttempts: number, correlationId: string | null = null): Promise<{ executionId: string; created: boolean }> {
@@ -159,9 +174,13 @@ export function createDurableStore(runTenant: TenantRunner) {
         );
         const version = updated.rows[0]?.version;
         if (version === undefined) throw new StaleLeaseError('execution lease or version is stale');
+        // A cancelled checkpoint carries who asked for the cancellation and why. Other checkpoints carry neither.
         await client.query(
-          `INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts)
-           VALUES ($1, $2, $3, $4, $5)`,
+          `INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts, actor, reason)
+           SELECT $1, $2, $3, $4, $5,
+                  CASE WHEN $4 = 'cancelled' THEN cancel_requested_by END,
+                  CASE WHEN $4 = 'cancelled' THEN cancel_reason END
+             FROM aegis.workflow_executions WHERE execution_id = $1 AND tenant_id = $2`,
           [input.executionId, input.tenantId, version, input.state, input.attempts],
         );
         return version;
@@ -170,11 +189,14 @@ export function createDurableStore(runTenant: TenantRunner) {
 
     /**
      * Cancels without a lease when nothing is running. If an attempt holds the lease, only the request is recorded
-     * and the driver honours it when that attempt finishes.
+     * and the driver honours it when that attempt finishes. The actor and reason are recorded once, by the first request.
      */
-    async requestCancel(executionId: string, tenantId: string, now: Date): Promise<'cancelled' | 'cancel_requested' | 'not_found' | 'terminal'> {
+    async requestCancel(executionId: string, tenantId: string, now: Date, actor: string, reason: string):
+      Promise<'cancelled' | 'cancel_requested' | 'not_found' | 'terminal'> {
       assertUuid(executionId, 'executionId');
       assertUuid(tenantId, 'tenantId');
+      if (actor.trim().length === 0 || actor.length > 256) throw new RangeError('actor must be 1 to 256 characters');
+      if (reason.trim().length === 0 || reason.length > 500) throw new RangeError('reason must be 1 to 500 characters');
       return runTenant(tenantId, async (client) => {
         const current = await client.query<ExecutionDbRow & { lease_held: boolean }>(
           `SELECT ${SELECT_EXECUTION}, (lease_owner IS NOT NULL AND lease_expires_at > $3) AS lease_held
@@ -184,27 +206,55 @@ export function createDurableStore(runTenant: TenantRunner) {
         const row = current.rows[0];
         if (!row) return 'not_found';
         if (['succeeded', 'failed', 'cancelled'].includes(row.state)) return 'terminal';
+        await hooks.afterCancelRead?.();
+        const recordRequest = () => client.query(
+          `UPDATE aegis.workflow_executions
+              SET cancel_requested = true,
+                  cancel_requested_by = COALESCE(cancel_requested_by, $3),
+                  cancel_reason = COALESCE(cancel_reason, $4),
+                  updated_at = $5
+            WHERE execution_id = $1 AND tenant_id = $2 AND state NOT IN ('succeeded', 'failed', 'cancelled')`,
+          [executionId, tenantId, actor, reason, now],
+        );
         if (row.lease_held) {
           // An attempt is in flight. Record the request; the driver honours it when the attempt finishes.
-          await client.query('UPDATE aegis.workflow_executions SET cancel_requested = true, updated_at = $3 WHERE execution_id = $1 AND tenant_id = $2',
-            [executionId, tenantId, now]);
+          await recordRequest();
           return 'cancel_requested';
         }
         const cancelled = await client.query<{ version: number }>(
           `UPDATE aegis.workflow_executions
               SET state = 'cancelled', cancel_requested = true, next_attempt_at = NULL, last_error_class = 'cancelled',
-                  lease_owner = NULL, lease_expires_at = NULL, approval_granted = false, version = version + 1, updated_at = $4
+                  lease_owner = NULL, lease_expires_at = NULL, approval_granted = false, version = version + 1, updated_at = $4,
+                  cancel_requested_by = COALESCE(cancel_requested_by, $6), cancel_reason = COALESCE(cancel_reason, $7)
             WHERE execution_id = $1 AND tenant_id = $2 AND version = $3 AND state = $5
             RETURNING version`,
-          [executionId, tenantId, row.version, now, row.state],
+          [executionId, tenantId, row.version, now, row.state, actor, reason],
         );
         const version = cancelled.rows[0]?.version;
-        if (version === undefined) return 'cancel_requested'; // another writer moved it; the flag is set for the driver
+        if (version === undefined) {
+          // Another writer moved the execution between the read and the write. The request must still be recorded,
+          // so the driver honours it. Nothing was changed by the failed conditional update.
+          await recordRequest();
+          return 'cancel_requested';
+        }
         await client.query(
-          'INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts) VALUES ($1, $2, $3, $4, $5)',
-          [executionId, tenantId, version, 'cancelled', row.attempts],
+          `INSERT INTO aegis.workflow_checkpoints (execution_id, tenant_id, seq, state, attempts, actor, reason)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [executionId, tenantId, version, 'cancelled', row.attempts, actor, reason],
         );
         return 'cancelled';
+      });
+    },
+
+    /**
+     * PostgreSQL's clock for this tenant's connection. Lease expiry and retry times are set from this value, so a worker
+     * whose own clock is skewed cannot take or keep a lease that the database considers held.
+     */
+    async databaseNow(tenantId: string): Promise<Date> {
+      assertUuid(tenantId, 'tenantId');
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<{ now: Date }>('SELECT clock_timestamp() AS now', []);
+        return result.rows[0]!.now;
       });
     },
 
@@ -314,11 +364,11 @@ export function createDurableStore(runTenant: TenantRunner) {
         );
         const row = execution.rows[0];
         if (!row) return undefined;
-        const checkpoints = await client.query<{ seq: number; state: ExecutionState; attempts: number }>(
-          'SELECT seq, state, attempts FROM aegis.workflow_checkpoints WHERE execution_id = $1 AND tenant_id = $2 ORDER BY seq',
+        const checkpoints = await client.query<{ seq: number; state: ExecutionState; attempts: number; actor: string | null; reason: string | null }>(
+          'SELECT seq, state, attempts, actor, reason FROM aegis.workflow_checkpoints WHERE execution_id = $1 AND tenant_id = $2 ORDER BY seq',
           [executionId, tenantId],
         );
-        return { execution: toRow(row), checkpoints: checkpoints.rows.map((c) => ({ seq: c.seq, state: c.state, attempts: c.attempts })) };
+        return { execution: toRow(row), checkpoints: checkpoints.rows.map((c) => ({ seq: c.seq, state: c.state, attempts: c.attempts, actor: c.actor, reason: c.reason })) };
       });
     },
   };

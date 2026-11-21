@@ -3,6 +3,7 @@ import type { RequestContext } from '../security/tool-policy-gateway.js';
 import type { createDurableStore } from './durable-store.js';
 import { type DriverLog, type DriverOutcome, runDurableAttempt } from './durable-driver.js';
 import type { RetryPolicy } from './retry-policy.js';
+import type { WorkflowMetricsSink } from './workflow-metrics.js';
 
 /**
  * Runs the triage tool as a durable execution. Each attempt is authorised again through the dispatcher,
@@ -24,6 +25,12 @@ export interface TriageWorkflowInput {
   readonly owner: string;
   /** Recorded on the execution when it is created. */
   readonly correlationId?: string;
+  /** Trace id from a valid traceparent header, or null. Carried on each driver log record. */
+  readonly traceId?: string | null;
+  /** Optional metrics sink. Receives one sample per driver call. */
+  readonly metrics?: WorkflowMetricsSink;
+  /** Optional. PostgreSQL's clock for leases, retries and approval expiry. Preferred in production. */
+  readonly databaseTime?: (tenantId: string) => Promise<Date>;
   /** Optional driver log. Receives one record per attempt call, with the correlation id. */
   readonly log?: DriverLog;
   readonly policy: RetryPolicy;
@@ -57,11 +64,14 @@ export async function runTriageWorkflow(input: TriageWorkflowInput): Promise<Tri
     timeoutMs: input.timeoutMs,
     clock: input.clock,
     correlationId: input.correlationId ?? null,
+    traceId: input.traceId ?? null,
+    ...(input.metrics ? { metrics: input.metrics } : {}),
+    ...(input.databaseTime ? { databaseTime: input.databaseTime } : {}),
     ...(input.log ? { log: input.log } : {}),
     step: async () => {
       const result: DispatchResult = await input.dispatcher.dispatch(
         { toolName: 'case.triage', arguments: input.args },
-        { ...input.context, now: input.clock() },
+        { ...input.context, now: input.databaseTime ? await input.databaseTime(input.tenantId) : input.clock() },
       );
       if (result.status === 'ok') {
         output = result.output;

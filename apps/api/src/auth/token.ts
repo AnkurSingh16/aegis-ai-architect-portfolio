@@ -7,7 +7,8 @@ export class AuthorizationError extends Error {
     super(status === 401 ? 'Authentication required.' : 'Access denied.');
   }
 }
-export type Permission = 'read:cases' | 'write:cases';
+/** observe:metrics is a dedicated operator permission for process metrics. It is not granted by read or write. */
+export type Permission = 'read:cases' | 'write:cases' | 'observe:metrics';
 export interface VerifiedPrincipal { issuer: string; subject: string; scopes: ReadonlySet<string> }
 export type VerifyToken = (authorization: string | undefined) => Promise<VerifiedPrincipal>;
 

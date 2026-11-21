@@ -6,6 +6,7 @@ import { migrateDatabase } from '../storage/migrations.js';
 import { createPostgresApprovalStore, type TenantQueryable } from '../security/tool-approval-store.js';
 import { createDurableStore } from './durable-store.js';
 import { type ApprovalGate, resumeApprovalWait, runDurableAttempt } from './durable-driver.js';
+import { createWorkflowMetrics } from './workflow-metrics.js';
 
 // Real PostgreSQL checks for approval waits, cancellation, and the approval gate in the durable driver.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
@@ -146,7 +147,7 @@ describe('approval waits in real PostgreSQL', () => {
 describe('cancellation in real PostgreSQL', () => {
   it('cancels a pending execution immediately', async () => {
     const { executionId } = await store.createExecution(tenantA, `cpend-${randomUUID()}`, 3);
-    expect(await store.requestCancel(executionId, tenantA, at(0))).toBe('cancelled');
+    expect(await store.requestCancel(executionId, tenantA, at(0), 'operator-a', 'customer withdrew')).toBe('cancelled');
     expect(await runDurableAttempt(drive(executionId, tenantA, { now: 0 }, async () => undefined))).toEqual({ status: 'not_claimable' });
   });
 
@@ -155,14 +156,14 @@ describe('cancellation in real PostgreSQL', () => {
     const gate = gateFor(tenantA, () => at(clock.now));
     const { executionId } = await store.createExecution(tenantA, `cwait-${randomUUID()}`, 3);
     expect((await runDurableAttempt(drive(executionId, tenantA, clock, async () => undefined, gate))).status).toBe('approval_requested');
-    expect(await store.requestCancel(executionId, tenantA, at(0))).toBe('cancelled');
+    expect(await store.requestCancel(executionId, tenantA, at(0), 'operator-a', 'customer withdrew')).toBe('cancelled');
     expect((await store.load(executionId, tenantA))?.execution.state).toBe('cancelled');
   });
 
   it('honours a cancellation requested during an attempt that then fails', async () => {
     const { executionId } = await store.createExecution(tenantA, `cfail-${randomUUID()}`, 3);
     const outcome = await runDurableAttempt(drive(executionId, tenantA, { now: 0 }, async () => {
-      expect(await store.requestCancel(executionId, tenantA, at(1000))).toBe('cancel_requested');
+      expect(await store.requestCancel(executionId, tenantA, at(1000), 'operator-a', 'customer withdrew')).toBe('cancel_requested');
       throw Object.assign(new Error('upstream reset'), { code: 'ECONNRESET' });
     }));
     expect(outcome).toEqual({ status: 'cancelled', reason: 'requested' });
@@ -172,13 +173,66 @@ describe('cancellation in real PostgreSQL', () => {
   it('keeps a successful side effect as succeeded even if cancellation arrived during it', async () => {
     const { executionId } = await store.createExecution(tenantA, `csucc-${randomUUID()}`, 3);
     const outcome = await runDurableAttempt(drive(executionId, tenantA, { now: 0 }, async () => {
-      await store.requestCancel(executionId, tenantA, at(1000));
+      await store.requestCancel(executionId, tenantA, at(1000), 'operator-a', 'customer withdrew');
     }));
     expect(outcome).toEqual({ status: 'succeeded', attempt: 1 });
   });
 
   it('does not reveal executions to other tenants', async () => {
     const { executionId } = await store.createExecution(tenantA, `ctenant-${randomUUID()}`, 3);
-    expect(await store.requestCancel(executionId, tenantB, at(0))).toBe('not_found');
+    expect(await store.requestCancel(executionId, tenantB, at(0), 'operator-a', 'customer withdrew')).toBe('not_found');
   });
 });
+
+describe('cancellation audit and driver observability in real PostgreSQL', () => {
+  it('records who asked and why on the execution and on the cancelled checkpoint', async () => {
+    const { executionId } = await store.createExecution(tenantA, `caudit-${randomUUID()}`, 3);
+    expect(await store.requestCancel(executionId, tenantA, at(0), 'operator-a', 'customer withdrew')).toBe('cancelled');
+    const loaded = await store.load(executionId, tenantA);
+    expect(loaded?.execution).toMatchObject({ state: 'cancelled', cancelRequestedBy: 'operator-a', cancelReason: 'customer withdrew' });
+    expect(loaded?.checkpoints.at(-1)).toMatchObject({ state: 'cancelled', actor: 'operator-a', reason: 'customer withdrew' });
+  });
+
+  it('keeps the first actor and reason when a cancellation is requested again during an attempt', async () => {
+    const { executionId } = await store.createExecution(tenantA, `cfirst-${randomUUID()}`, 3);
+    const outcome = await runDurableAttempt(drive(executionId, tenantA, { now: 0 }, async () => {
+      expect(await store.requestCancel(executionId, tenantA, at(1000), 'operator-a', 'first reason')).toBe('cancel_requested');
+      expect(await store.requestCancel(executionId, tenantA, at(1000), 'operator-b', 'second reason')).toBe('cancel_requested');
+    }));
+    expect(outcome).toEqual({ status: 'succeeded', attempt: 1 });
+    const loaded = await store.load(executionId, tenantA);
+    expect(loaded?.execution).toMatchObject({ cancelRequestedBy: 'operator-a', cancelReason: 'first reason' });
+  });
+
+  it('rejects a blank actor and an over-long reason before anything is written', async () => {
+    const { executionId } = await store.createExecution(tenantA, `cvalid-${randomUUID()}`, 3);
+    await expect(store.requestCancel(executionId, tenantA, at(0), '  ', 'reason')).rejects.toThrow(RangeError);
+    await expect(store.requestCancel(executionId, tenantA, at(0), 'operator-a', 'x'.repeat(501))).rejects.toThrow(RangeError);
+    expect((await store.load(executionId, tenantA))?.execution.state).toBe('pending');
+  });
+});
+
+describe('driver logs and metrics in real PostgreSQL', () => {
+  it('logs the trace id, a duration and the outcome, and counts the attempt', async () => {
+    const metrics = createWorkflowMetrics();
+    const records: Record<string, unknown>[] = [];
+    const { executionId } = await store.createExecution(tenantA, `cobs-${randomUUID()}`, 3);
+    const outcome = await runDurableAttempt({
+      ...drive(executionId, tenantA, { now: 0 }, async () => undefined),
+      traceId: '4bf92f3577b34da6a3ce929d0e0e4736', metrics, log: (record) => records.push({ ...record }),
+    });
+    expect(outcome).toEqual({ status: 'succeeded', attempt: 1 });
+    expect(records).toEqual([expect.objectContaining({ event: 'durable_attempt', outcome: 'succeeded', attempt: 1,
+      traceId: '4bf92f3577b34da6a3ce929d0e0e4736' })]);
+    expect(typeof records[0]!.durationMs).toBe('number');
+    expect(metrics.snapshot().attempts.succeeded).toBe(1);
+  });
+
+  it('keeps the outcome when the metrics sink throws', async () => {
+    const broken = { recordAttempt: () => { throw new Error('sink down'); } };
+    const { executionId } = await store.createExecution(tenantA, `cbroken-${randomUUID()}`, 3);
+    expect(await runDurableAttempt({ ...drive(executionId, tenantA, { now: 0 }, async () => undefined), metrics: broken }))
+      .toEqual({ status: 'succeeded', attempt: 1 });
+  });
+});
+
