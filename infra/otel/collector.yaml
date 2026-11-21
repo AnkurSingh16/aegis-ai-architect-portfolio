@@ -1,0 +1,28 @@
+# OpenTelemetry Collector configuration for the local stack. Traces and metrics arrive over OTLP/HTTP on the compose network only (no host port).
+# The debug exporter writes received data to the collector's own log, which is how the local acceptance check reads it. In a deployed
+# environment the exporter is replaced by the chosen backend through configuration; the receiver and processors stay the same.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 256
+    timeout: 2s
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

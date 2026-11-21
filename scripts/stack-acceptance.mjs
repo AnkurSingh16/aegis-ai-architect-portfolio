@@ -11,6 +11,7 @@ const steps = [
   ['identity reconciliation', ['node', ['scripts/keycloak-setup.mjs']]],
   ['health and readiness', ['node', ['scripts/local-stack.mjs', 'verify']]],
   ['authentication acceptance', ['node', ['scripts/e2e-auth.mjs']]],
+  ['telemetry (traces, metrics, correlation, allowlist)', ['node', ['scripts/telemetry-check.mjs']]],
   ['browser lifecycle (production build)', ['npm', ['run', 'test:e2e', '-w', '@aegis/web']], { AEGIS_STACK_E2E: '1' }],
 ];
 

@@ -16,6 +16,7 @@ Compose project `aegis-local` (its own network and volumes; no other project's c
 | `migrate` | built from `apps/api/Dockerfile` (node 24 bookworm slim, digest `sha256:dc26ae92…061c54`) | One-shot migration job, development-only role | none |
 | `api` | same API image | Fastify API, `NODE_ENV=production` | 4110 |
 | `web` | built from `apps/web/Dockerfile` (nginx 1.27 alpine, digest `sha256:65645c7b…2f2a10`) | Static web build; proxies `/api` to the API service | 5190 |
+| `otel-collector` | `otel/opentelemetry-collector:0.165.0` (digest `sha256:34b24b74…ed1b73`, arm64) | OpenTelemetry Collector: OTLP/HTTP receiver, debug exporter (no host port) | none |
 
 Port choices: 4100 and 5180 were not free on this machine (a different project's `node` process holds 4100 and was not touched). The defaults in `.env.local` are 4110, 5190 and 8180.
 
@@ -29,6 +30,8 @@ node scripts/local-stack.mjs verify   # liveness, readiness, web shell, proxy, a
 node scripts/local-stack.mjs drill    # stops only PostgreSQL, checks 503 and recovery, restarts the API
 node scripts/e2e-auth.mjs             # 14 real-token checks over HTTP to the API container
 node scripts/e2e-auth.mjs --rotate    # also rotates the realm signing key and records the timings
+node scripts/telemetry-check.mjs    # traces, metrics, log correlation and the export allowlist
+npm run test:stack                    # opt-in: all of the above plus the browser suite (exit 0 = pass)
 node scripts/local-stack.mjs status   # service states
 node scripts/local-stack.mjs down     # stops and removes containers and networks. Never removes volumes
 ```
@@ -66,6 +69,22 @@ Notes on the evidence:
 - The first run of `e2e-auth.mjs` after a stack rebuild failed at its first token request, while Keycloak was restarting as part of `up`. Three later runs passed. The cause was not investigated beyond that timing.
 - The rotation run leaves the realm with one more signing key each time it is run.
 
+### 4.1 Web sign-in and telemetry (added after the P2 checkpoint)
+
+| Check | Result |
+| --- | --- |
+| Full stack acceptance (`npm run test:stack`), two consecutive runs | exit 0 in both; identical step results |
+| Health and readiness (`verify`) | 6 of 6 PASS |
+| Authentication with real tokens (`e2e-auth`) | 14 of 14 PASS |
+| Telemetry (`telemetry-check`) | 12 of 12 PASS |
+| Browser lifecycle, production build, interactive sign-in (Playwright, Chromium) | 10 of 10 PASS in both runs |
+| Signing-key rotation with emergency retirement (`e2e-auth --rotate`) | retired key's token refused after 55 s (policy 60 s) |
+| Unit: API / web | 1022 / 69 passing |
+| Integration (disposable PostgreSQL 17) | 159 passing, 10 live-model skipped |
+| Lint, typecheck, production build | clean |
+
+The browser suite exercises the real login page at `localhost:8180`, PKCE, the callback, a forged state, sign-out, a stopped identity provider (with recovery), token renewal after the 60-second lifetime, and an API restart with silent restore.
+
 ## 5. Defects found and fixed during this work
 
 1. The verifier derived the key URL as `issuer + /.well-known/jwks.json`, which Keycloak does not serve. Replaced with discovery and an explicit JWKS override.
@@ -78,17 +97,21 @@ Notes on the evidence:
 
 ## 6. Limitations and open items
 
-- **L1. Web sign-in is not migrated.** `apps/web` still uses `@auth0/auth0-react` (`DevAuthExperience.tsx`). The web application therefore cannot sign in against the local realm. Migration to a provider-neutral OIDC client (`oidc-client-ts` with `react-oidc-context`, authorization-code flow with PKCE) is the next step for the web tier. The API side is ready for it.
-- **L2. Keycloak runs in start mode over HTTP on loopback.** This is local-only. Production requires HTTPS and its own hostname configuration. Admin bootstrap uses a generated password from `.env.local`.
-- **L3. Key retirement is not immediate.** The verifier caches the key set for up to 600 s (`cacheMaxAge`). A token signed by a retired key was still accepted immediately after retirement. Retirement of a compromised key therefore takes effect within that window. Options for a decision: reduce `cacheMaxAge`, or force a refresh on retirement events. This is recorded as a finding for review.
-- **L4. Duplicate audience mapper.** The live realm still carries the audience mapper on `read:cases` from an earlier version of the realm file, as well as on the new default scope. This is harmless, but it is drift from the file. A fresh realm would not have it.
-- **L5. Compose is not run in CI.** CI runs the integration suite against a PostgreSQL service container. Nothing in CI starts this stack or runs the acceptance scripts.
-- **L6. Not yet built:** SPIRE workload identity and mTLS (P3), OpenTelemetry collector and SDK instrumentation (P7), the PostgreSQL outbox (P5), and durable multi-agent persistence (P4). None of these is started in this checkpoint.
-- **L7. Local-only assumptions.** `AEGIS_ENVIRONMENT=local` enables plain HTTP to loopback and to named service hosts, and enables named database hosts. Any deployment that sets it must be treated as non-production.
+- **Browsers.** Only Chromium is tested. Other browsers' third-party cookie policies can stop silent renewal and restore. Not verified (see `docs/WEB-AUTHENTICATION.md`).
+- **Access tokens are not revocable immediately.** A retired signing key or an ended session takes effect within the 60 s key-set and token window. See `docs/KEY-ROTATION-POLICY.md`.
+- **Availability trade-off.** If the identity provider's key endpoint is unavailable for longer than the cache window, every token is refused. This is fail-closed by decision. A different trade-off needs the owner's decision.
+- **Keycloak runs in start mode over HTTP on loopback.** Local only. Production needs HTTPS and its own hostname configuration.
+- **Compose is run by an opt-in manual workflow only.** `.github/workflows/stack-acceptance.yml` is `workflow_dispatch`. It is not a pull request check.
+- **Telemetry.** Traces and metrics go to a Collector with a debug exporter. No backend, dashboards or retention. Logs are JSON on stdout, not exported over OTLP. See `docs/OBSERVABILITY.md` section 6.
+- **The Collector's receiver has no authentication.** Reachable from the compose network only. Production needs authenticated transport, which depends on workload identity (P3).
+- **Not built yet:** SPIRE workload identity and mTLS (P3), the PostgreSQL outbox (P5), durable multi-agent state (P4), and agent-execution telemetry.
+- **No independent review** of any of this.
 
 ## 7. What would change when promoted (configuration, not code)
 
 - Issuer: HTTPS identity provider URL in `OIDC_ISSUER`, with discovery (no `OIDC_JWKS_URI`).
+- Web runtime configuration: the same image with production values in `AEGIS_WEB_*` (no rebuild).
+- Telemetry: the collector endpoint changes to a reviewed, authenticated destination; the allowlist stays.
 - `AEGIS_ENVIRONMENT`: unset, which selects the strict production rules.
 - Database: a managed PostgreSQL with TLS; the host guard then needs a reviewed production path, which this change does not provide.
 - Keycloak: replaced by the chosen production identity platform; no code change, only configuration and the test-client removal.

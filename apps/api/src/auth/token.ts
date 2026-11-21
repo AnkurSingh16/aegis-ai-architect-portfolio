@@ -1,6 +1,13 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import type { AuthConfig } from './config.js';
 import { validateIssuer, validateJwksUri } from './config.js';
+import { metrics } from '@opentelemetry/api';
+import { logEvent } from '../observability/log.js';
+
+// Identity outcomes as a metric. Attributes carry the outcome only: never a subject, a token or a claim value.
+const identityOutcomes = metrics.getMeter('aegis-api').createCounter('aegis.identity.verifications', {
+  description: 'Bearer token verification outcomes',
+});
 
 // Key-set policy. A retired signing key is refused once the cached set expires, so the cache bounds the window in which a retired key
 // is still accepted: 60 s. Refresh after an unknown key identifier is allowed once per 30 s. This is the cost of prompt key retirement:
@@ -101,9 +108,12 @@ export function createTokenVerifier(config: Pick<AuthConfig, 'issuer' | 'audienc
         issuer: config.issuer, subject: payload.sub, scopes: new Set((payload.scope as string | undefined)?.split(' ') ?? []),
       });
       authenticated.add(principal);
+      identityOutcomes.add(1, { 'aegis.identity.outcome': 'verified' });
       return principal;
     } catch {
       // Signature, claim and JWKS failures deliberately share one public error.
+      identityOutcomes.add(1, { 'aegis.identity.outcome': 'refused' });
+      logEvent('identity.refused', { outcome: 'refused' });
       throw new AuthorizationError(401);
     }
   };

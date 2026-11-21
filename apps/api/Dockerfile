@@ -21,4 +21,5 @@ COPY --from=build --chown=node:node /repo/apps/api/db ./apps/api/db
 USER node
 EXPOSE 4000
 # Listens on loopback by default. The compose file sets AEGIS_API_HOST=0.0.0.0 inside the container's own network namespace.
-CMD ["node", "apps/api/dist/server.js"]
+# The instrumentation hook and telemetry register load before the application, so libraries are patched before use.
+CMD ["node", "--import", "@opentelemetry/instrumentation/hook.mjs", "--import", "./apps/api/dist/observability/register.js", "apps/api/dist/server.js"]

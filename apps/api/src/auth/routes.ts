@@ -1,3 +1,4 @@
+import { traceContext } from '../observability/log.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
@@ -38,7 +39,7 @@ export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Po
         : candidateStatus === 400 || candidateStatus === 413 || candidateStatus === 415 ? candidateStatus : 503;
     console.error(JSON.stringify({ event: 'protected_case_request', requestId: request.id,
       outcome: 'failure', code: status === 401 ? 'unauthenticated' : status === 403 ? 'forbidden'
-        : status === 404 ? 'not_found' : status < 500 ? 'invalid_input' : 'unavailable' }));
+        : status === 404 ? 'not_found' : status < 500 ? 'invalid_input' : 'unavailable', ...traceContext() }));
     if (status === 401) reply.header('WWW-Authenticate', 'Bearer');
     const message = status === 401 ? 'Authentication required.' : status === 403 ? 'Access denied.'
       : status === 404 ? 'Case not found.' : status === 409 ? 'This review request key was already used for a different decision.'

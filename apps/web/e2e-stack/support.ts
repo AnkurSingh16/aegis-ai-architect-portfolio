@@ -33,14 +33,30 @@ WHERE NOT EXISTS (SELECT 1 FROM aegis.support_cases WHERE tenant_id = '${tenant}
     'psql', '-U', 'aegis_admin', '-d', 'aegis_local', '-v', 'ON_ERROR_STOP=1', '-q', '-f', '-'], { cwd: root, input: sql, encoding: 'utf8' });
 }
 
-/** Signs in through the real Keycloak login page, as an interactive user would. */
+/** Waits until the container reports healthy. A started container is not yet a ready identity provider. */
+export async function waitForContainerHealthy(container: string, timeoutMs = 180_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = execFileSync('docker', ['inspect', '-f', '{{.State.Health.Status}}', container], { encoding: 'utf8' }).trim();
+    if (status === 'healthy') return;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(`${container} did not become healthy in time`);
+}
+
+/** Signs in through the real Keycloak login page, as an interactive user would. If Keycloak reports a stale attempt, the flow is
+ *  restarted once from the application, exactly as a user would do. */
 export async function signIn(page: Page, username: string): Promise<void> {
-  await page.goto(`${WEB}/`);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.waitForURL(/localhost:8180\/realms\/aegis/);
-  await page.locator('#username').fill(username);
-  await page.locator('#password').fill(PASSWORD);
-  await page.locator('#kc-login').click();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await page.goto(`${WEB}/`);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await page.waitForURL(/localhost:8180\/realms\/aegis/);
+    await page.locator('#username').fill(username);
+    await page.locator('#password').fill(PASSWORD);
+    await page.locator('#kc-login').click();
+    const stale = await page.getByText('Your login attempt timed out').waitFor({ timeout: 5000 }).then(() => true, () => false);
+    if (!stale) break;
+  }
   await page.waitForURL((url) => url.origin === WEB);
 }
 

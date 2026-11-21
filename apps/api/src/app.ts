@@ -1,3 +1,4 @@
+import { trace } from '@opentelemetry/api';
 import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { answerDemoQuestion } from './demo.js';
@@ -40,6 +41,16 @@ export function createApp(options: AppOptions = {}) {
     (groundedEnabled && aiConfig ? createGroundedOllamaProvider(aiConfig) : undefined);
   const app = Fastify({ logger: false, requestIdHeader: false, genReqId: () => randomUUID(),
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
+  // The route template (for example /api/tenants/:tenantId/cases) is named on the active request span, so traces group by operation
+  // and never by identifier. Fastify knows the template; the raw URL is not exported.
+  app.addHook('preHandler', async (request) => {
+    const template = request.routeOptions?.url;
+    const span = trace.getActiveSpan();
+    if (span && template) {
+      span.setAttribute('http.route', template);
+      span.updateName(`${request.method} ${template}`);
+    }
+  });
   app.get('/api/health', async () => ({ ok: true, service: 'aegis-api', mode: 'starter' }));
   if (!authConfig) {
     // Without a database configuration this instance cannot serve case data, so it must not report ready.

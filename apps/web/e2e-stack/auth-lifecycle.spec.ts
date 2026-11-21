@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { TENANT_NORTH, WEB, compose, seedSyntheticCases, signIn, tokenExpiry, waitForApiReady, waitForRealm } from './support';
+import { TENANT_NORTH, WEB, compose, seedSyntheticCases, signIn, tokenExpiry, waitForApiReady, waitForContainerHealthy, waitForRealm } from './support';
 
 test.beforeAll(() => { seedSyntheticCases(); });
 
@@ -83,6 +83,7 @@ test('an unavailable identity provider is reported, and sign-in works again afte
     await expect(page.getByRole('alert').filter({ hasText: 'The identity provider is unavailable' })).toBeVisible({ timeout: 60_000 });
   } finally {
     compose(['start', 'keycloak']);
+    await waitForContainerHealthy('aegis-local-keycloak-1');
     await waitForRealm();
   }
   await signIn(page, 'alice.north');
