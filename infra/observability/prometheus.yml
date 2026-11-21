@@ -10,6 +10,17 @@ scrape_configs:
     static_configs:
       - targets: ['otel-collector:8888']
     sample_limit: 5000
+  # P3 workload identity. Targets are on internal networks only (spire-control, agent-mesh); no host ports.
+  - job_name: spire-server
+    static_configs:
+      - targets: ['spire-server:9988']
+  - job_name: spire-agents
+    static_configs:
+      - targets: ['spire-agent-orchestrator:9988', 'spire-agent-triage:9988', 'spire-agent-retrieval:9988', 'spire-agent-reviewer:9988']
+  - job_name: aegis-workloads
+    static_configs:
+      - targets: ['orchestrator:9100', 'triage:9100', 'retrieval:9100', 'reviewer:9100']
+    sample_limit: 1000
   - job_name: aegis-probes
     metrics_path: /probe
     params:

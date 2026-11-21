@@ -91,7 +91,21 @@ The browser suite includes `observability.spec.ts`: a real authenticated browser
 
 ## 10. Risks and open items
 
-- **Tempo WAL replay removed a block during a restart.** During a restart in the outage check, Tempo logged `failed to replay block. removing.` for a WAL block. This is a durability risk: unflushed trace data can be lost on an unclean stop. The cause (a stop during a write, or a damaged file) was not established. Mitigation: graceful stop only, and a review of Tempo's WAL settings before any promotion.
+- **Tempo discards incomplete WAL blocks on restart: this is data loss, not only a recoverability risk.** Investigated in P3 (2026-11-21):
+  - Mechanism: when Tempo is stopped while it is ingesting, its shutdown logs `Abandoning op in flush queue because ingester is shutting down`
+    and exits. A WAL block that was being written is left without `meta.json`. On the next start, replay logs `failed to replay block.
+    removing.` and deletes the directory. Tempo has no way to recover those spans.
+  - Evidence in this stack: 8 removals were logged between 09:59 and 10:25 UTC, all during repeated restarts in the outage checks. A
+    controlled stop under load (`docker stop`, default options) reproduced one more removal. Idle stops, and a SIGKILL while idle, removed
+    nothing. A SIGKILL under load replayed cleanly in the one run made. The number of spans lost per removal was not measured.
+  - Scope: only spans in the block being written at stop time, as far as the evidence shows. In the idle SIGKILL run, 25 traces were found
+    before the stop and 26 after the restart, so nothing written earlier was lost. The loaded runs did not count spans before and after,
+    so the exact extent of loss under load is not established.
+  - Mitigations (not yet applied; each needs its own evidence before adoption): give Tempo a longer shutdown window and verify that the
+    flush completes; shorten the head block duration so fewer spans are ever in an unflushed block; make the Collector's sending queue
+    persistent (file-backed) so spans can be re-sent after a backend restart. The Collector queue is in-memory today, so a Collector restart
+    also loses its queued batches.
+  - Until a mitigation is verified, treat local traces as best-effort diagnostics, not an audit record.
 - **Telemetry is sent without authentication.** The OTLP receiver accepts any client on the compose network. Acceptable only in the local stack. Production needs authenticated, encrypted transport, which depends on workload identity (P3).
 - **Logs are not authenticated end to end.** Anyone with Grafana access can read the logs (allowlisted fields only). Grafana access control is the admin account in this stack.
 - **Old exporter.** The earlier hand-written OTLP JSON exporter (`observability/tracing.ts`, `AEGIS_TRACING`) is still wired to the workflow spans. It cannot run together with the SDK (`assertSingleTracingExporter` refuses startup). Migrating the workflow spans onto the SDK and removing the old exporter is the remaining step.

@@ -140,7 +140,7 @@ services:
     restart: unless-stopped
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
-    networks: [aegis]
+    networks: [aegis, agent-mesh]
 
   web:
     build:
@@ -207,7 +207,7 @@ services:
       - prometheus-data:/prometheus
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
-    networks: [aegis]
+    networks: [aegis, spire-control, agent-mesh]
 
   blackbox-exporter:
     build:
@@ -246,13 +246,270 @@ services:
     security_opt: ['no-new-privileges:true']
     networks: [aegis]
 
+  # SPIRE workload identity (P3). Socket-free: x509pop node attestation and Unix workload attestation. No Docker socket, no privileged
+  # containers, no host networking, no host filesystem beyond single credential files in AEGIS_SPIRE_SECRETS_DIR (outside the repository).
+  # Each workload has its own agent container that shares ONLY that workload's PID namespace (pid: service:<workload>), so the Unix
+  # attestor can see the calling process. Workload API sockets live in per-workload volumes that no other workload mounts.
+  spire-server:
+    build:
+      context: ./infra/spire/server
+    image: aegis-spire-server:local
+    pull_policy: never
+    restart: unless-stopped
+    command: ['-config', '/opt/spire/conf/server/server.conf']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR:?Run node scripts/spire-bootstrap.mjs}/ca.crt:/opt/spire/conf/x509pop/ca.crt:ro
+      - spire-server-data:/opt/spire/data/server
+    healthcheck:
+      test: ['CMD', '/opt/spire/bin/spire-server', 'healthcheck']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [spire-control]
+
+  orchestrator:
+    build:
+      context: ./infra/spire
+      dockerfile: workload/Dockerfile
+    image: aegis-spire-workload:local
+    pull_policy: never
+    restart: unless-stopped
+    user: '1001:1001'
+    command: ['serve']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_POLICY_PATH: /etc/aegis/spire-policy.json
+      AEGIS_SERVICE_NAME: aegis-workload-orchestrator
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-orchestrator:/run/spire/sockets
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+  triage:
+    image: aegis-spire-workload:local
+    pull_policy: never
+    depends_on: [orchestrator]
+    restart: unless-stopped
+    user: '1002:1002'
+    command: ['serve']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_POLICY_PATH: /etc/aegis/spire-policy.json
+      AEGIS_SERVICE_NAME: aegis-workload-triage
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-triage:/run/spire/sockets
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+  retrieval:
+    image: aegis-spire-workload:local
+    pull_policy: never
+    depends_on: [orchestrator]
+    restart: unless-stopped
+    user: '1003:1003'
+    command: ['serve']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_POLICY_PATH: /etc/aegis/spire-policy.json
+      AEGIS_SERVICE_NAME: aegis-workload-retrieval
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-retrieval:/run/spire/sockets
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+  reviewer:
+    image: aegis-spire-workload:local
+    pull_policy: never
+    depends_on: [orchestrator]
+    restart: unless-stopped
+    user: '1004:1004'
+    command: ['serve']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_POLICY_PATH: /etc/aegis/spire-policy.json
+      AEGIS_SERVICE_NAME: aegis-workload-reviewer
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-reviewer:/run/spire/sockets
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+  spire-agent-orchestrator:
+    build:
+      context: ./infra/spire/agent
+    image: aegis-spire-agent:local
+    pull_policy: never
+    restart: unless-stopped
+    pid: 'service:orchestrator'
+    depends_on: [orchestrator, spire-server]
+    command: ['-config', '/opt/spire/conf/agent/agent.conf']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR}/bundle.pem:/opt/spire/conf/bundle/bundle.pem:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-orchestrator.crt:/opt/spire/conf/node/node.crt:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-orchestrator.key:/opt/spire/conf/node/node.key:ro
+      - spire-socket-orchestrator:/run/spire/sockets
+      - spire-agent-data-orchestrator:/opt/spire/data/agent
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [spire-control]
+
+  spire-agent-triage:
+    build:
+      context: ./infra/spire/agent
+    image: aegis-spire-agent:local
+    pull_policy: never
+    restart: unless-stopped
+    pid: 'service:triage'
+    depends_on: [triage, spire-server]
+    command: ['-config', '/opt/spire/conf/agent/agent.conf']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR}/bundle.pem:/opt/spire/conf/bundle/bundle.pem:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-triage.crt:/opt/spire/conf/node/node.crt:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-triage.key:/opt/spire/conf/node/node.key:ro
+      - spire-socket-triage:/run/spire/sockets
+      - spire-agent-data-triage:/opt/spire/data/agent
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [spire-control]
+
+  spire-agent-retrieval:
+    build:
+      context: ./infra/spire/agent
+    image: aegis-spire-agent:local
+    pull_policy: never
+    restart: unless-stopped
+    pid: 'service:retrieval'
+    depends_on: [retrieval, spire-server]
+    command: ['-config', '/opt/spire/conf/agent/agent.conf']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR}/bundle.pem:/opt/spire/conf/bundle/bundle.pem:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-retrieval.crt:/opt/spire/conf/node/node.crt:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-retrieval.key:/opt/spire/conf/node/node.key:ro
+      - spire-socket-retrieval:/run/spire/sockets
+      - spire-agent-data-retrieval:/opt/spire/data/agent
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [spire-control]
+
+  spire-agent-reviewer:
+    build:
+      context: ./infra/spire/agent
+    image: aegis-spire-agent:local
+    pull_policy: never
+    restart: unless-stopped
+    pid: 'service:reviewer'
+    depends_on: [reviewer, spire-server]
+    command: ['-config', '/opt/spire/conf/agent/agent.conf']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR}/bundle.pem:/opt/spire/conf/bundle/bundle.pem:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-reviewer.crt:/opt/spire/conf/node/node.crt:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-reviewer.key:/opt/spire/conf/node/node.key:ro
+      - spire-socket-reviewer:/run/spire/sockets
+      - spire-agent-data-reviewer:/opt/spire/data/agent
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [spire-control]
+
+  # ---- Acceptance-only services (profile "spire-tests"). Never started by the normal stack. ----
+  # An unregistered workload with its own agent and node credential, running as UID 1002 (the same UID as triage).
+  probe:
+    image: aegis-spire-workload:local
+    pull_policy: never
+    profiles: [spire-tests]
+    restart: 'no'
+    user: '1002:1002'
+    entrypoint: ['/bin/sleep', 'infinity']
+    volumes:
+      - spire-socket-probe:/run/spire/sockets
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+  spire-agent-probe:
+    build:
+      context: ./infra/spire/agent
+    image: aegis-spire-agent:local
+    pull_policy: never
+    restart: 'no'
+    profiles: [spire-tests]
+    pid: 'service:probe'
+    depends_on: [probe, spire-server]
+    command: ['-config', '/opt/spire/conf/agent/agent.conf']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR}/bundle.pem:/opt/spire/conf/bundle/bundle.pem:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-probe.crt:/opt/spire/conf/node/node.crt:ro
+      - ${AEGIS_SPIRE_SECRETS_DIR}/node-probe.key:/opt/spire/conf/node/node.key:ro
+      - spire-socket-probe:/run/spire/sockets
+      - spire-agent-data-probe:/opt/spire/data/agent
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [spire-control]
+
+  # Handed triage's Workload API socket on purpose: the strongest "same UID, different container" case. It is not in triage's PID
+  # namespace and has no agent of its own.
+  intruder:
+    image: aegis-spire-workload:local
+    pull_policy: never
+    profiles: [spire-tests]
+    restart: 'no'
+    user: '1002:1002'
+    entrypoint: ['/bin/sleep', 'infinity']
+    volumes:
+      - spire-socket-triage:/run/spire/sockets
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+  # Test-only impersonation server: serves a certificate that CLAIMS triage's SPIFFE ID but is signed by an untrusted CA. Clients that
+  # verify against the SPIRE trust bundle must refuse it. Never started by the normal stack.
+  rogue:
+    image: node@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+    profiles: [spire-tests]
+    restart: 'no'
+    user: '1000:1000'
+    command: ['node', '-e', 'const tls=require("tls"),fs=require("fs");tls.createServer({key:fs.readFileSync("/run/rogue/rogue.key"),cert:fs.readFileSync("/run/rogue/rogue.crt")},s=>{s.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")}).listen(8443)']
+    volumes:
+      - ${AEGIS_SPIRE_SECRETS_DIR}/rogue:/run/rogue:ro
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh]
+
+
 volumes:
   postgres-data:
   tempo-data:
   loki-data:
   prometheus-data:
   grafana-data:
+  spire-server-data:
+  spire-socket-orchestrator:
+  spire-socket-triage:
+  spire-socket-retrieval:
+  spire-socket-reviewer:
+  spire-socket-probe:
+  spire-agent-data-orchestrator:
+  spire-agent-data-triage:
+  spire-agent-data-retrieval:
+  spire-agent-data-reviewer:
+  spire-agent-data-probe:
 
 networks:
   aegis:
     driver: bridge
+  # Internal: no route to the internet or the host. SPIRE control traffic only.
+  spire-control:
+    driver: bridge
+    internal: true
+  # Internal: workload-to-workload mTLS traffic only.
+  agent-mesh:
+    driver: bridge
+    internal: true
