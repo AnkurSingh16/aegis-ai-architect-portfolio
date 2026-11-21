@@ -5,6 +5,20 @@
 set -eu
 out=/usr/share/nginx/html/config.json
 
+# Content Security Policy. Generated from the same configuration, so the identity provider origin is the one the application uses.
+# No inline script, no eval, no inline style. The identity provider is allowed for redirects, the hidden renewal frame and form posts only.
+headers=/etc/nginx/aegis-security-headers.conf
+idp_origin=""
+if [ "${AEGIS_WEB_OIDC_ENABLED:-false}" = "true" ]; then
+  idp_origin=$(printf '%s' "${AEGIS_WEB_OIDC_ISSUER:-}" | sed -n 's#^\(https\{0,1\}://[^/]*\).*#\1#p')
+fi
+# style-src and font-src allow the two Google Fonts origins that the stylesheet loads. This is a deliberate, narrow exception; self-hosting
+# the fonts is the follow-up (docs/WEB-AUTHENTICATION.md section 8).
+policy() { printf "%s" "default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'${idp_origin:+ $idp_origin}; frame-src 'self'${idp_origin:+ $idp_origin}; form-action 'self'${idp_origin:+ $idp_origin}; base-uri 'self'; object-src 'none'; $1"; }
+printf 'add_header X-Content-Type-Options nosniff always;\nadd_header Referrer-Policy no-referrer always;\nadd_header Content-Security-Policy "%s" always;\n' "$(policy "frame-ancestors 'none'")" > "$headers"
+# The renewal page is the only page that may be framed, and only by this same origin.
+printf 'add_header X-Content-Type-Options nosniff always;\nadd_header Referrer-Policy no-referrer always;\nadd_header Content-Security-Policy "%s" always;\n' "$(policy "frame-ancestors 'self'")" > /etc/nginx/aegis-security-headers-silent.conf
+
 if [ "${AEGIS_WEB_OIDC_ENABLED:-false}" != "true" ]; then
   printf '{"version":1,"oidc":null}\n' > "$out"
   echo "aegis-web: sign-in disabled (AEGIS_WEB_OIDC_ENABLED is not true)"

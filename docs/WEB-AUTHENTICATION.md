@@ -79,3 +79,30 @@ Production secrets never reach the browser or the web tier. The web tier receive
 - The browser client is public and reauthenticates when renewal fails. Offline or long-lived sessions are not supported.
 - Interrupted authentication (the user closing the window mid-login) is covered by the state check on return, but was not separately automated.
 - Insufficient-scope responses cannot be distinguished from tenant denial in the UI, because the API returns `403` for both. The scope-specific behaviour is verified at the API level by `scripts/e2e-auth.mjs`.
+
+## 8. Content Security Policy
+
+Served by nginx on every response. Generated at container start by `apps/web/docker-entrypoint.d/40-aegis-runtime-config.sh` from the same configuration as the application, so the identity provider origin always matches the issuer the browser uses.
+
+| Directive | Value | Reason |
+| --- | --- | --- |
+| `default-src` | `'none'` | Nothing is allowed unless listed. |
+| `script-src` | `'self'` | No inline script, no `eval`. The build emits external modules only. |
+| `style-src` | `'self' https://fonts.googleapis.com` | Stylesheets from the application; the Google Fonts stylesheet. No inline style element. |
+| `font-src` | `'self' https://fonts.gstatic.com` | Fonts for the same stylesheet. |
+| `img-src` | `'self' data:` | Application images. |
+| `connect-src` | `'self'` + identity provider origin | API calls on the same origin; discovery, token and renewal requests to the identity provider. |
+| `frame-src` | `'self'` + identity provider origin | The hidden renewal frame loads the identity provider. |
+| `form-action` | `'self'` + identity provider origin | Form submissions. |
+| `frame-ancestors` | `'none'` on the application; `'self'` on `/silent-renew.html` only | Stops clickjacking. The renewal page must be framed by the application itself. |
+| `base-uri`, `object-src` | `'self'`, `'none'` | Stops base-tag and plugin injection. |
+
+Also set: `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
+
+Verified: the browser suite passes under this policy (10 of 10). Before the `frame-ancestors` split, the policy blocked the renewal frame and the restart-restore test failed; that is recorded in the test history.
+
+Exceptions and follow-ups:
+- **Google Fonts.** The stylesheet loads fonts from two Google origins. This is a deliberate, narrow exception. The follow-up is to self-host the fonts and remove both origins.
+- **Telemetry connections** are not added to `connect-src`. The browser does not send telemetry yet.
+- **Browser support.** Only Chromium was tested. Other browsers enforce the same directives, but silent renewal depends on third-party cookie behaviour (section 6).
+- **Production identity provider.** The identity provider origin in `connect-src`, `frame-src` and `form-action` comes from `AEGIS_WEB_OIDC_ISSUER`. Changing the provider changes the policy at container start, with no rebuild. Re-verify the browser suite after any change.

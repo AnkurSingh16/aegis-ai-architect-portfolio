@@ -30,6 +30,28 @@ Keycloak keeps passive keys in the published set on purpose. Setting only `activ
 - **Availability trade-off.** The cache is refreshed when it expires. If the provider's key endpoint is unreachable for longer than the cache window, verification fails and the API refuses all tokens (`Authentication required.`) until the endpoint returns. The 60 s setting is fail-closed. A stale-while-unavailable mode would extend availability but would also extend the window for a retired key. This is recorded as a decision for the owner, not a silent default.
 - **Performance cost.** The steady-state cost is at most one key-set request per process per minute, plus refreshes for unknown `kid` values at most once per 30 s. Measured on the local stack: a new key was accepted within 14 s of creation in the first run and at once in a later run, both with the 30 s cooldown in place.
 
+## 4.1 Decision: fail closed, no stale-key acceptance (2026-11-21)
+
+The owner decided to keep the 60 s cache and fail-closed behaviour. Stale signing keys are not accepted to improve availability. Measured with `npm run test:availability` (identity provider stopped, then restarted, on the local stack):
+
+| Observation | Measured |
+| --- | --- |
+| Held token (valid by its own expiry) accepted during the outage | yes, for the first 61 s of the outage window (11 of 22 samples) |
+| First refusal of the held token after the identity provider stopped | 61 s (policy bound: about 60 s after the last successful key fetch) |
+| After refusal began | refused on every later sample (fail closed) |
+| Unauthenticated endpoints (`/api/health`, `/api/ready`) during the outage | 200 throughout |
+| Anonymous protected request during the outage | 401 |
+| New token accepted after the identity provider returned | 11 s after restart |
+
+Security cost: a token remains usable for up to about 60 s after the key set is no longer obtainable, and a retired key is still accepted until the cache expires.
+Availability cost: while the identity provider is unreachable, every protected request fails once the cache expires. Unauthenticated endpoints and the database-backed readiness check are unaffected.
+
+Operational procedure:
+1. Monitor: the alert `AegisIdentityRefusalsElevated` (provisional threshold, see docs/OBSERVABILITY.md) fires on sustained identity-verification refusals.
+2. Recover: restore the identity provider. The API recovers within one cache window after the key set is reachable again. No API restart is required.
+3. Do not restart the API to force recovery. It does not change the outcome and it drops in-flight requests.
+4. Immediate revocation is not available. To stop a compromised key, follow section 3 (disable the key). Acceptance ends within 60 s.
+
 ## 5. Evidence (local, Keycloak 26.4)
 
 | Step | Result | Command |
