@@ -6,6 +6,7 @@ import { migrateDatabase } from '../storage/migrations.js';
 import { createPostgresApprovalStore, type TenantQueryable } from '../security/tool-approval-store.js';
 import { actionDigest, type AgentRegistration, type RequestContext, type ToolDefinition, ToolGateway, verifiedRequestContext } from '../security/tool-policy-gateway.js';
 import { createToolDispatcher, type ToolHandler } from './tool-dispatcher.js';
+import { createTestAuthentication } from '../auth/test-authentication.js';
 
 // An ISOLATED SYNTHETIC side-effecting action, used only to prove the approval path end to end. The "sink" is an array that
 // lives in this test file. Nothing here reaches an external system, a customer record or a production store. No real action
@@ -18,7 +19,6 @@ const admin = new Pool({ connectionString: adminUrl, max: 2 });
 const pool = createDatabasePool(runtimeUrl, 6);
 const tenantA = randomUUID();
 const tenantB = randomUUID();
-const issuer = 'https://issuer.example.test/';
 const TOOL = 'synthetic.note.write';
 const REQUESTER = 'requester-1';
 const REVIEWER = 'reviewer-2';
@@ -61,11 +61,12 @@ const handler: ToolHandler<{ note: string }, number> = {
 const gateway = new ToolGateway(new Map(definitions.map((d) => [d.name, d])), new Map(agents.map((a) => [a.agentId, a])), approvals);
 const dispatcher = createToolDispatcher(gateway, new Map([[TOOL, handler as ToolHandler<unknown, unknown>]]));
 
-const context = (tenantId: string, now: Date, subject = REQUESTER): RequestContext =>
-  verifiedRequestContext({ issuer, subject, scopes: new Set(['write:cases']) }, { tenantId, agentId: 'synthetic-writer', now });
+const auth = await createTestAuthentication();
+const context = async (tenantId: string, now: Date, subject = REQUESTER): Promise<RequestContext> =>
+  verifiedRequestContext(await auth.principal(subject, ['write:cases']), { tenantId, agentId: 'synthetic-writer', now });
 
 async function request(note: string, tenantId = tenantA, now = T0, approvalId?: string) {
-  return dispatcher.dispatch({ toolName: TOOL, arguments: { note }, ...(approvalId ? { approvalId } : {}) }, context(tenantId, now));
+  return dispatcher.dispatch({ toolName: TOOL, arguments: { note }, ...(approvalId ? { approvalId } : {}) }, await context(tenantId, now));
 }
 
 async function approvalFor(note: string, tenantId = tenantA, expiresAt = new Date(T0.getTime() + LIFETIME_MS)): Promise<string> {

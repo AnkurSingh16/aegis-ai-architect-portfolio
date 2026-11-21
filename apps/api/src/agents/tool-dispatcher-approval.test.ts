@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { createTestAuthentication } from '../auth/test-authentication.js';
 import { actionDigest, type ApprovalRecord, type ApprovalStore, type RequestContext, ToolGateway, verifiedRequestContext } from '../security/tool-policy-gateway.js';
 import { createToolDispatcher, type ToolHandler } from './tool-dispatcher.js';
 
@@ -35,10 +36,11 @@ function dispatcherWith(approvals: ApprovalStore, sideEffects: { count: number }
   return createToolDispatcher(gateway, new Map([['case.close', handler]]));
 }
 
-const ctx: RequestContext = verifiedRequestContext(
-  { issuer: 'https://issuer.example.test/', subject: 'user-1', scopes: new Set(['cases:write']) },
-  { tenantId: 'tenant-a', agentId: 'triage-agent', now: NOW },
-);
+let ctx!: RequestContext;
+beforeAll(async () => {
+  const auth = await createTestAuthentication();
+  ctx = verifiedRequestContext(await auth.principal('user-1', ['cases:write']), { tenantId: 'tenant-a', agentId: 'triage-agent', now: NOW });
+});
 const approved = (approvalId: string, overrides: Partial<ApprovalRecord> = {}): ApprovalRecord => ({
   approvalId, tenantId: 'tenant-a', actionDigest: digest, status: 'approved', approvedBy: 'reviewer-9',
   expiresAt: new Date(NOW.getTime() + 60_000), ...overrides,

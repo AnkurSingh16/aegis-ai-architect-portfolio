@@ -1,3 +1,4 @@
+import { createTestAuthentication } from '../auth/test-authentication.js';
 import { describe, expect, it } from 'vitest';
 import type { ApprovalStore, RequestContext, ToolCall } from '../security/tool-policy-gateway.js';
 import { createDefaultToolDispatcher } from './default-tools.js';
@@ -5,15 +6,16 @@ import { createToolDispatcher, type ToolHandler } from './tool-dispatcher.js';
 import { ToolGateway, verifiedRequestContext } from '../security/tool-policy-gateway.js';
 
 const noApprovals: ApprovalStore = { get: async () => undefined, consume: async () => false };
-const ctx = (overrides: Partial<RequestContext> = {}): RequestContext => verifiedRequestContext(
-  { issuer: 'https://issuer.example.test/', subject: overrides.userId ?? 'user-1', scopes: new Set(overrides.userScopes ?? ['read:cases']) },
+const auth = await createTestAuthentication();
+const ctx = async (overrides: Partial<RequestContext> = {}): Promise<RequestContext> => verifiedRequestContext(
+  await auth.principal(overrides.userId ?? 'user-1', overrides.userScopes ?? ['read:cases']),
   { tenantId: overrides.tenantId ?? 'tenant-a', agentId: overrides.agentId ?? 'triage-agent', now: overrides.now ?? new Date('2026-11-19T10:00:00Z') },
 );
 const triage = (args: Record<string, unknown>): ToolCall => ({ toolName: 'case.triage', arguments: args });
 
 describe('default tool dispatcher', () => {
   it('runs the triage tool through the gateway and returns the typed fixture output', async () => {
-    const result = await createDefaultToolDispatcher(noApprovals).dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001' }), ctx());
+    const result = await createDefaultToolDispatcher(noApprovals).dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001' }), await ctx());
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
       expect(result.output).toMatchObject({ caseId: 'SYNTHETIC-LOGIN-001', category: 'incident', priority: 'high' });
@@ -22,26 +24,26 @@ describe('default tool dispatcher', () => {
   });
 
   it('denies when the user lacks the scope', async () => {
-    const result = await createDefaultToolDispatcher(noApprovals).dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001' }), ctx({ userScopes: [] }));
+    const result = await createDefaultToolDispatcher(noApprovals).dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001' }), await ctx({ userScopes: [] }));
     expect(result).toEqual({ status: 'denied', reasons: ['missing_scope'] });
   });
 
   it('denies tenant crossing through arguments', async () => {
     const result = await createDefaultToolDispatcher(noApprovals)
-      .dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001', tenantId: 'tenant-b' }), ctx());
+      .dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001', tenantId: 'tenant-b' }), await ctx());
     expect(result).toEqual({ status: 'denied', reasons: ['tenant_in_arguments'] });
   });
 
   it('denies unknown tools and unknown agents', async () => {
     const dispatcher = createDefaultToolDispatcher(noApprovals);
-    expect(await dispatcher.dispatch({ toolName: 'shell.exec', arguments: {} }, ctx()))
+    expect(await dispatcher.dispatch({ toolName: 'shell.exec', arguments: {} }, await ctx()))
       .toMatchObject({ status: 'denied', reasons: ['unknown_tool'] });
-    expect(await dispatcher.dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001' }), ctx({ agentId: 'ghost' })))
+    expect(await dispatcher.dispatch(triage({ caseId: 'SYNTHETIC-LOGIN-001' }), await ctx({ agentId: 'ghost' })))
       .toMatchObject({ status: 'denied', reasons: ['unknown_agent'] });
   });
 
   it('returns a bounded error for invalid arguments that pass policy', async () => {
-    const result = await createDefaultToolDispatcher(noApprovals).dispatch(triage({ caseId: 'NOT-A-CASE' }), ctx());
+    const result = await createDefaultToolDispatcher(noApprovals).dispatch(triage({ caseId: 'NOT-A-CASE' }), await ctx());
     expect(result).toEqual({ status: 'error', message: 'caseId must be a known synthetic case' });
   });
 
@@ -56,7 +58,7 @@ describe('default tool dispatcher', () => {
       run: () => { throw new Error(`db password=hunter2 ${'x'.repeat(500)}`); },
     };
     const result = await createToolDispatcher(gateway, new Map([['x.read', failing]]))
-      .dispatch({ toolName: 'x.read', arguments: {} }, ctx({ userScopes: [] }));
+      .dispatch({ toolName: 'x.read', arguments: {} }, await ctx({ userScopes: [] }));
     expect(result.status).toBe('error');
     if (result.status === 'error') expect(result.message.length).toBeLessThanOrEqual(200);
   });

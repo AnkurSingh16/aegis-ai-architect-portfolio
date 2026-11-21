@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { RateLimiter } from './rate-limiter.js';
-import type { VerifiedPrincipal } from '../auth/token.js';
+import { isAuthenticatedPrincipal, type VerifiedPrincipal } from '../auth/token.js';
 
 /**
  * Deterministic tool-authorisation gateway for AI agents (C10).
@@ -58,7 +58,17 @@ export interface ContextBinding {
   readonly now: Date;
 }
 
+/** Thrown when a context is requested for a principal the authentication layer did not produce. */
+export class UnauthenticatedPrincipalError extends Error {
+  readonly name = 'UnauthenticatedPrincipalError';
+}
+
+/**
+ * The only supported way to build a gateway context. The principal must have been produced by the token verifier, so the
+ * identity and scopes are the verified token's. A literal, a copy or a spread principal is refused.
+ */
 export function verifiedRequestContext(principal: VerifiedPrincipal, binding: ContextBinding): RequestContext {
+  if (!isAuthenticatedPrincipal(principal)) throw new UnauthenticatedPrincipalError('principal was not produced by the authentication layer');
   const context: RequestContext = {
     tenantId: binding.tenantId,
     userId: principal.subject,
@@ -152,7 +162,15 @@ export class ToolGateway {
     private readonly approvals: ApprovalStore,
     /** Optional. Limits calls per tenant and agent. A limited call is denied before any other check or any approval use. */
     private readonly limiter?: RateLimiter,
-  ) {}
+  ) {
+    // Registration fails closed: a tool with side effects must require approval. An unsafe registration never reaches a caller.
+    for (const tool of tools.values()) {
+      if (!['read', 'write', 'external'].includes(tool.sideEffect)) throw new RangeError(`tool ${tool.name} has an unknown side effect`);
+      if (tool.sideEffect !== 'read' && !tool.requiresApproval) {
+        throw new RangeError(`tool ${tool.name} has side effects (${tool.sideEffect}) and must require approval`);
+      }
+    }
+  }
 
   private denied(call: ToolCall, context: RequestContext, digest: string, reasons: DenyReason[]): Decision {
     return {
@@ -182,6 +200,8 @@ export class ToolGateway {
     const reasons: DenyReason[] = [];
     const agent = this.agents.get(context.agentId);
     const tool = this.tools.get(call.toolName);
+    // Fail closed: a side-effecting tool needs an approval even if its definition says otherwise now.
+    const approvalRequired = tool !== undefined && (tool.requiresApproval || tool.sideEffect !== 'read');
     let effective: string[] = [];
 
     if (!agent) reasons.push('unknown_agent');
@@ -197,14 +217,14 @@ export class ToolGateway {
     if (findKeys(call.arguments, PRIVILEGE_KEYS).length > 0) reasons.push('privilege_in_arguments');
     if (findKeys(call.arguments, SECRET_KEYS).length > 0) reasons.push('secret_in_arguments');
 
-    if (tool?.requiresApproval) {
+    if (approvalRequired) {
       reasons.push(...(await this.checkApproval(call, context, digest)));
     }
 
     const allowed = reasons.length === 0 && tool !== undefined && agent !== undefined;
     let runId: string | undefined;
     if (allowed) {
-      if (tool?.requiresApproval && call.approvalId !== undefined) {
+      if (approvalRequired && call.approvalId !== undefined) {
         // Single atomic consume. If another request won the race, fail closed.
         const consumed = await this.approvals.consume(call.approvalId, context.tenantId, context.now);
         if (!consumed) reasons.push('approval_consumed');

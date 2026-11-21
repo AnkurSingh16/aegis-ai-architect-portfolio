@@ -12,6 +12,17 @@ export type Permission = 'read:cases' | 'write:cases' | 'observe:metrics';
 export interface VerifiedPrincipal { issuer: string; subject: string; scopes: ReadonlySet<string> }
 export type VerifyToken = (authorization: string | undefined) => Promise<VerifiedPrincipal>;
 
+/**
+ * Principals produced by the verifier below. Only this module adds to the set, so a principal object built anywhere else
+ * (a literal, a copy, a spread) is not authenticated. The set is private; code outside this module can only ask whether a
+ * value was produced here.
+ */
+const authenticated = new WeakSet<VerifiedPrincipal>();
+
+export function isAuthenticatedPrincipal(value: unknown): value is VerifiedPrincipal {
+  return typeof value === 'object' && value !== null && authenticated.has(value as VerifiedPrincipal);
+}
+
 function hasControlCharacter(value: string): boolean {
   return [...value].some((character) => {
     const code = character.charCodeAt(0);
@@ -40,7 +51,11 @@ export function createTokenVerifier(config: Pick<AuthConfig, 'issuer' | 'audienc
         || hasControlCharacter(payload.sub)) throw new AuthorizationError(401);
       if (payload.scope !== undefined && (typeof payload.scope !== 'string' || payload.scope.length > 4096
         || !/^[A-Za-z0-9:_-]+(?: [A-Za-z0-9:_-]+)*$/.test(payload.scope))) throw new AuthorizationError(401);
-      return { issuer: config.issuer, subject: payload.sub, scopes: new Set((payload.scope as string | undefined)?.split(' ') ?? []) };
+      const principal: VerifiedPrincipal = Object.freeze({
+        issuer: config.issuer, subject: payload.sub, scopes: new Set((payload.scope as string | undefined)?.split(' ') ?? []),
+      });
+      authenticated.add(principal);
+      return principal;
     } catch {
       // Signature, claim and JWKS failures deliberately share one public error.
       throw new AuthorizationError(401);
