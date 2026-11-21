@@ -22,20 +22,23 @@
     "ai:evaluate:grounded:supported-decision:local": "tsx src/ai/evaluation/run-grounded-supported-decision-local-evaluation.ts",
     "ai:evaluate:grounded:supported-output-diagnostic:local": "tsx src/ai/evaluation/run-grounded-supported-output-diagnostic-local.ts",
     "db:migrate": "tsx src/storage/migrate-cli.ts",
+    "mcp:stdio": "tsx src/mcp/stdio.ts",
     "documents:ingest": "tsx src/documents/ingest-cli.ts",
     "cases": "tsx src/storage/cli.ts",
     "memberships": "tsx src/auth/membership-cli.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "fastify": "^5.0.0",
+    "jose": "^6.1.0",
     "pg": "^8.23.1",
-    "jose": "^6.1.0"
+    "zod": "3.25.76"
   },
   "devDependencies": {
-    "ajv": "^6.15.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.0",
+    "ajv": "^6.15.0",
     "tsx": "^4.0.0",
     "vitest": "^5.0.0"
   }
