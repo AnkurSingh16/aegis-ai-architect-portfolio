@@ -9,6 +9,7 @@ import { registerProtectedWorkflowRoutes } from './workflow-routes.js';
 import { createDurableStore } from './durable-store.js';
 import type { TenantQueryable } from '../security/tool-approval-store.js';
 import { runDurableAttempt } from './durable-driver.js';
+import { createTestAuthentication } from '../auth/test-authentication.js';
 import { createWorkflowMetrics } from './workflow-metrics.js';
 
 // Real PostgreSQL + Fastify injection tests for the authenticated triage workflow route.
@@ -25,13 +26,13 @@ const readerSubject = `reader-${randomUUID()}`;
 const noReadSubject = `noread-${randomUUID()}`;
 let app: FastifyInstance;
 
-const readerPrincipal: VerifiedPrincipal = { issuer, subject: readerSubject, scopes: new Set(['read:cases']) };
-const noScopePrincipal: VerifiedPrincipal = { issuer, subject: readerSubject, scopes: new Set() };
-const stranger: VerifiedPrincipal = { issuer, subject: noReadSubject, scopes: new Set(['read:cases']) };
+let readerPrincipal: VerifiedPrincipal;
+let noScopePrincipal: VerifiedPrincipal;
+let stranger: VerifiedPrincipal;
 const operatorSubject = `operator-${randomUUID()}`;
-const operatorPrincipal: VerifiedPrincipal = { issuer, subject: operatorSubject, scopes: new Set(['read:cases', 'write:cases']) };
+let operatorPrincipal: VerifiedPrincipal;
 // The reader's token with the write scope: the scope passes, the reader role must still be refused.
-const readerWritePrincipal: VerifiedPrincipal = { issuer, subject: readerSubject, scopes: new Set(['read:cases', 'write:cases']) };
+let readerWritePrincipal: VerifiedPrincipal;
 
 const verify = async (authorization: string | undefined): Promise<VerifiedPrincipal> => {
   if (authorization === 'Bearer operator') return operatorPrincipal;
@@ -79,7 +80,16 @@ async function createFailedExecution(tenantId: string): Promise<string> {
   return executionId;
 }
 
+let auth: Awaited<ReturnType<typeof createTestAuthentication>>;
+
 beforeAll(async () => {
+  // Principals come from the real verifier: each one is a signed token that the production verifier accepted.
+  auth = await createTestAuthentication();
+  readerPrincipal = await auth.principal(readerSubject, ['read:cases']);
+  noScopePrincipal = await auth.principal(readerSubject, []);
+  stranger = await auth.principal(noReadSubject, ['read:cases']);
+  operatorPrincipal = await auth.principal(operatorSubject, ['read:cases', 'write:cases']);
+  readerWritePrincipal = await auth.principal(readerSubject, ['read:cases', 'write:cases']);
   await migrateDatabase(adminUrl, process.env.DATABASE_APP_PASSWORD ?? '', process.env.DATABASE_INGEST_PASSWORD ?? '');
   await admin.query("INSERT INTO aegis.tenants (id, name) VALUES ($1, 'Synthetic North'), ($2, 'Synthetic South')", [tenantNorth, tenantSouth]);
   await admin.query("INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, $2, $3, 'reader')", [issuer, readerSubject, tenantNorth]);
@@ -376,6 +386,28 @@ describe('the triage span carries the trace id and no case data', () => {
       expect(spans[0]).toMatchObject({ name: 'workflow.triage', traceId });
       expect(JSON.stringify(spans[0])).not.toContain('SYNTHETIC-LOGIN-001');
       expect(Object.keys(spans[0]!.attributes).every((k) => ['outcome', 'attempt', 'durationMs'].includes(k))).toBe(true);
+    } finally {
+      await scoped.close();
+    }
+  });
+});
+
+describe('a forged bearer token cannot reach the triage workflow through the real verifier', () => {
+  it('answers 401 and runs nothing when the signature does not verify', async () => {
+    const metrics = createWorkflowMetrics();
+    const forgedAuth = await createTestAuthentication();
+    const forged = await forgedAuth.sign(readerSubject, ['read:cases', 'write:cases']);
+    const scoped = Fastify();
+    await scoped.register(async (inner) => registerProtectedWorkflowRoutes(inner, pool, auth.verify, { metrics }));
+    await scoped.ready();
+    try {
+      const response = await scoped.inject({
+        method: 'POST', url: `/api/tenants/${tenantNorth}/workflows/triage`,
+        headers: { authorization: `Bearer ${forged}`, 'content-type': 'application/json', 'idempotency-key': key() },
+        payload: { caseId: 'SYNTHETIC-LOGIN-001' },
+      });
+      expect(response.statusCode).toBe(401);
+      expect(metrics.snapshot().attempts.succeeded).toBe(0);
     } finally {
       await scoped.close();
     }

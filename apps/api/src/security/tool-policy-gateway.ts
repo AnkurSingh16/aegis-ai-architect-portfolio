@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { RateLimiter } from './rate-limiter.js';
+import { isAuthenticatedPrincipal, type VerifiedPrincipal } from '../auth/token.js';
 
 /**
  * Deterministic tool-authorisation gateway for AI agents (C10).
@@ -17,7 +19,7 @@ export const DENY_REASONS = [
   'unknown_agent', 'inactive_agent', 'unknown_tool', 'tenant_mismatch', 'tenant_in_arguments',
   'missing_scope', 'privilege_in_arguments', 'secret_in_arguments', 'approval_required',
   'approval_digest_mismatch', 'approval_not_approved', 'approval_self_approved', 'approval_consumed',
-  'approval_expired', 'result_unknown_run', 'result_replayed',
+  'approval_expired', 'result_unknown_run', 'result_replayed', 'rate_limited', 'rate_limit_unavailable', 'unverified_context',
 ] as const;
 export type DenyReason = typeof DENY_REASONS[number];
 
@@ -41,6 +43,42 @@ export interface RequestContext {
   readonly agentId: string;
   readonly requestedBy: string;
   readonly now: Date;
+}
+
+/**
+ * Contexts that were built from a verified principal. The gateway accepts only these. A context assembled by hand, or by
+ * spreading another context, is not in this set and is denied (unverified_context). Identity and scopes therefore come
+ * from the authentication layer, not from whatever a caller puts in an object.
+ */
+const verifiedContexts = new WeakSet<RequestContext>();
+
+export interface ContextBinding {
+  readonly tenantId: string;
+  readonly agentId: string;
+  readonly now: Date;
+}
+
+/** Thrown when a context is requested for a principal the authentication layer did not produce. */
+export class UnauthenticatedPrincipalError extends Error {
+  readonly name = 'UnauthenticatedPrincipalError';
+}
+
+/**
+ * The only supported way to build a gateway context. The principal must have been produced by the token verifier, so the
+ * identity and scopes are the verified token's. A literal, a copy or a spread principal is refused.
+ */
+export function verifiedRequestContext(principal: VerifiedPrincipal, binding: ContextBinding): RequestContext {
+  if (!isAuthenticatedPrincipal(principal)) throw new UnauthenticatedPrincipalError('principal was not produced by the authentication layer');
+  const context: RequestContext = {
+    tenantId: binding.tenantId,
+    userId: principal.subject,
+    userScopes: [...principal.scopes],
+    agentId: binding.agentId,
+    requestedBy: principal.subject,
+    now: binding.now,
+  };
+  verifiedContexts.add(context);
+  return context;
 }
 
 export interface ApprovalRecord {
@@ -122,13 +160,48 @@ export class ToolGateway {
     private readonly tools: ReadonlyMap<string, ToolDefinition>,
     private readonly agents: ReadonlyMap<string, AgentRegistration>,
     private readonly approvals: ApprovalStore,
-  ) {}
+    /** Optional. Limits calls per tenant and agent. A limited call is denied before any other check or any approval use. */
+    private readonly limiter?: RateLimiter,
+  ) {
+    // Registration fails closed: a tool with side effects must require approval. An unsafe registration never reaches a caller.
+    for (const tool of tools.values()) {
+      if (!['read', 'write', 'external'].includes(tool.sideEffect)) throw new RangeError(`tool ${tool.name} has an unknown side effect`);
+      if (tool.sideEffect !== 'read' && !tool.requiresApproval) {
+        throw new RangeError(`tool ${tool.name} has side effects (${tool.sideEffect}) and must require approval`);
+      }
+    }
+  }
+
+  private denied(call: ToolCall, context: RequestContext, digest: string, reasons: DenyReason[]): Decision {
+    return {
+      allowed: false, reasons, actionDigest: digest, effectiveScopes: [],
+      audit: {
+        tenantId: context.tenantId, userId: context.userId, agentId: context.agentId, toolName: call.toolName,
+        actionDigest: digest, outcome: 'deny', reasons, at: context.now.toISOString(),
+      },
+    };
+  }
 
   async authorise(call: ToolCall, context: RequestContext): Promise<Decision> {
     const digest = actionDigest(context.tenantId, call.toolName, call.arguments);
+    if (!verifiedContexts.has(context)) return this.denied(call, context, digest, ['unverified_context']);
+    // Only a registered, active agent can spend a token, so unknown agent ids cannot create limiter state.
+    const limited = this.agents.get(context.agentId);
+    if (this.limiter !== undefined && limited !== undefined && limited.active) {
+      let allowed: boolean;
+      try {
+        allowed = await this.limiter.take({ tenantId: context.tenantId, agentId: context.agentId, now: context.now });
+      } catch {
+        // The limiter could not decide. Fail closed.
+        return this.denied(call, context, digest, ['rate_limit_unavailable']);
+      }
+      if (!allowed) return this.denied(call, context, digest, ['rate_limited']);
+    }
     const reasons: DenyReason[] = [];
     const agent = this.agents.get(context.agentId);
     const tool = this.tools.get(call.toolName);
+    // Fail closed: a side-effecting tool needs an approval even if its definition says otherwise now.
+    const approvalRequired = tool !== undefined && (tool.requiresApproval || tool.sideEffect !== 'read');
     let effective: string[] = [];
 
     if (!agent) reasons.push('unknown_agent');
@@ -144,14 +217,14 @@ export class ToolGateway {
     if (findKeys(call.arguments, PRIVILEGE_KEYS).length > 0) reasons.push('privilege_in_arguments');
     if (findKeys(call.arguments, SECRET_KEYS).length > 0) reasons.push('secret_in_arguments');
 
-    if (tool?.requiresApproval) {
+    if (approvalRequired) {
       reasons.push(...(await this.checkApproval(call, context, digest)));
     }
 
     const allowed = reasons.length === 0 && tool !== undefined && agent !== undefined;
     let runId: string | undefined;
     if (allowed) {
-      if (tool?.requiresApproval && call.approvalId !== undefined) {
+      if (approvalRequired && call.approvalId !== undefined) {
         // Single atomic consume. If another request won the race, fail closed.
         const consumed = await this.approvals.consume(call.approvalId, context.tenantId, context.now);
         if (!consumed) reasons.push('approval_consumed');
@@ -192,7 +265,8 @@ export class ToolGateway {
     const reasons: DenyReason[] = [];
     if (approval.tenantId !== context.tenantId) reasons.push('tenant_mismatch');
     if (approval.actionDigest !== digest) reasons.push('approval_digest_mismatch');
-    if (approval.status !== 'approved') reasons.push('approval_not_approved');
+    if (approval.status === 'consumed') reasons.push('approval_consumed');
+    else if (approval.status !== 'approved') reasons.push('approval_not_approved');
     if (approval.approvedBy === context.requestedBy || approval.approvedBy === context.agentId) reasons.push('approval_self_approved');
     if (context.now.getTime() >= approval.expiresAt.getTime()) reasons.push('approval_expired');
     return reasons;
