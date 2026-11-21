@@ -107,6 +107,11 @@ export type RequeueOutcome =
  */
 export interface DurableStoreHooks {
   readonly afterCancelRead?: () => Promise<void>;
+  /**
+   * Test seam for crash simulation. Runs before a state write. Throwing here models a connection lost before the write is
+   * recorded. Production passes none, so the default is a no-op and no behaviour changes.
+   */
+  readonly beforeTransition?: (input: { readonly state: string }) => Promise<void>;
 }
 
 export function createDurableStore(runTenant: TenantRunner, hooks: DurableStoreHooks = {}) {
@@ -155,6 +160,7 @@ export function createDurableStore(runTenant: TenantRunner, hooks: DurableStoreH
     async transition(input: TransitionInput): Promise<number> {
       assertUuid(input.executionId, 'executionId');
       assertUuid(input.tenantId, 'tenantId');
+      await hooks.beforeTransition?.({ state: input.state });
       const approval = approvalColumns(input.approval);
       return runTenant(input.tenantId, async (client) => {
         const updated = await client.query<{ version: number }>(

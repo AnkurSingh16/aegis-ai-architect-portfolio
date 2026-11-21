@@ -75,3 +75,64 @@ results are seen.
 - Control runs prove that the named detectors fire on the named faults. They do not prove that every possible fault is caught.
 - No live inference was run. Live trajectories need separate authorisation.
 - Independent qualification is outstanding. No external reviewer has reviewed the scenarios or the thresholds.
+
+## gates-v3 (crash after commit, mandatory idempotent recovery)
+
+Code: `apps/api/src/ai/trajectory/trajectory-evaluation-v3.ts` (built on v2, which is unchanged), `trajectory-v3.test.ts`, and the
+crash scenarios in `durable-trajectories.integration.test.ts`.
+
+What changed from v2, and why:
+
+1. **Uncommitted outcome.** When a driver call throws after a state change has committed (for example, the connection is lost
+   before the success is recorded), the step reports outcome `uncertain`. A change in such a step is not a failed-step violation:
+   the effect committed, and the workflow outcome is unknown. It must still have a valid, consumed approval. Whether the crash
+   was handled safely is decided by the duplicate rule and by the recovery run, not by the crash itself.
+2. **Duplicate business effect.** Each durable run records what the synthetic business effect store observed, grouped by logical
+   operation. A logical operation with more than one effect is a `duplicate_business_effect`, whatever the driver reported.
+   New hard gate: `no_duplicate_business_effect`.
+3. **Mandatory idempotent recovery.** `REQUIRED_CLASSES_DURABLE_V3` adds `idempotent_recovery` to the v2 durable list. The
+   coverage gate fails without that baseline run. The v2 list is kept as recorded.
+
+The crash scenario, end to end:
+
+- A worker takes approval, runs the step, and the step commits the synthetic effect to PostgreSQL.
+- The store's test seam (`beforeTransition`) throws when the driver tries to record `succeeded`. The effect has committed, the
+  success is not recorded, and the driver call throws. The execution stays `running` with its lease held.
+- Another worker recovers it after the lease expires (`lost_attempt_recovered`). The step does not run in recovery.
+- A fresh approval is granted and the same logical operation runs again.
+
+Two implementations are compared on the same path:
+
+- **Idempotent** (baseline, class `idempotent_recovery`). The logical operation key is `notify-customer:<executionId>`, which is the
+  same for every attempt. The idempotency record and the effect are written in one transaction. The retry finds the record and
+  writes nothing. Result: one effect, no violation.
+- **Non-idempotent** (control, expects `duplicate_business_effect`). The step records the effect every time it runs, with no check.
+  Result: two effects for one logical operation. The evaluator reports `duplicate_business_effect` and `duplicate_state_change`.
+
+Production behaviour: **no production workflow behaviour was changed.** The driver's contract is unchanged: a step may run again
+after a crash, so the step must be idempotent under the execution id. The idempotency record exists in the synthetic effect
+service in the test, not in the driver.
+
+Production-file change, disclosed: `apps/api/src/workflow/durable-store.ts` gained an optional `beforeTransition` hook in
+`DurableStoreHooks`. It is a crash-simulation seam for tests. Production passes no hooks, so the default is a no-op and no
+behaviour changes. It is not a feature and needs no enabling.
+
+What an idempotency record does and does not guarantee:
+
+- It guarantees one recorded effect per logical operation **within the database that holds the record**, because the record and
+  the effect commit in one transaction.
+- It does **not** guarantee exactly-once behaviour for an external service. An external system must accept the operation key
+  and deduplicate on it, end to end. Without that, a retry after an uncertain outcome can still repeat the external effect.
+- The driver cannot know whether a step committed. That is why the step, not the driver, must carry the idempotency.
+
+Recommended production work (not implemented here, and not enabled): carry a stable operation key from the workflow to every
+effect service, and require external services to deduplicate on it. This needs owner review and a separate change.
+
+Mandatory gate-v3 hard gates: `coverage_complete` (now including `idempotent_recovery`), `no_unauthorised_side_effects`,
+`no_state_change_on_failed_step`, `no_duplicate_business_effect`, `no_replayed_authority`, `no_wrong_tenant_consume`,
+`no_digest_mismatch_consume`, `no_expired_consume`, `no_forbidden_allowed`, `no_specification_mismatch`,
+`no_duplicate_state_change`, `no_unconsumed_approval_used`, and `controls_detected`. Efficiency stays advisory.
+
+Limits: the effect store is a synthetic table in a disposable database; the approval gate is a mock; one crash point is injected
+(after the effect commit, before the success record). Other crash points (before the commit, during the recovery) are not
+covered by this version.
