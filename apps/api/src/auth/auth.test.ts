@@ -463,6 +463,64 @@ describe('authenticated grounded document analysis boundary', () => {
     expect(analyze).toHaveBeenCalledOnce();
   });
 
+  describe('context assembly flag on the grounded route', () => {
+    const twoRows = (fixture: ReturnType<typeof fakePool>) => {
+      fixture.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM aegis.memberships')) return { rows: [{ role: 'reader' }] };
+        if (sql.includes('SELECT *')) return { rows: [{ id, tenant_id: tenant, synthetic_case_id: 'SYNTHETIC-LOGIN-001', status: 'open',
+          created_at: new Date('2026-01-01T00:00:00Z'), updated_at: new Date('2026-01-01T00:00:00Z') }] };
+        if (sql.includes('WITH parsed')) return { rows: [
+          { chunk_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', source_identity: 'SYNTHETIC-NORTH-LOGIN', document_version: 1, position: 0,
+            title: 'Synthetic login guide', content: 'Use a human reviewer for a synthetic sign-in interruption and record the time window.', rank: 0.9 },
+          { chunk_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', source_identity: 'SYNTHETIC-NORTH-RECOVERY', document_version: 1, position: 0,
+            title: 'Synthetic recovery guide', content: 'Verify the account through the established human support process before any change.', rank: 0.5 },
+        ] };
+        return { rows: [] };
+      });
+    };
+    const capture = () => {
+      const seen: { sources: number }[] = [];
+      const analyze = vi.fn(async (input: Parameters<GroundedAnalysisProvider['analyze']>[0]) => {
+        seen.push({ sources: input.sources.length });
+        return { output: { ...output, citations: [input.sources[0]!.citationId] }, metrics: { latencyMs: 1, promptTokens: 1, generatedTokens: 1 } };
+      });
+      return { analyze, seen, provider: { model: 'synthetic-grounded-model:1b', analyze } };
+    };
+
+    it('is unchanged when off: the provider receives every retrieved source', async () => {
+      const fixture = fakePool(); twoRows(fixture);
+      const { seen, provider } = capture();
+      const app = createApp({ authConfig: config, testDependencies: { keyResolver: resolver, pool: fixture.pool, groundedAnalysisProvider: provider },
+        contextAssembly: { enabled: false, budgetTokens: 1500, reservedOutputTokens: 512 } });
+      apps.push(app);
+      const reply = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+      expect(reply.statusCode).toBe(200);
+      expect(seen).toEqual([{ sources: 2 }]);
+    });
+
+    it('when on with a tight budget: the provider receives only the sources that fit, in retrieval order', async () => {
+      const fixture = fakePool(); twoRows(fixture);
+      const { seen, provider } = capture();
+      const app = createApp({ authConfig: config, testDependencies: { keyResolver: resolver, pool: fixture.pool, groundedAnalysisProvider: provider },
+        contextAssembly: { enabled: true, budgetTokens: 70, reservedOutputTokens: 0 } });
+      apps.push(app);
+      const reply = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+      expect(reply.statusCode).toBe(200);
+      expect(seen).toEqual([{ sources: 1 }]);
+    });
+
+    it('when on and nothing fits: abstains without calling the provider', async () => {
+      const fixture = fakePool(); twoRows(fixture);
+      const { analyze, provider } = capture();
+      const app = createApp({ authConfig: config, testDependencies: { keyResolver: resolver, pool: fixture.pool, groundedAnalysisProvider: provider },
+        contextAssembly: { enabled: true, budgetTokens: 5, reservedOutputTokens: 0 } });
+      apps.push(app);
+      const reply = await app.inject({ method: 'POST', url: path, headers: { authorization: await bearer() } });
+      expect(reply.json()).toMatchObject({ groundingState: 'INSUFFICIENT_EVIDENCE', citations: [] });
+      expect(analyze).not.toHaveBeenCalled();
+    });
+  });
+
   it('rejects a citation ID replayed from a prior request and performs no case or document DML', async () => {
     const fixture = fakePool();
     const chunkId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
