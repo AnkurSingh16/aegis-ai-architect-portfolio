@@ -8,7 +8,11 @@ import type { RequestContext, ToolCall, ToolGateway } from '../security/tool-pol
 export interface ToolHandler<Input, Output> {
   /** Validates untrusted arguments into a typed input. Throws on invalid input. */
   readonly validate: (args: Readonly<Record<string, unknown>>) => Input;
-  readonly run: (input: Input) => Output;
+  /**
+   * Performs the tool. It may be asynchronous (for example a tenant-scoped database read). It receives the verified context the
+   * gateway authorised, so it can scope its work to that tenant. It must not accept identity or scopes from its input.
+   */
+  readonly run: (input: Input, context: RequestContext) => Output | Promise<Output>;
 }
 
 export type DispatchResult<Output = unknown> =
@@ -33,7 +37,7 @@ export function createToolDispatcher(
       const handler = handlers.get(call.toolName);
       if (!handler) return { status: 'denied', reasons: ['unknown_tool'] };
       try {
-        const output = handler.run(handler.validate(call.arguments));
+        const output = await handler.run(handler.validate(call.arguments), context);
         const accepted = gateway.acceptResult(decision.runId, context.tenantId);
         if (!accepted.accepted) return { status: 'denied', reasons: [accepted.reason ?? 'result_unknown_run'] };
         return { status: 'ok', output, runId: decision.runId };
