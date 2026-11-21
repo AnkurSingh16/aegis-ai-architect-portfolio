@@ -22,15 +22,16 @@ export interface DelegationLink {
   readonly effectiveScopes: readonly string[];
 }
 
+/** The hops from the root to the agent that currently holds the branch. Each branch of a tree has its own chain. */
 export type DelegationChain = readonly DelegationLink[];
 
-/** Global bounds for one execution. They apply across all agents, not per loop. */
+/** Global bounds for one execution. They apply across all branches and all agents, not per chain or per loop. */
 export interface ExecutionLimits {
-  /** Maximum number of hops from the root agent. */
+  /** Maximum number of hops on any one branch, from the root. */
   readonly maxDepth: number;
-  /** Maximum number of delegations in one execution, across all branches. */
+  /** Maximum number of delegations issued in the whole execution, across every branch. */
   readonly maxDelegations: number;
-  /** Maximum number of steps (tool requests or results) in one execution. */
+  /** Maximum number of accepted envelopes in the whole execution. */
   readonly maxSteps: number;
 }
 
@@ -44,6 +45,39 @@ export interface ExecutionRecord {
   readonly principalScopes: readonly string[];
   readonly rootAgent: string;
   readonly limits: ExecutionLimits;
+}
+
+/**
+ * Mutable-looking but immutable value that carries the global counters and the grants for one execution. It is the only place the
+ * budgets live. A new branch starts from the same state, so it cannot reset a budget.
+ */
+export interface ExecutionState {
+  readonly delegationsIssued: number;
+  readonly stepsTaken: number;
+  /** Grants issued by the orchestrator and not yet consumed. */
+  readonly openGrants: readonly Grant[];
+  /** Grants that were consumed. Kept whole, so a replayed envelope is recognised and refused as a replay. */
+  readonly consumedGrants: readonly Grant[];
+}
+
+/**
+ * The orchestrator's authorisation of one concrete action: this destination, this action, these argument digests, on this chain, for
+ * this principal and tenant. Only a grant authorises an envelope. A message can never create one.
+ */
+export interface Grant {
+  readonly grantId: string;
+  readonly kind: 'request' | 'result';
+  readonly executionId: string;
+  readonly tenantId: string;
+  readonly principalRef: string;
+  readonly chainDigest: string;
+  readonly depth: number;
+  readonly from: string;
+  readonly to: string;
+  readonly action: string;
+  readonly argumentsDigest: string;
+  /** The scopes the action needs. Checked against the destination's effective scopes when the grant is issued. */
+  readonly requiredScopes: readonly string[];
 }
 
 /** The only fields an envelope may carry. Authority is never a field here. */
@@ -60,3 +94,10 @@ export interface TypedEnvelope {
   /** Digest of the action arguments. The arguments themselves never travel in an envelope. */
   readonly argumentsDigest: string;
 }
+
+export const initialExecutionState: ExecutionState = {
+  delegationsIssued: 0,
+  stepsTaken: 0,
+  openGrants: [],
+  consumedGrants: [],
+};
