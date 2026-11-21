@@ -8,6 +8,8 @@ import { withAuthenticatedTransaction } from '../auth/transaction.js';
 import { createDurableStore } from './durable-store.js';
 import { runTriageWorkflow } from './triage-workflow.js';
 import { parseTraceparent } from './trace-context.js';
+import { createWorkflowMetrics, type WorkflowMetrics } from './workflow-metrics.js';
+import { buildSpan, newTraceId, type SpanSink } from '../observability/tracing.js';
 
 const uuid = { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' };
 
@@ -52,7 +54,16 @@ interface RequeueBody { reason: string }
  * - POST /api/tenants/:tenantId/workflows/dead-letters/:id/requeue   operators only: one more attempt, with a reason, audited
  * Each response carries x-correlation-id: the caller's valid id, or the request id.
  */
-export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool: Pool, verify: VerifyToken): Promise<void> {
+export interface WorkflowRouteDeps {
+  /** The collector the triage route records into. One per process; the observability route reads it. */
+  readonly metrics?: WorkflowMetrics;
+  /** Optional span sink (OTLP exporter when configured). Null or absent means nothing is exported. */
+  readonly spanSink?: SpanSink | null;
+}
+
+export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool: Pool, verify: VerifyToken,
+  deps: WorkflowRouteDeps = {}): Promise<void> {
+  const metrics = deps.metrics ?? createWorkflowMetrics();
   const principals = new WeakMap<FastifyRequest, VerifiedPrincipal>();
   const correlations = new WeakMap<FastifyRequest, string>();
   const runTenant = tenantRunner(pool);
@@ -103,6 +114,9 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
     const principal = await authorise(request, tenantId);
 
     const idempotencyKey = String(request.headers['idempotency-key']).toLowerCase();
+    const incomingTrace = parseTraceparent(request.headers.traceparent as string | undefined);
+    const spanTraceId = newTraceId(incomingTrace);
+    const spanStart = Date.now();
     const result = await runTriageWorkflow({
       store, dispatcher, tenantId, idempotencyKey,
       args: { caseId: request.body.caseId },
@@ -111,7 +125,9 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       },
       owner: `api-${request.id}`,
       correlationId: correlations.get(request),
-      traceId: parseTraceparent(request.headers.traceparent as string | undefined),
+      traceId: incomingTrace,
+      metrics,
+      databaseTime: (tenant) => store.databaseNow(tenant),
       log: (record) => console.info(JSON.stringify({ ...record, requestId: request.id })),
       policy, leaseMs: LEASE_MS, timeoutMs: TIMEOUT_MS, clock: () => new Date(),
     });
@@ -120,6 +136,16 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
       event: 'workflow_request', requestId: request.id, correlationId: correlations.get(request), outcome: 'success',
       executionId: result.executionId, created: result.created, driverStatus: result.driver.status,
     }));
+    try {
+      // Attributes are allowlisted in buildSpan. Case ids, arguments and output are never attached to the span.
+      deps.spanSink?.export(buildSpan('workflow.triage', spanTraceId, spanStart, Date.now(), {
+        outcome: result.driver.status,
+        ...('attempt' in result.driver ? { attempt: result.driver.attempt } : {}),
+        durationMs: Date.now() - spanStart,
+      }));
+    } catch {
+      // Tracing never changes the response.
+    }
     return reply.code(result.created ? 201 : 200).send({
       executionId: result.executionId,
       created: result.created,

@@ -14,6 +14,9 @@ import { createDatabasePool, verifyRuntimeRole } from './storage/database.js';
 import { createOllamaProvider, resolveOllamaConfig, type AnalysisProvider } from './ai/provider.js';
 import { createGroundedOllamaProvider } from './ai/grounded-provider.js';
 import type { GroundedAnalysisProvider } from './ai/grounded-analysis.js';
+import { createWorkflowMetrics } from './workflow/workflow-metrics.js';
+import { metricsEndpointEnabled, registerMetricsRoute } from './observability/metrics-endpoint.js';
+import { tracingFromEnv } from './observability/tracing.js';
 
 export interface AppOptions {
   authConfig?: AuthConfig;
@@ -48,7 +51,13 @@ export function createApp(options: AppOptions = {}) {
     });
     app.addHook('onClose', closeDatabase);
     app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider, groundedAnalysisProvider));
-    app.register(async (workflowApp) => registerProtectedWorkflowRoutes(workflowApp, pool, verify));
+    // One collector per process: the triage route records into it, and the metrics endpoint (off by default) reads it.
+    const processMetrics = createWorkflowMetrics();
+    app.register(async (workflowApp) => registerProtectedWorkflowRoutes(workflowApp, pool, verify, { metrics: processMetrics, spanSink }));
+    if (metricsEndpointEnabled(process.env)) {
+      app.register(async (metricsApp) => registerMetricsRoute(metricsApp, verify, processMetrics));
+    }
+    const spanSink = tracingFromEnv(process.env);
     app.register(async (answerApp) => registerProtectedAnswerRoutes(answerApp, pool, verify));
   }
 

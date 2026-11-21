@@ -9,6 +9,7 @@ import { registerProtectedWorkflowRoutes } from './workflow-routes.js';
 import { createDurableStore } from './durable-store.js';
 import type { TenantQueryable } from '../security/tool-approval-store.js';
 import { runDurableAttempt } from './durable-driver.js';
+import { createWorkflowMetrics } from './workflow-metrics.js';
 
 // Real PostgreSQL + Fastify injection tests for the authenticated triage workflow route.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
@@ -333,3 +334,51 @@ describe('POST /api/tenants/:tenantId/workflows/dead-letters/:executionId/requeu
     expect((await requeue(tenantNorth, randomUUID(), 'Bearer operator', { reason: 'retry' })).statusCode).toBe(404);
   });
 });
+
+describe('the triage route records into the metrics collector it was given', () => {
+  it('counts a real durable triage attempt', async () => {
+    const metrics = createWorkflowMetrics();
+    const scoped = Fastify();
+    await scoped.register(async (inner) => registerProtectedWorkflowRoutes(inner, pool, verify, { metrics }));
+    await scoped.ready();
+    try {
+      const before = metrics.snapshot().attempts.succeeded;
+      const response = await scoped.inject({
+        method: 'POST', url: `/api/tenants/${tenantNorth}/workflows/triage`,
+        headers: { authorization: 'Bearer reader', 'content-type': 'application/json', 'idempotency-key': key() },
+        payload: { caseId: 'SYNTHETIC-LOGIN-001' },
+      });
+      expect(response.statusCode).toBeLessThan(300);
+      expect(metrics.snapshot().attempts.succeeded).toBe(before + 1);
+    } finally {
+      await scoped.close();
+    }
+  });
+});
+
+describe('the triage span carries the trace id and no case data', () => {
+  it('exports one span with the incoming trace id and allowlisted attributes only', async () => {
+    const spans: { traceId: string; name: string; attributes: Record<string, unknown> }[] = [];
+    const scoped = Fastify();
+    await scoped.register(async (inner) => registerProtectedWorkflowRoutes(inner, pool, verify,
+      { metrics: createWorkflowMetrics(), spanSink: { export: (span) => { spans.push({ ...span }); } } }));
+    await scoped.ready();
+    const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+    try {
+      const response = await scoped.inject({
+        method: 'POST', url: `/api/tenants/${tenantNorth}/workflows/triage`,
+        headers: { authorization: 'Bearer reader', 'content-type': 'application/json', 'idempotency-key': key(),
+          traceparent: `00-${traceId}-00f067aa0ba902b7-01` },
+        payload: { caseId: 'SYNTHETIC-LOGIN-001' },
+      });
+      expect(response.statusCode).toBeLessThan(300);
+      expect(spans).toHaveLength(1);
+      expect(spans[0]).toMatchObject({ name: 'workflow.triage', traceId });
+      expect(JSON.stringify(spans[0])).not.toContain('SYNTHETIC-LOGIN-001');
+      expect(Object.keys(spans[0]!.attributes).every((k) => ['outcome', 'attempt', 'durationMs'].includes(k))).toBe(true);
+    } finally {
+      await scoped.close();
+    }
+  });
+});
+

@@ -52,6 +52,11 @@ export interface DriverInput {
   readonly leaseMs: number;
   readonly timeoutMs: number;
   readonly clock: () => Date;
+  /**
+   * Optional. When set, lease times and retry times come from PostgreSQL's clock instead of `clock`, so worker clock skew
+   * cannot change lease or retry decisions. Production passes the store's databaseNow.
+   */
+  readonly databaseTime?: (tenantId: string) => Promise<Date>;
   readonly approvalGate?: ApprovalGate;
   /** Optional. Receives one record per call. A logging failure never changes the outcome. */
   readonly log?: DriverLog;
@@ -123,7 +128,7 @@ export async function runDurableAttempt(input: DriverInput): Promise<DriverOutco
 async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   validateRetryPolicy(input.policy);
   const { store, tenantId, executionId, owner } = input;
-  const now = input.clock();
+  const now = input.databaseTime ? await input.databaseTime(tenantId) : input.clock();
   const leaseExpiresAt = addMs(now, input.leaseMs);
   const claimed: ExecutionRow | null = await store.claim(executionId, tenantId, owner, now, leaseExpiresAt);
   if (!claimed) return { status: 'not_claimable' };
@@ -182,7 +187,7 @@ async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   } catch (error) {
     const isTimeout = error instanceof Error && error.name === 'TimeoutError';
     const failure = isTimeout ? 'timeout' : classifyFailure(error);
-    const done = input.clock();
+    const done = input.databaseTime ? await input.databaseTime(tenantId) : input.clock();
     if (await store.isCancelRequested(executionId, tenantId)) {
       await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'cancelled', attempts: attempt,
         nextAttemptAt: null, lastErrorClass: 'cancelled', keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
@@ -203,7 +208,7 @@ async function attemptOnce(input: DriverInput): Promise<DriverOutcome> {
   }
 
   // The side effect completed. Success is recorded even if cancellation was requested meanwhile.
-  const done = input.clock();
+  const done = input.databaseTime ? await input.databaseTime(tenantId) : input.clock();
   await store.transition({ executionId, tenantId, owner, expectedVersion: version, state: 'succeeded', attempts: attempt,
     nextAttemptAt: null, lastErrorClass: null, keepLease: false, leaseExpiresAt: addMs(done, input.leaseMs), now: done });
   return { status: 'succeeded', attempt };
