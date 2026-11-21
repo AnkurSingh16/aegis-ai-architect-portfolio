@@ -17,10 +17,13 @@ import type { GroundedAnalysisProvider } from './ai/grounded-analysis.js';
 import { createWorkflowMetrics } from './workflow/workflow-metrics.js';
 import { metricsEndpointEnabled, registerMetricsRoute } from './observability/metrics-endpoint.js';
 import { tracingFromEnv } from './observability/tracing.js';
+import { type ContextAssemblyOptions, contextAssemblyFromEnv } from './context/grounded-source-selection.js';
 
 export interface AppOptions {
   authConfig?: AuthConfig;
   testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool; analysisProvider?: AnalysisProvider; groundedAnalysisProvider?: GroundedAnalysisProvider };
+  /** Overrides the environment. Off unless AEGIS_CONTEXT_ASSEMBLER=enabled. */
+  contextAssembly?: ContextAssemblyOptions;
 }
 
 export function createApp(options: AppOptions = {}) {
@@ -50,7 +53,8 @@ export function createApp(options: AppOptions = {}) {
       catch { await closeDatabase(); throw new Error('Protected case storage initialization failed.'); }
     });
     app.addHook('onClose', closeDatabase);
-    app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider, groundedAnalysisProvider));
+    app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider, groundedAnalysisProvider,
+      options.contextAssembly ?? contextAssemblyFromEnv(process.env)));
     // One collector per process: the triage route records into it, and the metrics endpoint (off by default) reads it.
     const processMetrics = createWorkflowMetrics();
     app.register(async (workflowApp) => registerProtectedWorkflowRoutes(workflowApp, pool, verify, { metrics: processMetrics, spanSink }));

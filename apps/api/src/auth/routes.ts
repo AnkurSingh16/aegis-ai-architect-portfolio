@@ -9,6 +9,7 @@ import { withAuthenticatedTransaction } from './transaction.js';
 import { AnalysisDisabledError, AnalysisUnavailableError, type AnalysisProvider } from '../ai/provider.js';
 import { GroundedAnalysisFailureError, type GroundedAnalysisProvider, type GroundedSource } from '../ai/grounded-analysis.js';
 import { retrieveDocumentChunks } from '../documents/retrieval.js';
+import { type ContextAssemblyOptions, PROVISIONAL_CONTEXT_BUDGET, selectGroundedSources } from '../context/grounded-source-selection.js';
 
 const uuid = { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' };
 const tenantParams = { type: 'object', required: ['tenantId'], additionalProperties: false, properties: { tenantId: uuid } };
@@ -22,7 +23,8 @@ type TenantParams = { tenantId: string };
 type CaseParams = TenantParams & { caseId: string };
 
 export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Pool, verify: VerifyToken,
-  analysisProvider?: AnalysisProvider, groundedAnalysisProvider?: GroundedAnalysisProvider): Promise<void> {
+  analysisProvider?: AnalysisProvider, groundedAnalysisProvider?: GroundedAnalysisProvider,
+  contextAssembly: ContextAssemblyOptions = { enabled: false, ...PROVISIONAL_CONTEXT_BUDGET }): Promise<void> {
   const principals = new WeakMap<FastifyRequest, VerifiedPrincipal>();
   app.addHook('onRequest', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -175,14 +177,21 @@ export async function registerProtectedCaseRoutes(app: FastifyInstance, pool: Po
 
       const citationSources: GroundedSource[] = context.retrieved.map((source) => ({ citationId: randomUUID(), title: source.title,
         sourceIdentity: source.sourceIdentity, version: source.version, position: source.position, content: source.content }));
-      const citationMap = new Map(citationSources.map((source) => [source.citationId, source]));
+      // Off by default: the model sees every retrieved source, as before. On: the assembler selects what fits the budget.
+      const modelSources = contextAssembly.enabled
+        ? selectGroundedSources(citationSources, context.stored.synthetic_case_id, contextAssembly).sources : citationSources;
+      if (modelSources.length === 0) {
+        return { groundingState: 'INSUFFICIENT_EVIDENCE', caseId: context.stored.id, citations: [], humanReviewRequired: true,
+          message: 'Available synthetic documents did not provide sufficient evidence.' };
+      }
+      const citationMap = new Map(modelSources.map((source) => [source.citationId, source]));
       const controller = new AbortController();
       const cancelIfDisconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
       request.raw.once('aborted', cancelIfDisconnected);
       reply.raw.once('close', cancelIfDisconnected);
       try {
         const result = await provider.analyze({ caseStatus: context.stored.status,
-          caseType: context.stored.synthetic_case_id, sources: citationSources }, controller.signal, request.id);
+          caseType: context.stored.synthetic_case_id, sources: modelSources }, controller.signal, request.id);
         if (controller.signal.aborted) return;
         if (result.output.groundingState === 'INSUFFICIENT_EVIDENCE') {
           return { groundingState: 'INSUFFICIENT_EVIDENCE', caseId: context.stored.id, citations: [], humanReviewRequired: true,
