@@ -1,0 +1,10 @@
+{
+  "trustDomain": "aegis.local",
+  "comment": "One entry per agent workload. Each entry is bound to the agent of that workload's own node (parent) and to the Unix UID the workload runs as. The probe node has no entry on purpose: it must be refused.",
+  "entries": [
+    { "node": "orchestrator", "spiffeId": "spiffe://aegis.local/workload/orchestrator", "uid": 1001, "x509SvidTtlSeconds": 300 },
+    { "node": "triage", "spiffeId": "spiffe://aegis.local/workload/triage", "uid": 1002, "x509SvidTtlSeconds": 300 },
+    { "node": "retrieval", "spiffeId": "spiffe://aegis.local/workload/retrieval", "uid": 1003, "x509SvidTtlSeconds": 300 },
+    { "node": "reviewer", "spiffeId": "spiffe://aegis.local/workload/reviewer", "uid": 1004, "x509SvidTtlSeconds": 300 }
+  ]
+}

@@ -123,3 +123,20 @@ The browser suite exercises the real login page at `localhost:8180`, PKCE, the c
 - Database: a managed PostgreSQL with TLS; the host guard then needs a reviewed production path, which this change does not provide.
 - Keycloak: replaced by the chosen production identity platform; no code change, only configuration and the test-client removal.
 - Images: pushed to a registry under a reviewed tag and digest, not built on the workstation.
+
+## SPIRE workload identity (P3)
+
+The stack also runs a SPIRE server and one SPIRE agent per agent workload (orchestrator, triage, retrieval, reviewer). Workloads obtain
+X.509 SVIDs through the Workload API and talk over mutual TLS with explicit peer policy. Credentials live outside the repository, in
+`AEGIS_SPIRE_SECRETS_DIR`, which `node scripts/spire-bootstrap.mjs` creates (also run by `node scripts/local-stack.mjs up`).
+
+```bash
+node scripts/spire-bootstrap.mjs           # credentials outside the repository, start spire-server, write the trust bundle
+node scripts/spire-register.mjs            # workload entries (idempotent)
+npm run test:spire                         # identity, mTLS allow and refuse, adversarial cases, rotation
+npm run test:spire:outage                  # also expiry, server and agent outage, recovery (about 15 minutes)
+```
+
+The acceptance-only services (an unregistered probe, a same-UID intruder and an impersonating server) start only with
+`docker compose -p aegis-local --env-file .env.local --profile spire-tests up -d probe spire-agent-probe intruder rogue`.
+Details, limits and the production migration design: `docs/SPIRE-WORKLOAD-IDENTITY.md`.

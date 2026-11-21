@@ -43,3 +43,25 @@ groups:
         for: 2m
         labels: { severity: warning }
         annotations: { summary: "The Collector cannot deliver telemetry to a backend (retries in progress or exhausted)" }
+  - name: aegis-workload-identity
+    rules:
+      - alert: AegisSpireServerDown
+        expr: up{job="spire-server"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "SPIRE server not scrapeable. No new or renewed workload identities can be issued.", runbook: "docs/SPIRE-WORKLOAD-IDENTITY.md#runbook" }
+      - alert: AegisSpireAgentDown
+        expr: up{job="spire-agents"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "A SPIRE agent is not scrapeable. The workload behind it cannot renew its SVID.", runbook: "docs/SPIRE-WORKLOAD-IDENTITY.md#runbook" }
+      - alert: AegisWorkloadSvidExpiringSoon
+        expr: aegis_workload_svid_expires_at_seconds - time() < 90
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "A workload SVID expires within 90 s: renewal is not succeeding.", runbook: "docs/SPIRE-WORKLOAD-IDENTITY.md#runbook" }
+      - alert: AegisMtlsRefusalsPresent
+        expr: sum by (direction) (rate(aegis_workload_mtls_requests_total{outcome="refused"}[5m])) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations: { summary: "mTLS requests are being refused (unauthorised peer, wrong peer identity, or missing identity). Expected during acceptance tests.", runbook: "docs/SPIRE-WORKLOAD-IDENTITY.md#runbook" }

@@ -74,10 +74,27 @@ async function waitForRealm(env, timeoutMs = 180000) {
   return false;
 }
 
+// Runs a helper script of this repository and returns its exit status.
+function runScript(name) {
+  return spawnSync(process.execPath, [join(root, 'scripts', name)], { cwd: root, stdio: 'inherit' }).status ?? 1;
+}
+
 async function up() {
   const env = requireEnv();
+  // SPIRE first: the agents bind-mount the trust bundle and node credentials, which the bootstrap creates and writes from the running server.
+  if (runScript('spire-bootstrap.mjs') !== 0) return 1;
   const result = compose(['up', '-d', '--build', '--wait']);
   if ((result.status ?? 1) !== 0) return result.status ?? 1;
+  // Registration needs the four agents attested. Retry briefly while they start; the script itself never overwrites an entry.
+  let registered = false;
+  for (let attempt = 0; attempt < 12 && !registered; attempt += 1) {
+    registered = runScript('spire-register.mjs') === 0;
+    if (!registered) await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  if (!registered) {
+    console.error('SPIRE registration did not complete. Check the spire-agent-* services.');
+    return 1;
+  }
   if (!(await waitForRealm(env))) {
     console.error('The aegis realm was not served within the timeout. Check the keycloak service logs.');
     return 1;

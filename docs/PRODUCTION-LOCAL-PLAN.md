@@ -230,15 +230,15 @@ Additional constraints recorded from the approval:
 - Images are official and pinned by digest: `node@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54` (node 24 bookworm slim, arm64 verified) and `nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10` (nginx 1.27 alpine, arm64 verified).
 - The existing containers (`agentic-rag-chatbot-postgres-1`, `local-ai-assistant-searxng-1`, `ragverify-postgres-1`, and the exited `aegis-ai-portfolio-git-postgres-1`) are not stopped, reused or removed. The compose project is `aegis-local`, with its own network and volume.
 
-## 9. Status at the latest checkpoint (local-platform-p1)
+## 9. Status at the latest checkpoint (local-platform-p3)
 
 | Step | State | Evidence |
 | --- | --- | --- |
 | P1 containerised platform | Implemented and operational locally | `docs/LOCAL-PLATFORM.md` |
 | P2 local OIDC, issuer and key handling | Implemented and operational locally | `scripts/e2e-auth.mjs`, `docs/KEY-ROTATION-POLICY.md` |
 | P2 web sign-in (provider-neutral OIDC, PKCE, runtime configuration) | Implemented and verified in a real browser against the production build | `docs/WEB-AUTHENTICATION.md`, `apps/web/e2e-stack/` (10 tests) |
-| P7 OpenTelemetry and backends (SDK traces, metrics and logs; Collector; Tempo, Loki, Prometheus, Grafana; alerts; outage checks) | Implemented and verified locally, including a browser request searchable in Tempo and its log in Loki | `docs/OBSERVABILITY.md`, `scripts/telemetry-check.mjs`, `scripts/observability-check.mjs`, `apps/web/e2e-stack/observability.spec.ts` |
-| P3 SPIRE workload identity and mTLS | Not started. Blocked on an approval decision: the Docker workload attestor needs Docker API access (see the checkpoint) | — |
+| P7 OpenTelemetry and backends (SDK traces, metrics and logs; Collector; Tempo, Loki, Prometheus, Grafana; alerts; outage checks; workload identity telemetry) | Implemented and verified locally. Open: Tempo discards an incomplete WAL block on restart (data loss, characterised in `docs/OBSERVABILITY.md` section 10; mitigation not yet applied) | `docs/OBSERVABILITY.md`, `scripts/telemetry-check.mjs`, `scripts/observability-check.mjs`, `apps/web/e2e-stack/observability.spec.ts` |
+| P3 SPIRE workload identity and mTLS (socket-free: x509pop node attestation, Unix workload attestation, explicit peer policy) | Implemented and verified locally with real SVIDs and mutual TLS between four independently running workloads. Not production-equivalent: see `docs/SPIRE-WORKLOAD-IDENTITY.md` sections 9 and 10 | `docs/SPIRE-WORKLOAD-IDENTITY.md`, `scripts/spire-acceptance.mjs`, `infra/spire/workload/policy_test.go` |
 | P4 durable multi-agent persistence, P5 outbox | Not started | — |
 
 Register statuses are unchanged. C6 remains PARTIAL with independent review pending. C8 remains MISSING.

@@ -1,0 +1,9 @@
+{
+  "trustDomain": "aegis.local",
+  "services": {
+    "spiffe://aegis.local/workload/orchestrator": { "allowClients": [] },
+    "spiffe://aegis.local/workload/triage": { "allowClients": ["spiffe://aegis.local/workload/orchestrator"] },
+    "spiffe://aegis.local/workload/retrieval": { "allowClients": ["spiffe://aegis.local/workload/orchestrator", "spiffe://aegis.local/workload/triage"] },
+    "spiffe://aegis.local/workload/reviewer": { "allowClients": ["spiffe://aegis.local/workload/orchestrator"] }
+  }
+}
