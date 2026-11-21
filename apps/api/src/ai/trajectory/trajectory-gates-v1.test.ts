@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { computeMetrics, evaluateGates, GATES_V1, type RecordedRun } from './trajectory-evaluation.js';
-import { runScenario, SCENARIOS } from './trajectory-harness.js';
+import { computeMetrics, evaluateGates, GATES_V1, type RecordedRun } from './trajectory-evaluation-v1.js';
+import { runScenario, SCENARIOS } from './trajectory-harness-v1.js';
 
 // C9 trajectory evaluation. Deterministic, mocked providers only: the real gateway and dispatcher run over synthetic tools.
 // The first block runs the scenario set and gates it. The later blocks show that each gate actually fails on a breach.
