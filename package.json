@@ -3,8 +3,13 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "engines": {"node": ">=24 <27"},
-  "workspaces": ["apps/api", "apps/web"],
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
   "scripts": {
     "dev": "concurrently -k -n API,WEB \"npm run dev -w apps/api\" \"npm run dev -w apps/web\"",
     "lint": "eslint .",
@@ -15,7 +20,10 @@
     "db:migrate": "npm run db:migrate -w apps/api",
     "cases": "npm run cases -w apps/api --",
     "memberships": "npm run memberships -w apps/api --",
-    "test:integration": "npm run test:integration -w apps/api"
+    "test:integration": "npm run test:integration -w apps/api",
+    "test:stack": "node scripts/stack-acceptance.mjs",
+    "test:availability": "node scripts/availability-policy-check.mjs",
+    "test:observability": "node scripts/observability-check.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

@@ -11,12 +11,22 @@ export function resolveFixture(value: string | undefined): DevelopmentFixture {
   return fixtures[value];
 }
 
-export function localDatabaseUrl(value: string | undefined): string {
+const LOOPBACK_HOSTS: readonly string[] = ['localhost', '127.0.0.1', '[::1]'];
+
+/**
+ * Accepts a PostgreSQL URL for local use only. Loopback hosts are always allowed. A named service host (for example the `postgres`
+ * service in the local compose project) is allowed only when AEGIS_ENVIRONMENT=local and the name appears in
+ * AEGIS_ALLOWED_DATABASE_HOSTS. Production database configuration is a separate, reviewed change and is not enabled here.
+ */
+export function localDatabaseUrl(value: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
   if (!value) throw new Error('A local database connection is required.');
   let url: URL;
   try { url = new URL(value); } catch { throw new Error('Invalid local database configuration.'); }
+  const namedServices = (env.AEGIS_ALLOWED_DATABASE_HOSTS ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  const hostAllowed = LOOPBACK_HOSTS.includes(url.hostname)
+    || (env.AEGIS_ENVIRONMENT === 'local' && namedServices.includes(url.hostname));
   if (!['postgres:', 'postgresql:'].includes(url.protocol)
-    || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    || !hostAllowed
     || url.search || url.hash || !url.pathname.slice(1)) {
     throw new Error('Only a loopback PostgreSQL database URL without query options is supported.');
   }

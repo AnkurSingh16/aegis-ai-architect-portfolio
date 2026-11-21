@@ -1,6 +1,60 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import type { AuthConfig } from './config.js';
-import { validateIssuer } from './config.js';
+import { validateIssuer, validateJwksUri } from './config.js';
+import { metrics } from '@opentelemetry/api';
+import { logEvent } from '../observability/log.js';
+
+// Identity outcomes as a metric. Attributes carry the outcome only: never a subject, a token or a claim value.
+const identityOutcomes = metrics.getMeter('aegis-api').createCounter('aegis.identity.verifications', {
+  description: 'Bearer token verification outcomes',
+});
+
+// Key-set policy. A retired signing key is refused once the cached set expires, so the cache bounds the window in which a retired key
+// is still accepted: 60 s. Refresh after an unknown key identifier is allowed once per 30 s. This is the cost of prompt key retirement:
+// at most one JWKS request per process per minute in steady state. Immediate revocation is not claimed (see docs/KEY-ROTATION-POLICY.md).
+const JWKS_OPTIONS = { timeoutDuration: 5000, cooldownDuration: 30000, cacheMaxAge: 60000 } as const;
+const DISCOVERY_TIMEOUT_MS = 5000;
+const DISCOVERY_MAX_BYTES = 65536;
+
+/**
+ * OpenID Connect Discovery: fetches `<issuer>/.well-known/openid-configuration`, requires the document's `issuer` to equal the configured
+ * issuer exactly, and returns its `jwks_uri` after the same URL rules as an explicit JWKS setting. Redirects are refused, so a
+ * response cannot move the key lookup to another origin.
+ */
+export async function discoverJwksUri(issuer: string, fetchImpl: typeof fetch = fetch): Promise<string> {
+  const response = await fetchImpl(`${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, {
+    redirect: 'error', signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS), headers: { accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error('Identity discovery failed.');
+  const body = await response.text();
+  if (body.length > DISCOVERY_MAX_BYTES) throw new Error('Identity discovery failed.');
+  const document = JSON.parse(body) as { issuer?: unknown; jwks_uri?: unknown };
+  if (document.issuer !== issuer || typeof document.jwks_uri !== 'string') throw new Error('Identity discovery failed.');
+  return validateJwksUri(document.jwks_uri);
+}
+
+/**
+ * Key lookup for the verifier. The key set is resolved on first use and retried after a failure. The JWKS fetch itself is delegated to
+ * jose, which verifies signatures with the returned keys. Nothing here weakens signature verification.
+ */
+export function keysFromProvider(config: { readonly issuer: string; readonly jwksUri?: string },
+  fetchImpl: typeof fetch = fetch): JWTVerifyGetKey {
+  let resolved: ReturnType<typeof createRemoteJWKSet> | Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
+  const jwks = () => {
+    if (!resolved) {
+      const uri = config.jwksUri === undefined ? discoverJwksUri(config.issuer, fetchImpl) : Promise.resolve(config.jwksUri);
+      resolved = uri.then((location) => createRemoteJWKSet(new URL(location), JWKS_OPTIONS)).catch((error: unknown) => {
+        resolved = undefined;
+        throw error;
+      });
+    }
+    return resolved;
+  };
+  return async (header, token) => {
+    const set = await jwks();
+    return set(header, token);
+  };
+}
 
 export class AuthorizationError extends Error {
   constructor(public readonly status: 401 | 403) {
@@ -31,13 +85,12 @@ function hasControlCharacter(value: string): boolean {
 }
 
 /** Key injection exists only in code-driven tests; configuration never enables a bypass. */
-export function createTokenVerifier(config: Pick<AuthConfig, 'issuer' | 'audience'>,
-  testKeyResolver?: JWTVerifyGetKey): VerifyToken {
+export function createTokenVerifier(config: Pick<AuthConfig, 'issuer' | 'audience'> & { jwksUri?: string },
+  testKeyResolver?: JWTVerifyGetKey, fetchImpl?: typeof fetch): VerifyToken {
   validateIssuer(config.issuer);
+  if (config.jwksUri !== undefined) validateJwksUri(config.jwksUri);
   if (testKeyResolver && process.env.NODE_ENV !== 'test') throw new Error('Test key resolver is unavailable.');
-  const keys = testKeyResolver ?? createRemoteJWKSet(new URL('.well-known/jwks.json', config.issuer), {
-    timeoutDuration: 5000, cooldownDuration: 30000, cacheMaxAge: 600000,
-  });
+  const keys = testKeyResolver ?? keysFromProvider(config, fetchImpl);
   return async (authorization) => {
     try {
       if (!authorization || authorization.length > 8192 || !/^Bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/i.test(authorization)) {
@@ -55,9 +108,12 @@ export function createTokenVerifier(config: Pick<AuthConfig, 'issuer' | 'audienc
         issuer: config.issuer, subject: payload.sub, scopes: new Set((payload.scope as string | undefined)?.split(' ') ?? []),
       });
       authenticated.add(principal);
+      identityOutcomes.add(1, { 'aegis.identity.outcome': 'verified' });
       return principal;
     } catch {
       // Signature, claim and JWKS failures deliberately share one public error.
+      identityOutcomes.add(1, { 'aegis.identity.outcome': 'refused' });
+      logEvent('identity.refused', { outcome: 'refused' });
       throw new AuthorizationError(401);
     }
   };

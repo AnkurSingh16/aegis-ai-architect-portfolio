@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+**/coverage
+.git
+.env*
+docs
+infra
+.claude
+.codex
+*.log

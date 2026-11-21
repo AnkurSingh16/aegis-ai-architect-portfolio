@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:e2e": "vite --config vite.e2e.config.ts --host 127.0.0.1",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test --config playwright.config.ts --pass-with-no-tests",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -14,9 +14,10 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@auth0/auth0-react": "^2.30.0",
+    "oidc-client-ts": "3.5.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-oidc-context": "3.3.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",

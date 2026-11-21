@@ -1,0 +1,5 @@
+# Tempo (official image, pinned by digest, arm64 verified) with the AEGIS configuration baked in.
+FROM grafana/tempo@sha256:785fd6c81d7f26ff0973208cd7093ac6030e13946c288612ff32f02416941d3a
+COPY tempo.yaml /etc/tempo/tempo.yaml
+ENTRYPOINT ["/tempo"]
+CMD ["-config.file=/etc/tempo/tempo.yaml"]

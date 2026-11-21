@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey, type JWTPayload } from 'jose';
 import type { Pool, PoolClient } from 'pg';
 import { createApp } from '../app.js';
-import { resolveAuthConfig, validateIssuer } from './config.js';
+import { resolveAuthConfig, validateIssuer, validateJwksUri } from './config.js';
 import { createTokenVerifier, requireScope, type VerifiedPrincipal } from './token.js';
 import { withAuthenticatedTransaction } from './transaction.js';
 import { parseMembershipCommand, provisionMembership } from './memberships.js';
@@ -83,10 +83,40 @@ describe('authentication configuration', () => {
     { AUTH0_ISSUER: issuer, AUTH0_AUDIENCE: ' bad audience ', DATABASE_URL: config.databaseUrl },
     { AUTH0_ISSUER: issuer, AUTH0_AUDIENCE: 'x'.repeat(256), DATABASE_URL: config.databaseUrl },
   ])('fails closed for partial or malformed settings %j', (env) => expect(() => resolveAuthConfig(env)).toThrow());
-  it.each(['bad', 'http://issuer.example/', 'https://issuer.example', 'https://issuer.example/path/',
-    'https://user:password@issuer.example/', 'https://issuer.example:444/', 'https://issuer.example/?jwks=other',
+  it.each(['bad', 'http://issuer.example/', 'https://issuer.example',
+    'https://user:password@issuer.example/', 'https://issuer.example/?jwks=other',
     'https://issuer.example/#other', 'https://localhost/', 'https://auth.localhost/', 'https://127.0.0.1/', 'https://[::1]/'])(
     'rejects unsafe or noncanonical issuer %s', (value) => expect(() => validateIssuer(value)).toThrow());
+  // OpenID Connect allows a path (realm-specific issuers) and an explicit port. Both are accepted, and the value must match exactly.
+  it.each(['https://issuer.example/realms/aegis', 'https://issuer.example:8443/realms/aegis', 'https://tenant.example.test/'])(
+    'accepts a canonical OIDC issuer %s', (value) => expect(validateIssuer(value, {})).toBe(value));
+  it('accepts plain HTTP for a loopback issuer only in a local deployment', () => {
+    expect(validateIssuer('http://localhost:8180/realms/aegis', { AEGIS_ENVIRONMENT: 'local' })).toBe('http://localhost:8180/realms/aegis');
+    expect(() => validateIssuer('http://localhost:8180/realms/aegis', {})).toThrow();
+    expect(() => validateIssuer('http://localhost:8180/realms/aegis', { AEGIS_ENVIRONMENT: 'production' })).toThrow();
+    expect(() => validateIssuer('http://keycloak:8080/realms/aegis', { AEGIS_ENVIRONMENT: 'local' })).toThrow();
+  });
+  it('never accepts plain HTTP for a non-loopback issuer, even locally', () => {
+    expect(() => validateIssuer('http://issuer.example/realms/aegis', { AEGIS_ENVIRONMENT: 'local' })).toThrow();
+  });
+  it('validates JWKS URLs: https in production, named local services only when declared', () => {
+    expect(validateJwksUri('https://issuer.example/protocol/openid-connect/certs', {})).toBeTruthy();
+    expect(() => validateJwksUri('http://issuer.example/certs', {})).toThrow();
+    expect(() => validateJwksUri('http://keycloak:8080/realms/aegis/protocol/openid-connect/certs',
+      { AEGIS_ENVIRONMENT: 'local' })).toThrow();
+    expect(validateJwksUri('http://keycloak:8080/realms/aegis/protocol/openid-connect/certs',
+      { AEGIS_ENVIRONMENT: 'local', AEGIS_ALLOWED_SERVICE_HOSTS: 'keycloak' })).toBeTruthy();
+    expect(() => validateJwksUri('https://user@issuer.example/certs', {})).toThrow();
+  });
+  it('resolves an explicit OIDC_JWKS_URI through resolveAuthConfig and refuses an unsafe one', () => {
+    const env = { OIDC_ISSUER: 'https://issuer.example/realms/aegis', OIDC_AUDIENCE: 'aegis-api', DATABASE_URL: 'postgres://u:p@127.0.0.1/db' };
+    expect(resolveAuthConfig({ ...env, OIDC_JWKS_URI: 'https://issuer.example/keys' })?.jwksUri).toBe('https://issuer.example/keys');
+    expect(() => resolveAuthConfig({ ...env, OIDC_JWKS_URI: 'http://issuer.example/keys' })).toThrow();
+  });
+  it('keeps the AUTH0_* names as aliases for the same settings', () => {
+    const alias = resolveAuthConfig({ AUTH0_ISSUER: 'https://tenant.example.test/', AUTH0_AUDIENCE: 'aegis-api', DATABASE_URL: 'postgres://u:p@127.0.0.1/db' });
+    expect(alias?.issuer).toBe('https://tenant.example.test/');
+  });
   it('never permits test dependency injection outside tests', () => {
     vi.stubEnv('NODE_ENV', 'production');
     expect(() => createTokenVerifier(config, resolver)).toThrow('Test key resolver');
@@ -139,16 +169,18 @@ describe('JWT validation with generated local signing keys', () => {
     await expect(verify(await bearer())).rejects.toMatchObject({ status: 401 });
     expect(await verify(`Bearer ${await sign(claims(), { key: otherKeys.privateKey, kid: 'rotated' })}`)).toMatchObject({ issuer });
   });
-  it('fetches only the issuer-derived JWKS URL and fails closed when its endpoint is unavailable', async () => {
+  it('fetches only the configured JWKS URL, ignores token-supplied key locations, and fails closed when unavailable', async () => {
+    // The JWKS location is explicit here. Discovery has its own tests in discovery.test.ts.
+    const explicit = { ...config, jwksUri: `${issuer}.well-known/jwks.json` };
     const jwks = { keys: [{ ...await exportJWK(keys.publicKey), kid: 'primary', alg: 'RS256' }] };
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(jwks), { status: 200, headers: { 'content-type': 'application/json' } }));
     vi.stubGlobal('fetch', fetch);
     const malicious = await sign(claims(), { header: { jku: 'https://attacker.invalid/keys', x5u: 'https://attacker.invalid/cert' } });
-    expect(await createTokenVerifier(config)(`Bearer ${malicious}`)).toMatchObject({ issuer });
+    expect(await createTokenVerifier(explicit)(`Bearer ${malicious}`)).toMatchObject({ issuer });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(String(fetch.mock.calls[0][0])).toBe(`${issuer}.well-known/jwks.json`);
     fetch.mockRejectedValue(new Error('SECRET-JWKS-OUTAGE'));
-    await expect(createTokenVerifier(config)(await bearer())).rejects.toMatchObject({ status: 401, message: 'Authentication required.' });
+    await expect(createTokenVerifier(explicit)(await bearer())).rejects.toMatchObject({ status: 401, message: 'Authentication required.' });
     expect(fetch.mock.calls.every(([url]) => String(url) === `${issuer}.well-known/jwks.json`)).toBe(true);
   });
   it.each([['read:cases'], { permissions: ['read:cases'] }, '', 'read:cases\twrite:cases', 'read:cases  write:cases'].map((scope) => ({ scope })))(
