@@ -51,7 +51,7 @@ const cosine = (a: readonly number[], b: readonly number[]): number => {
 };
 
 let chunkRows: { id: string; tenant_id: string; source_identity: string; content: string }[] = [];
-let vectors = new Map<string, number[]>();
+const vectors = new Map<string, number[]>();
 
 beforeAll(async () => {
   await migrateDatabase(adminUrl, runtimePassword, ingestionPassword);
