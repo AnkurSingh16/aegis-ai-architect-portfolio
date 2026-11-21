@@ -114,6 +114,28 @@ check('the unregistered probe node cannot call the mesh', probe(1002, 'probe', '
 check('impersonation: a certificate claiming triage\'s SPIFFE ID but signed by an untrusted CA is refused',
   probe(1001, 'orchestrator', 'https://rogue:8443', ID.triage).code === 3 && /unknown authority/.test(probe(1001, 'orchestrator', 'https://rogue:8443', ID.triage).out));
 
+// Agent-to-workload signal isolation (P3 follow-up, negative). The agent shares the workload's PID namespace so that it can attest by UID.
+// The agent image has no shell, so the probe runs in a throwaway container that joins the agent's PID namespace with the same user (root),
+// the same capability set (all dropped), no new privileges and no network. The kernel must refuse the signal and the /proc read because
+// the workload runs as a different UID. The workload must keep serving afterwards. This direction had no test before this check.
+const agentContainer = compose(['ps', '-q', 'spire-agent-triage']).trim();
+const triageImage = execFileSync('docker', ['inspect', '--format', '{{.Config.Image}}', compose(['ps', '-q', 'triage']).trim()], { encoding: 'utf8' }).trim();
+const signalProbe = `const fs = require('node:fs'); let pid = null;
+for (const d of fs.readdirSync('/proc').filter((x) => /^\\d+$/.test(x))) {
+  try { const c = fs.readFileSync('/proc/' + d + '/cmdline', 'utf8').split('\\0').join(' '); if (c.startsWith('/app/aegis-workload serve')) { pid = Number(d); break; } } catch {}
+}
+let signal; try { process.kill(pid, 'SIGTERM'); signal = 'sent'; } catch (e) { signal = e.code; }
+let environ; try { fs.readFileSync('/proc/' + pid + '/environ'); environ = 'read'; } catch (e) { environ = e.code; }
+console.log(JSON.stringify({ pid, signal, environ, uid: process.getuid() }));`;
+const probeOutput = execFileSync('docker', ['run', '--rm', '--pid', `container:${agentContainer}`, '--cap-drop', 'ALL',
+  '--security-opt', 'no-new-privileges:true', '--network', 'none', '--user', '0:0', '--entrypoint', 'node', triageImage, '-e', signalProbe],
+{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const probeResult = JSON.parse(probeOutput.split('\n').pop());
+check('the SPIRE agent cannot signal the triage workload process (root, all capabilities dropped)', probeResult.signal === 'EPERM',
+  `signal ${probeResult.signal}`);
+check('the SPIRE agent cannot read the triage workload environment through /proc', probeResult.environ === 'EACCES', `environ ${probeResult.environ}`);
+check('triage keeps serving after the agent signal attempts', probe(1001, 'orchestrator', 'https://triage:8443', ID.triage).code === 0);
+
 // ---- 4. Rotation without restart
 console.log('\n-- 4. Automatic SVID renewal without restart');
 const startedBefore = containerStartedAt('triage');

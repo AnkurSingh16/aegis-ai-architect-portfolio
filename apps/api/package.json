@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:execution": "vitest run --config vitest.integration.config.ts src/orchestration",
     "ai:evaluate:local": "tsx src/ai/evaluation/run-local-evaluation.ts",
     "ai:evaluate:grounded:local": "tsx src/ai/evaluation/run-grounded-local-evaluation.ts",
     "ai:evaluate:grounded:balanced:local": "tsx src/ai/evaluation/run-grounded-balanced-local-evaluation.ts",

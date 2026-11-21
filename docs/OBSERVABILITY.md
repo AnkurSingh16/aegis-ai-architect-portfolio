@@ -106,6 +106,26 @@ The browser suite includes `observability.spec.ts`: a real authenticated browser
     persistent (file-backed) so spans can be re-sent after a backend restart. The Collector queue is in-memory today, so a Collector restart
     also loses its queued batches.
   - Until a mitigation is verified, treat local traces as best-effort diagnostics, not an audit record.
+  - Re-investigation in P4 (2026-11-21), status **still open**:
+    - Log evidence, read in detail. An abandoned flush op (`Abandoning op in flush queue`) is not lost: its WAL block is replayed on the next
+      start and reloaded (for example block `0cd6030f`). The blocks removed on replay (`failed to replay block. removing.`) are different
+      directories, without `meta.json`, which were the head blocks still open at stop time. Their contents were not recovered, but the number
+      of spans in them was not measured in any incident.
+    - Tempo 2.9.5 configuration checked against the binary. There is no ingester option that flushes every open block on shutdown. The
+      relevant settings are `-shutdown-delay`, `-ingester.max-block-duration` (default 30 m) and `-ingester.max-block-bytes`. None is changed here.
+    - Collector queue: in-memory. A persistent queue needs the `file_storage` extension, which is in the contrib distribution and not in the
+      core distribution this stack uses. Not adopted.
+    - Reproduction: `scripts/tempo-wal-check.mjs` (`npm run test:tempo-wal`). It sends anonymous API requests (each stores one root span named
+      `GET`), stops and starts Tempo while the load runs, and measures loss end to end (responses minus traces stored after settling).
+      Results: unordered stop, 300 requests twice and 3,000 requests once: no loss and no replay removals in those three runs. The loss was
+      not reproduced at these volumes.
+    - Ordered stop (Collector first, then Tempo) was measured as a candidate and **rejected**: it lost 300 of 300 traces at 300 requests and
+      444 of 3,000 at 3,000 requests. The loss is on the API side. Its batch span processor still held spans when the Collector stopped, and
+      it does not retry long enough to survive the outage. Stopping the Collector first is only safe after the API has drained its queue,
+      which the stack does not enforce.
+    - Next steps, each needing its own evidence before adoption: find a load that does reproduce the removal (the loss was seen during the
+      repeated outage checks, not under this script's load); measure a shorter `max-block-duration` against that reproduction; measure the
+      API's span export retry window before choosing any ordering procedure.
 - **Telemetry is sent without authentication.** The OTLP receiver accepts any client on the compose network. Acceptable only in the local stack. Production needs authenticated, encrypted transport, which depends on workload identity (P3).
 - **Logs are not authenticated end to end.** Anyone with Grafana access can read the logs (allowlisted fields only). Grafana access control is the admin account in this stack.
 - **Old exporter.** The earlier hand-written OTLP JSON exporter (`observability/tracing.ts`, `AEGIS_TRACING`) is still wired to the workflow spans. It cannot run together with the SDK (`assertSingleTracingExporter` refuses startup). Migrating the workflow spans onto the SDK and removing the old exporter is the remaining step.
