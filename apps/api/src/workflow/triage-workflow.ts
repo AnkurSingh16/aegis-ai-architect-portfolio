@@ -1,5 +1,6 @@
 import type { ToolDispatcher, DispatchResult } from '../agents/tool-dispatcher.js';
-import type { RequestContext } from '../security/tool-policy-gateway.js';
+import { verifiedRequestContext } from '../security/tool-policy-gateway.js';
+import type { VerifiedPrincipal } from '../auth/token.js';
 import type { createDurableStore } from './durable-store.js';
 import { type DriverLog, type DriverOutcome, runDurableAttempt } from './durable-driver.js';
 import type { RetryPolicy } from './retry-policy.js';
@@ -21,7 +22,8 @@ export interface TriageWorkflowInput {
   readonly tenantId: string;
   readonly idempotencyKey: string;
   readonly args: Readonly<Record<string, unknown>>;
-  readonly context: Omit<RequestContext, 'now'>;
+  /** The verified authentication context. The workflow builds the tool context from it; a caller cannot supply identity. */
+  readonly principal: VerifiedPrincipal;
   readonly owner: string;
   /** Recorded on the execution when it is created. */
   readonly correlationId?: string;
@@ -71,7 +73,10 @@ export async function runTriageWorkflow(input: TriageWorkflowInput): Promise<Tri
     step: async () => {
       const result: DispatchResult = await input.dispatcher.dispatch(
         { toolName: 'case.triage', arguments: input.args },
-        { ...input.context, now: input.databaseTime ? await input.databaseTime(input.tenantId) : input.clock() },
+        verifiedRequestContext(input.principal, {
+          tenantId: input.tenantId, agentId: 'triage-agent',
+          now: input.databaseTime ? await input.databaseTime(input.tenantId) : input.clock(),
+        }),
       );
       if (result.status === 'ok') {
         output = result.output;

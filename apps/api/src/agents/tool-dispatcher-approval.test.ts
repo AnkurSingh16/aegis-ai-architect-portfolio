@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionDigest, type ApprovalRecord, type ApprovalStore, type RequestContext, ToolGateway } from '../security/tool-policy-gateway.js';
+import { actionDigest, type ApprovalRecord, type ApprovalStore, type RequestContext, ToolGateway, verifiedRequestContext } from '../security/tool-policy-gateway.js';
 import { createToolDispatcher, type ToolHandler } from './tool-dispatcher.js';
 
 /** Test-only side-effecting tool. It is NOT registered in production code. */
@@ -35,7 +35,10 @@ function dispatcherWith(approvals: ApprovalStore, sideEffects: { count: number }
   return createToolDispatcher(gateway, new Map([['case.close', handler]]));
 }
 
-const ctx: RequestContext = { tenantId: 'tenant-a', userId: 'user-1', userScopes: ['cases:write'], agentId: 'triage-agent', requestedBy: 'user-1', now: NOW };
+const ctx: RequestContext = verifiedRequestContext(
+  { issuer: 'https://issuer.example.test/', subject: 'user-1', scopes: new Set(['cases:write']) },
+  { tenantId: 'tenant-a', agentId: 'triage-agent', now: NOW },
+);
 const approved = (approvalId: string, overrides: Partial<ApprovalRecord> = {}): ApprovalRecord => ({
   approvalId, tenantId: 'tenant-a', actionDigest: digest, status: 'approved', approvedBy: 'reviewer-9',
   expiresAt: new Date(NOW.getTime() + 60_000), ...overrides,
@@ -55,8 +58,8 @@ describe('side-effecting tools behind approval (test-only registration)', () => 
     const dispatcher = dispatcherWith(approvals, effects);
     expect((await dispatcher.dispatch({ toolName: 'case.close', arguments: args, approvalId: 'apr-1' }, ctx)).status).toBe('ok');
     const replay = await dispatcher.dispatch({ toolName: 'case.close', arguments: args, approvalId: 'apr-1' }, ctx);
-    // The stored status is already 'consumed', so the state check refuses it before any consume is attempted.
-    expect(replay).toEqual({ status: 'denied', reasons: ['approval_not_approved'] });
+    // The stored status is already 'consumed', so the gateway reports approval_consumed before any consume is attempted.
+    expect(replay).toEqual({ status: 'denied', reasons: ['approval_consumed'] });
     expect(effects.count).toBe(1);
   });
 

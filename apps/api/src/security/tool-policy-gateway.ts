@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { RateLimiter } from './rate-limiter.js';
+import type { VerifiedPrincipal } from '../auth/token.js';
 
 /**
  * Deterministic tool-authorisation gateway for AI agents (C10).
@@ -18,7 +19,7 @@ export const DENY_REASONS = [
   'unknown_agent', 'inactive_agent', 'unknown_tool', 'tenant_mismatch', 'tenant_in_arguments',
   'missing_scope', 'privilege_in_arguments', 'secret_in_arguments', 'approval_required',
   'approval_digest_mismatch', 'approval_not_approved', 'approval_self_approved', 'approval_consumed',
-  'approval_expired', 'result_unknown_run', 'result_replayed', 'rate_limited',
+  'approval_expired', 'result_unknown_run', 'result_replayed', 'rate_limited', 'rate_limit_unavailable', 'unverified_context',
 ] as const;
 export type DenyReason = typeof DENY_REASONS[number];
 
@@ -42,6 +43,32 @@ export interface RequestContext {
   readonly agentId: string;
   readonly requestedBy: string;
   readonly now: Date;
+}
+
+/**
+ * Contexts that were built from a verified principal. The gateway accepts only these. A context assembled by hand, or by
+ * spreading another context, is not in this set and is denied (unverified_context). Identity and scopes therefore come
+ * from the authentication layer, not from whatever a caller puts in an object.
+ */
+const verifiedContexts = new WeakSet<RequestContext>();
+
+export interface ContextBinding {
+  readonly tenantId: string;
+  readonly agentId: string;
+  readonly now: Date;
+}
+
+export function verifiedRequestContext(principal: VerifiedPrincipal, binding: ContextBinding): RequestContext {
+  const context: RequestContext = {
+    tenantId: binding.tenantId,
+    userId: principal.subject,
+    userScopes: [...principal.scopes],
+    agentId: binding.agentId,
+    requestedBy: principal.subject,
+    now: binding.now,
+  };
+  verifiedContexts.add(context);
+  return context;
 }
 
 export interface ApprovalRecord {
@@ -127,16 +154,30 @@ export class ToolGateway {
     private readonly limiter?: RateLimiter,
   ) {}
 
+  private denied(call: ToolCall, context: RequestContext, digest: string, reasons: DenyReason[]): Decision {
+    return {
+      allowed: false, reasons, actionDigest: digest, effectiveScopes: [],
+      audit: {
+        tenantId: context.tenantId, userId: context.userId, agentId: context.agentId, toolName: call.toolName,
+        actionDigest: digest, outcome: 'deny', reasons, at: context.now.toISOString(),
+      },
+    };
+  }
+
   async authorise(call: ToolCall, context: RequestContext): Promise<Decision> {
     const digest = actionDigest(context.tenantId, call.toolName, call.arguments);
-    if (this.limiter !== undefined && !this.limiter.take(`${context.tenantId}|${context.agentId}`, context.now)) {
-      return {
-        allowed: false, reasons: ['rate_limited'], actionDigest: digest, effectiveScopes: [],
-        audit: {
-          tenantId: context.tenantId, userId: context.userId, agentId: context.agentId, toolName: call.toolName,
-          actionDigest: digest, outcome: 'deny', reasons: ['rate_limited'], at: context.now.toISOString(),
-        },
-      };
+    if (!verifiedContexts.has(context)) return this.denied(call, context, digest, ['unverified_context']);
+    // Only a registered, active agent can spend a token, so unknown agent ids cannot create limiter state.
+    const limited = this.agents.get(context.agentId);
+    if (this.limiter !== undefined && limited !== undefined && limited.active) {
+      let allowed: boolean;
+      try {
+        allowed = await this.limiter.take({ tenantId: context.tenantId, agentId: context.agentId, now: context.now });
+      } catch {
+        // The limiter could not decide. Fail closed.
+        return this.denied(call, context, digest, ['rate_limit_unavailable']);
+      }
+      if (!allowed) return this.denied(call, context, digest, ['rate_limited']);
     }
     const reasons: DenyReason[] = [];
     const agent = this.agents.get(context.agentId);
@@ -204,7 +245,8 @@ export class ToolGateway {
     const reasons: DenyReason[] = [];
     if (approval.tenantId !== context.tenantId) reasons.push('tenant_mismatch');
     if (approval.actionDigest !== digest) reasons.push('approval_digest_mismatch');
-    if (approval.status !== 'approved') reasons.push('approval_not_approved');
+    if (approval.status === 'consumed') reasons.push('approval_consumed');
+    else if (approval.status !== 'approved') reasons.push('approval_not_approved');
     if (approval.approvedBy === context.requestedBy || approval.approvedBy === context.agentId) reasons.push('approval_self_approved');
     if (context.now.getTime() >= approval.expiresAt.getTime()) reasons.push('approval_expired');
     return reasons;

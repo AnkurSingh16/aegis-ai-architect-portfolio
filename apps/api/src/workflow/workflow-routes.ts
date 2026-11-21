@@ -8,7 +8,7 @@ import { withAuthenticatedTransaction } from '../auth/transaction.js';
 import { createDurableStore } from './durable-store.js';
 import { runTriageWorkflow } from './triage-workflow.js';
 import { parseTraceparent } from './trace-context.js';
-import { createTokenBucketLimiter } from '../security/rate-limiter.js';
+import { createPostgresRateLimiter } from '../security/postgres-rate-limiter.js';
 import { createWorkflowMetrics, type WorkflowMetrics } from './workflow-metrics.js';
 import { buildSpan, newTraceId, type SpanSink } from '../observability/tracing.js';
 
@@ -69,9 +69,9 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
   const correlations = new WeakMap<FastifyRequest, string>();
   const runTenant = tenantRunner(pool);
   const store = createDurableStore(runTenant);
-  // Policy values chosen for development, not measured: a burst of 60 triage calls, refilled at 20 per second, per tenant and agent.
+  // Shared across API instances (PostgreSQL). Values are provisional development choices, not production-calibrated.
   const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant),
-    createTokenBucketLimiter({ capacity: 60, refillPerSecond: 20 }));
+    createPostgresRateLimiter(runTenant, { capacity: 60, refillPerSecond: 20 }));
 
   /** Authenticates, checks the scope and checks membership for the tenant in the path. Throws AuthorizationError otherwise. */
   async function authorise(request: FastifyRequest, tenantId: string, permission: 'read:cases' | 'write:cases' = 'read:cases'): Promise<VerifiedPrincipal> {
@@ -123,9 +123,7 @@ export async function registerProtectedWorkflowRoutes(app: FastifyInstance, pool
     const result = await runTriageWorkflow({
       store, dispatcher, tenantId, idempotencyKey,
       args: { caseId: request.body.caseId },
-      context: {
-        tenantId, userId: principal.subject, userScopes: [...principal.scopes], agentId: 'triage-agent', requestedBy: principal.subject,
-      },
+      principal,
       owner: `api-${request.id}`,
       correlationId: correlations.get(request),
       traceId: incomingTrace,

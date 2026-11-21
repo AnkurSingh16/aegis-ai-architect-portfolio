@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { ApprovalStore, RequestContext, ToolCall } from '../security/tool-policy-gateway.js';
 import { createDefaultToolDispatcher } from './default-tools.js';
 import { createToolDispatcher, type ToolHandler } from './tool-dispatcher.js';
-import { ToolGateway } from '../security/tool-policy-gateway.js';
+import { ToolGateway, verifiedRequestContext } from '../security/tool-policy-gateway.js';
 
 const noApprovals: ApprovalStore = { get: async () => undefined, consume: async () => false };
-const ctx = (overrides: Partial<RequestContext> = {}): RequestContext => ({
-  tenantId: 'tenant-a', userId: 'user-1', userScopes: ['read:cases'], agentId: 'triage-agent',
-  requestedBy: 'user-1', now: new Date('2026-11-19T10:00:00Z'), ...overrides,
-});
+const ctx = (overrides: Partial<RequestContext> = {}): RequestContext => verifiedRequestContext(
+  { issuer: 'https://issuer.example.test/', subject: overrides.userId ?? 'user-1', scopes: new Set(overrides.userScopes ?? ['read:cases']) },
+  { tenantId: overrides.tenantId ?? 'tenant-a', agentId: overrides.agentId ?? 'triage-agent', now: overrides.now ?? new Date('2026-11-19T10:00:00Z') },
+);
 const triage = (args: Record<string, unknown>): ToolCall => ({ toolName: 'case.triage', arguments: args });
 
 describe('default tool dispatcher', () => {

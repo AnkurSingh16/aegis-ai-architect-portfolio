@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  type AgentRegistration, type ApprovalRecord, type ApprovalStore, actionDigest, canonicalJson,
-  type RequestContext, type ToolCall, type ToolDefinition, ToolGateway,
-} from './tool-policy-gateway.js';
+import { type AgentRegistration, type ApprovalRecord, type ApprovalStore, actionDigest, canonicalJson, type RequestContext, type ToolCall, type ToolDefinition, ToolGateway, verifiedRequestContext } from './tool-policy-gateway.js';
 
 const NOW = new Date('2026-11-19T10:00:00Z');
 const tools: ToolDefinition[] = [
@@ -36,10 +33,10 @@ function gateway(store = makeStore()): ToolGateway {
   return new ToolGateway(new Map(tools.map((t) => [t.name, t])), new Map(agents.map((a) => [a.agentId, a])), store);
 }
 
-const ctx = (overrides: Partial<RequestContext> = {}): RequestContext => ({
-  tenantId: 'tenant-a', userId: 'user-1', userScopes: ['cases:read', 'cases:write'],
-  agentId: 'triage-agent', requestedBy: 'user-1', now: NOW, ...overrides,
-});
+const ctx = (overrides: Partial<RequestContext> = {}): RequestContext => verifiedRequestContext(
+  { issuer: 'https://issuer.example.test/', subject: overrides.userId ?? 'user-1', scopes: new Set(overrides.userScopes ?? ['cases:read', 'cases:write']) },
+  { tenantId: overrides.tenantId ?? 'tenant-a', agentId: overrides.agentId ?? 'triage-agent', now: overrides.now ?? NOW },
+);
 
 const closeArgs = { caseId: 'CASE-1' };
 const approval = (overrides: Partial<ApprovalRecord> = {}): ApprovalRecord => ({

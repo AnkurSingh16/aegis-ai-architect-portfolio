@@ -38,12 +38,12 @@ const runTenant = async <T>(tenantId: string, operation: (client: TenantQueryabl
 
 const store = createDurableStore(runTenant);
 const dispatcher = createDefaultToolDispatcher(createPostgresApprovalStore(runTenant));
-const context = { tenantId: '', userId: 'user-1', userScopes: ['read:cases'], agentId: 'triage-agent', requestedBy: 'user-1' };
+const issuer = 'https://issuer.example.test/';
 
 function input(tenantId: string, args: Record<string, unknown>, scopes = ['read:cases'], key = `triage-${randomUUID()}`) {
   return {
     store, dispatcher, tenantId, idempotencyKey: key, args,
-    context: { ...context, tenantId, userScopes: scopes }, owner: 'worker-1', policy, leaseMs: 5000, timeoutMs: 2000, clock: () => at(0),
+    principal: { issuer, subject: 'user-1', scopes: new Set(scopes) }, owner: 'worker-1', policy, leaseMs: 5000, timeoutMs: 2000, clock: () => at(0),
   };
 }
 
