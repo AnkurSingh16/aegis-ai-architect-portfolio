@@ -1,0 +1,20 @@
+# Tempo: single-binary trace storage and query. Traces arrive over OTLP/HTTP on the compose network only (no host port).
+# Retention: 72 h of blocks; compaction and retention run inside the process. Local volume only.
+server:
+  http_listen_port: 3200
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+compactor:
+  compaction:
+    block_retention: 72h

@@ -1,0 +1,5 @@
+# Prometheus (official image, pinned by digest, arm64 verified). Native OTLP receiver enabled for pushed metrics; retention bounded by time and size.
+FROM prom/prometheus@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9
+COPY prometheus.yml /etc/prometheus/prometheus.yml
+COPY aegis-rules.yml /etc/prometheus/aegis-rules.yml
+CMD ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=3d", "--storage.tsdb.retention.size=2GB", "--web.enable-otlp-receiver"]

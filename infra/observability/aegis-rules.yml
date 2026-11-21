@@ -1,0 +1,45 @@
+# Alert rules. Thresholds are PROVISIONAL development values, chosen to exercise the alerts. They are not production-calibrated SLOs.
+groups:
+  - name: aegis-availability
+    rules:
+      - alert: AegisApiUnavailable
+        expr: probe_success{target="api-liveness"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations: { summary: "API liveness probe failing", runbook: "docs/OBSERVABILITY.md#alerts" }
+      - alert: AegisReadinessFailing
+        expr: probe_success{target="api-readiness"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations: { summary: "API readiness failing (database or migrations)", runbook: "docs/OBSERVABILITY.md#alerts" }
+      - alert: AegisIdentityProviderUnavailable
+        expr: probe_success{target="identity-provider-readiness"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations: { summary: "Identity provider readiness probe failing", runbook: "docs/KEY-ROTATION-POLICY.md" }
+  - name: aegis-request-quality
+    rules:
+      - alert: AegisHighServerErrorRate
+        expr: |
+          (sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])) or vector(0))
+          / clamp_min(sum(rate(http_server_request_duration_seconds_count[5m])), 0.001) > 0.05
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "More than 5% of API requests return 5xx (provisional threshold)" }
+      - alert: AegisHighRequestLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "API p95 latency above 1 s (provisional threshold)" }
+      - alert: AegisIdentityRefusalsElevated
+        expr: sum(rate(aegis_identity_verifications_total{aegis_identity_outcome="refused"}[2m])) > 0.5
+        for: 1m
+        labels: { severity: warning }
+        annotations: { summary: "Token refusals above 0.5 per second (provisional threshold). Often an identity provider outage or a key retirement.", runbook: "docs/KEY-ROTATION-POLICY.md" }
+  - name: aegis-telemetry-health
+    rules:
+      - alert: AegisTelemetryExportFailing
+        expr: sum(rate(otelcol_exporter_send_failed_spans[5m])) + sum(rate(otelcol_exporter_send_failed_metric_points[5m])) + sum(rate(otelcol_exporter_send_failed_log_records[5m])) > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "The Collector cannot deliver telemetry to a backend (retries in progress or exhausted)" }

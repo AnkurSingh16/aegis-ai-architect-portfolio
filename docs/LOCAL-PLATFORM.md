@@ -17,6 +17,11 @@ Compose project `aegis-local` (its own network and volumes; no other project's c
 | `api` | same API image | Fastify API, `NODE_ENV=production` | 4110 |
 | `web` | built from `apps/web/Dockerfile` (nginx 1.27 alpine, digest `sha256:65645c7b…2f2a10`) | Static web build; proxies `/api` to the API service | 5190 |
 | `otel-collector` | `otel/opentelemetry-collector:0.165.0` (digest `sha256:34b24b74…ed1b73`, arm64) | OpenTelemetry Collector: OTLP/HTTP receiver, debug exporter (no host port) | none |
+| `tempo` | `grafana/tempo` 2.9.5 (digest `sha256:785fd6c8…941d3a`) | Trace storage and search | none |
+| `loki` | `grafana/loki` 3.6.22 (digest `sha256:4cf4ceb2…c36063`) | Log storage and search | none |
+| `prometheus` | `prom/prometheus` v3.13.5 (digest `sha256:aafa9d69…a72b9`) | Metric storage, alert rules, OTLP receiver | none |
+| `blackbox-exporter` | `prom/blackbox-exporter` v0.28.0 (digest `sha256:e753ff9f…2fc`) | Liveness, readiness and dependency probes | none |
+| `grafana` | `grafana/grafana` 12.4.15 (digest `sha256:2894082f…4b7`) | Dashboards and data sources; authenticated | `127.0.0.1:3300` |
 
 Port choices: 4100 and 5180 were not free on this machine (a different project's `node` process holds 4100 and was not touched). The defaults in `.env.local` are 4110, 5190 and 8180.
 
@@ -32,6 +37,8 @@ node scripts/e2e-auth.mjs             # 14 real-token checks over HTTP to the AP
 node scripts/e2e-auth.mjs --rotate    # also rotates the realm signing key and records the timings
 node scripts/telemetry-check.mjs    # traces, metrics, log correlation and the export allowlist
 npm run test:stack                    # opt-in: all of the above plus the browser suite (exit 0 = pass)
+npm run test:observability            # outage and recovery of the telemetry and alerts (about 12 minutes)
+npm run test:availability             # identity-provider outage and key-policy behaviour
 node scripts/local-stack.mjs status   # service states
 node scripts/local-stack.mjs down     # stops and removes containers and networks. Never removes volumes
 ```
@@ -102,7 +109,7 @@ The browser suite exercises the real login page at `localhost:8180`, PKCE, the c
 - **Availability trade-off.** If the identity provider's key endpoint is unavailable for longer than the cache window, every token is refused. This is fail-closed by decision. A different trade-off needs the owner's decision.
 - **Keycloak runs in start mode over HTTP on loopback.** Local only. Production needs HTTPS and its own hostname configuration.
 - **Compose is run by an opt-in manual workflow only.** `.github/workflows/stack-acceptance.yml` is `workflow_dispatch`. It is not a pull request check.
-- **Telemetry.** Traces and metrics go to a Collector with a debug exporter. No backend, dashboards or retention. Logs are JSON on stdout, not exported over OTLP. See `docs/OBSERVABILITY.md` section 6.
+- **Observability.** Tempo, Loki, Prometheus and Grafana are running with provisioned data sources, a dashboard and alert rules. Alert routing (paging) is not configured. Four alert rules were not driven to firing. See `docs/OBSERVABILITY.md` sections 6 and 10 for the measured gaps and the Tempo WAL finding.
 - **The Collector's receiver has no authentication.** Reachable from the compose network only. Production needs authenticated transport, which depends on workload identity (P3).
 - **Not built yet:** SPIRE workload identity and mTLS (P3), the PostgreSQL outbox (P5), durable multi-agent state (P4), and agent-execution telemetry.
 - **No independent review** of any of this.

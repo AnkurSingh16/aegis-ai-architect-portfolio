@@ -1,0 +1,33 @@
+# Prometheus: metrics storage and query. Application metrics arrive through the Collector over the native OTLP receiver (push).
+# Probes (blackbox exporter) and the Collector's own telemetry are scraped. Retention: 3 days or 2 GB, whichever is reached first.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+rule_files:
+  - /etc/prometheus/aegis-rules.yml
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ['otel-collector:8888']
+    sample_limit: 5000
+  - job_name: aegis-probes
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ['http://api:4000/api/health']
+        labels: { target: api-liveness }
+      - targets: ['http://api:4000/api/ready']
+        labels: { target: api-readiness }
+      - targets: ['http://keycloak:9000/health/ready']
+        labels: { target: identity-provider-readiness }
+      - targets: ['http://web:8080/']
+        labels: { target: web }
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    sample_limit: 1000

@@ -237,8 +237,8 @@ Additional constraints recorded from the approval:
 | P1 containerised platform | Implemented and operational locally | `docs/LOCAL-PLATFORM.md` |
 | P2 local OIDC, issuer and key handling | Implemented and operational locally | `scripts/e2e-auth.mjs`, `docs/KEY-ROTATION-POLICY.md` |
 | P2 web sign-in (provider-neutral OIDC, PKCE, runtime configuration) | Implemented and verified in a real browser against the production build | `docs/WEB-AUTHENTICATION.md`, `apps/web/e2e-stack/` (10 tests) |
-| P7 OpenTelemetry (SDK traces and metrics, Collector, log correlation, allowlist) | First slice implemented and verified through the Collector; not connected to a backend | `docs/OBSERVABILITY.md`, `scripts/telemetry-check.mjs` |
-| P3 SPIRE workload identity and mTLS | Not started | — |
+| P7 OpenTelemetry and backends (SDK traces, metrics and logs; Collector; Tempo, Loki, Prometheus, Grafana; alerts; outage checks) | Implemented and verified locally, including a browser request searchable in Tempo and its log in Loki | `docs/OBSERVABILITY.md`, `scripts/telemetry-check.mjs`, `scripts/observability-check.mjs`, `apps/web/e2e-stack/observability.spec.ts` |
+| P3 SPIRE workload identity and mTLS | Not started. Blocked on an approval decision: the Docker workload attestor needs Docker API access (see the checkpoint) | — |
 | P4 durable multi-agent persistence, P5 outbox | Not started | — |
 
 Register statuses are unchanged. C6 remains PARTIAL with independent review pending. C8 remains MISSING.

@@ -171,8 +171,87 @@ services:
     security_opt: ['no-new-privileges:true']
     networks: [aegis]
 
+  # Observability backends. Only Grafana is published to the host (loopback, authenticated). Ingestion and query endpoints stay on the
+  # compose network. Each store has a bounded retention; see docs/OBSERVABILITY.md.
+  tempo:
+    build:
+      context: ./infra/observability
+      dockerfile: Dockerfile.tempo
+    image: aegis-tempo:local
+    restart: unless-stopped
+    volumes:
+      - tempo-data:/var/tempo
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [aegis]
+
+  loki:
+    build:
+      context: ./infra/observability
+      dockerfile: Dockerfile.loki
+    image: aegis-loki:local
+    restart: unless-stopped
+    volumes:
+      - loki-data:/loki
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [aegis]
+
+  prometheus:
+    build:
+      context: ./infra/observability
+      dockerfile: Dockerfile.prometheus
+    image: aegis-prometheus:local
+    restart: unless-stopped
+    volumes:
+      - prometheus-data:/prometheus
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [aegis]
+
+  blackbox-exporter:
+    build:
+      context: ./infra/observability
+      dockerfile: Dockerfile.blackbox
+    image: aegis-blackbox:local
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [aegis]
+
+  grafana:
+    build:
+      context: ./infra/observability/grafana
+    image: aegis-grafana:local
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: aegis-admin
+      GF_SECURITY_ADMIN_PASSWORD: ${AEGIS_GRAFANA_ADMIN_PASSWORD:?Run node scripts/local-stack.mjs init}
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      # No plugin download at start-up (a third-party download is not needed for the provisioned dashboards).
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+    ports:
+      - '127.0.0.1:${AEGIS_PORT_GRAFANA:-3300}:3000'
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    security_opt: ['no-new-privileges:true']
+    networks: [aegis]
+
 volumes:
   postgres-data:
+  tempo-data:
+  loki-data:
+  prometheus-data:
+  grafana-data:
 
 networks:
   aegis:

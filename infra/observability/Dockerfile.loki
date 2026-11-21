@@ -1,0 +1,4 @@
+# Loki (official image, pinned by digest, arm64 verified) with the AEGIS configuration baked in.
+FROM grafana/loki@sha256:4cf4ceb20e88b0543c88b541a71797c22a46eade04dd588dcdebf9f2b9c36063
+COPY loki.yaml /etc/loki/loki.yaml
+CMD ["-config.file=/etc/loki/loki.yaml"]

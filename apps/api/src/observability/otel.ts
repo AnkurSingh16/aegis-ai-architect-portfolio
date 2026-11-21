@@ -1,5 +1,8 @@
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-http';
+import { BatchLogRecordProcessor, LoggerProvider } from '@opentelemetry/sdk-logs';
+import { logs } from '@opentelemetry/api-logs';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
@@ -79,10 +82,22 @@ export function validateCollectorEndpoint(value: string, env: NodeJS.ProcessEnv)
   return value;
 }
 
+/**
+ * The earlier hand-written OTLP JSON exporter (AEGIS_TRACING) and the SDK (AEGIS_OTEL_ENABLED) would both export the same spans. Running
+ * both is refused at start-up until the workflow spans are moved onto the SDK (docs/OBSERVABILITY.md section 6).
+ */
+export function assertSingleTracingExporter(env: NodeJS.ProcessEnv): void {
+  if (env.AEGIS_OTEL_ENABLED === '1' && env.AEGIS_TRACING === 'enabled') {
+    throw new Error('Configure one tracing exporter: AEGIS_TRACING or AEGIS_OTEL_ENABLED, not both.');
+  }
+}
+
 let sdk: NodeSDK | undefined;
+let loggerProvider: LoggerProvider | undefined;
 
 /** Starts telemetry when enabled. Must run before the application modules are imported (see register.ts). */
 export function startTelemetry(env: NodeJS.ProcessEnv = process.env): boolean {
+  assertSingleTracingExporter(env);
   if (env.AEGIS_OTEL_ENABLED !== '1' || sdk) return false;
   const endpoint = validateCollectorEndpoint(env.OTEL_EXPORTER_OTLP_ENDPOINT ?? 'http://127.0.0.1:4318', env);
   const traceExporter = new AllowlistSpanExporter(new OTLPTraceExporter({ url: `${endpoint.replace(/\/$/, '')}/v1/traces` }) as unknown as SpanExporterLike);
@@ -103,6 +118,13 @@ export function startTelemetry(env: NodeJS.ProcessEnv = process.env): boolean {
     ],
   });
   sdk.start();
+  // Registered directly rather than through NodeSDK: in this release combination NodeSDK did not install the global logger provider,
+  // so emitted log records were silently dropped. Registering here is verified by scripts/telemetry-check.mjs (Loki must hold the logs).
+  loggerProvider = new LoggerProvider({
+    resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: 'aegis-api', 'deployment.environment.name': env.AEGIS_ENVIRONMENT ?? 'unset' }),
+    processors: [new BatchLogRecordProcessor({ exporter: new OTLPLogExporter({ url: `${endpoint.replace(/\/$/, '')}/v1/logs` }) })],
+  });
+  logs.setGlobalLoggerProvider(loggerProvider);
   return true;
 }
 
@@ -110,5 +132,7 @@ export async function stopTelemetry(): Promise<void> {
   if (!sdk) return;
   const current = sdk;
   sdk = undefined;
+  await loggerProvider?.shutdown();
+  loggerProvider = undefined;
   await current.shutdown();
 }

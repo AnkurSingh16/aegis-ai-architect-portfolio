@@ -1,3 +1,5 @@
+import { logEvent } from './observability/log.js';
+import { assertSingleTracingExporter } from './observability/otel.js';
 import { trace } from '@opentelemetry/api';
 import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
@@ -26,6 +28,7 @@ export interface AppOptions {
 }
 
 export function createApp(options: AppOptions = {}) {
+  assertSingleTracingExporter(process.env);
   if (options.testDependencies && process.env.NODE_ENV !== 'test') throw new Error('Test dependencies are unavailable.');
   const authConfig = options.authConfig ? resolveAuthConfig({ OIDC_ISSUER: options.authConfig.issuer,
     OIDC_AUDIENCE: options.authConfig.audience, DATABASE_URL: options.authConfig.databaseUrl,
@@ -43,6 +46,16 @@ export function createApp(options: AppOptions = {}) {
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   // The route template (for example /api/tenants/:tenantId/cases) is named on the active request span, so traces group by operation
   // and never by identifier. Fastify knows the template; the raw URL is not exported.
+  // One completion record per request: route template, status and outcome only. It is the log that correlates a browser-driven
+  // request with its trace. Successful requests are logged here, because the error handler only logs failures.
+  app.addHook('onResponse', async (request, reply) => {
+    const template = request.routeOptions?.url ?? 'unmatched';
+    logEvent('http_request_completed', {
+      'http.route': template,
+      'http.response.status_code': reply.statusCode,
+      outcome: reply.statusCode < 400 ? 'success' : reply.statusCode < 500 ? 'client_error' : 'server_error',
+    });
+  });
   app.addHook('preHandler', async (request) => {
     const template = request.routeOptions?.url;
     const span = trace.getActiveSpan();

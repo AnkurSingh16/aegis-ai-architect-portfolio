@@ -1,0 +1,9 @@
+# Blackbox exporter probes: HTTP 200 within a bounded timeout. Used for liveness, readiness and dependency availability.
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      valid_status_codes: [200]
+      method: GET
+      follow_redirects: false
