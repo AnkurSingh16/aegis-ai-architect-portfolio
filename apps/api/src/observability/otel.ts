@@ -27,6 +27,7 @@ export const SPAN_ATTRIBUTE_ALLOWLIST: ReadonlySet<string> = new Set([
   'network.protocol.version', 'url.scheme', 'server.address', 'server.port',
   'db.system', 'db.system.name', 'db.operation', 'db.operation.name', 'db.collection.name', 'db.namespace', 'db.name',
   'error.type', 'aegis.identity.outcome', 'aegis.operation',
+  'aegis.execution.id', 'aegis.execution.outcome', 'aegis.execution.reason',
 ]);
 
 /** Keeps only allowlisted attributes. Exported for tests. */

@@ -175,7 +175,10 @@ Known limits from these runs are in section 9. The Tempo WAL finding is in `docs
 3. **Socket permissions.** The agent creates the Workload API socket with mode 0777 (root:root). The boundary is the volume mount and the
    PID-namespace check, not the file mode. A container that is handed the volume is still refused, because its PIDs are unresolvable.
 4. **PID namespace sharing.** The agent can see every process of its workload through `/proc`. Its capabilities are all dropped, so it should
-   not be able to signal processes owned by other UIDs; that agent-side direction was not tested. The workload cannot signal the agent
+   not be able to signal processes owned by other UIDs. This agent-side direction is now tested (P4, `scripts/spire-acceptance.mjs`,
+   section 3): a root process that joins the agent's PID namespace, with all capabilities dropped, is refused the signal (`EPERM`) and the
+   `/proc` environment read (`EACCES`), and the workload keeps serving. The agent image has no shell, so the probe runs in a throwaway
+   container with the same user, capabilities and PID namespace, not inside the agent itself. The workload cannot signal the agent
    (tested: `kill -9` returned "denied" and the agent stayed up). This is acceptable for the local stack; in production the agent should
    run in its own pod or VM.
 5. **Docker Desktop.** Containers run in a Linux VM. The Unix attestor depends on the kernel reporting the caller's UID and PID to the agent
