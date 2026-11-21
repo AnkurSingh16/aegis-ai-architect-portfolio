@@ -63,6 +63,10 @@ async function main(): Promise<void> {
     approvals: createPostgresApprovalStore(runTenant),
     limiter: createPostgresRateLimiter(runTenant, { capacity: 60, refillPerSecond: 20 }),
     audit: stderrAuditSink(),
+    // Development only, off by default. Writes field paths and codes to stderr, never submitted values.
+    diagnostics: process.env.AEGIS_MCP_DIAGNOSTICS === '1'
+      ? (event) => process.stderr.write(`${JSON.stringify({ event: 'mcp.validation_diagnostic', ...event })}\n`)
+      : undefined,
   });
   await server.connect(new StdioServerTransport());
   process.stderr.write('AEGIS MCP server connected on stdio.\n');

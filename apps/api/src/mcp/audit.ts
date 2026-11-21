@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
  * deny reasons, and a duration. It never records arguments, query text, tool output, bearer tokens or raw subject identifiers.
  * The only free-form detail allowed is a small set of numeric facts (for example, the query length), by name.
  */
-export type McpOutcome = 'allowed' | 'denied' | 'error' | 'unauthenticated' | 'not_a_member' | 'invalid_input';
+export type McpOutcome = 'allowed' | 'denied' | 'error' | 'unauthenticated' | 'not_a_member' | 'invalid_input' | 'throttled';
 
 export interface McpAuditEvent {
   readonly event: 'mcp.tool_call';
@@ -25,7 +25,7 @@ export interface McpAuditSink {
 }
 
 /** Keys that may appear in `detail`. Anything else is dropped before the event leaves this module. */
-export const AUDIT_DETAIL_KEYS = ['queryLength', 'resultCount'] as const;
+export const AUDIT_DETAIL_KEYS = ['queryLength', 'resultCount', 'issueCount'] as const;
 
 /** A short, stable reference to a subject. The raw subject is never written to an audit event. */
 export function subjectRef(subject: string): string {

@@ -14,6 +14,7 @@ import { createTokenBucketLimiter, inProcessRateLimiter } from '../security/rate
 import { createPostgresApprovalStore, type TenantQueryable } from '../security/tool-approval-store.js';
 import { memoryAuditSink, type McpAuditEvent } from './audit.js';
 import { createAegisMcpServer } from './server.js';
+import { createTestAegisMcpServer } from './test-support.js';
 import { MCP_AGENT_ID } from './tools.js';
 
 // Real PostgreSQL and the production verifier. Requires the CI-style isolated URLs and passwords (see .github/workflows/ci.yml).
@@ -236,9 +237,9 @@ describe('approval boundary (test-only synthetic side-effecting tool, isolated d
 
   async function harness(tenantId: string) {
     const audit = memoryAuditSink();
-    const server = createAegisMcpServer({
-      pool, bearerToken: writerToken, tenantId, verify: auth.verify, approvals, audit, extension,
-    });
+    const server = createTestAegisMcpServer({
+      pool, bearerToken: writerToken, tenantId, verify: auth.verify, approvals, audit,
+    }, extension);
     const client = new Client({ name: 'aegis-test-client', version: '0.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

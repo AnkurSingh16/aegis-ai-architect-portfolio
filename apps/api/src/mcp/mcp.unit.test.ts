@@ -76,3 +76,44 @@ describe('MCP tool schemas', () => {
     expect(MCP_TOOL_SPECS.map((s) => s.name).sort()).toEqual(['case.triage', 'documents.search']);
   });
 });
+
+describe('MCP admission control', () => {
+  const NOW = new Date('2026-11-21T00:00:00Z');
+
+  it('refuses beyond the burst, then refuses again after the bucket is empty', async () => {
+    const { createAdmissionController } = await import('./admission.js');
+    const controller = createAdmissionController({ burst: 2, refillPerSecond: 0.000001, maxConcurrent: 10 });
+    const first = controller.admit(NOW);
+    const second = controller.admit(NOW);
+    const third = controller.admit(NOW);
+    expect(first.admitted && second.admitted).toBe(true);
+    expect(third).toEqual({ admitted: false, reason: 'admission_throttled' });
+  });
+
+  it('refuses when the concurrency cap is reached, and admits again once a slot is released', async () => {
+    const { createAdmissionController } = await import('./admission.js');
+    const controller = createAdmissionController({ burst: 100, refillPerSecond: 100, maxConcurrent: 1 });
+    const held = controller.admit(NOW);
+    expect(held.admitted).toBe(true);
+    expect(controller.admit(NOW)).toEqual({ admitted: false, reason: 'admission_saturated' });
+    if (held.admitted) held.release();
+    expect(controller.admit(NOW).admitted).toBe(true);
+  });
+
+  it('releases a slot only once, however often release is called', async () => {
+    const { createAdmissionController } = await import('./admission.js');
+    const controller = createAdmissionController({ burst: 100, refillPerSecond: 100, maxConcurrent: 2 });
+    const held = controller.admit(NOW);
+    if (!held.admitted) throw new Error('expected admission');
+    held.release();
+    held.release();
+    expect(controller.inFlight()).toBe(0);
+  });
+
+  it('rejects invalid bounds', async () => {
+    const { createAdmissionController } = await import('./admission.js');
+    expect(() => createAdmissionController({ burst: 0, refillPerSecond: 1, maxConcurrent: 1 })).toThrow(RangeError);
+    expect(() => createAdmissionController({ burst: 1, refillPerSecond: 0, maxConcurrent: 1 })).toThrow(RangeError);
+    expect(() => createAdmissionController({ burst: 1, refillPerSecond: 1, maxConcurrent: 1.5 })).toThrow(RangeError);
+  });
+});
