@@ -8,6 +8,7 @@ import { actionDigest } from '../../security/tool-policy-gateway.js';
 import { createDurableStore } from '../../workflow/durable-store.js';
 import { type ApprovalGate, type DriverOutcome, resumeApprovalWait, runDurableAttempt } from '../../workflow/durable-driver.js';
 import { type ObservedConsume, type RecordedRunV2, type RunOutcome, type ScenarioClass, type StepV2, coverage, evaluateGatesV2, findViolations, REQUIRED_CLASSES_DURABLE } from './trajectory-evaluation-v2.js';
+import { evaluateGatesV3, findViolationsV3, type RecordedRunV3, type StepV3 } from './trajectory-evaluation-v3.js';
 
 // C9 durable trajectories. The REAL driver and PostgreSQL store run each scenario. Failures are controlled by the step body.
 // Approvals go through a mocked gate that records every consumption it performs. The synthetic side effect is a counter per
@@ -276,5 +277,173 @@ describe('durable evaluation gates', () => {
     expect(gates.hard.filter((g) => !g.passed)).toEqual([]);
     expect(gates.missedControls).toEqual([]);
     expect(baseline.flatMap((r) => findViolations(r).violations)).toEqual([]);
+  });
+});
+
+// ---- Crash after commit (gates-v3) -------------------------------------------------------------------------------------
+// A synthetic business effect is written to PostgreSQL by the step. The crash is injected at the moment the driver records
+// success: the effect has committed, the success record never lands, and the driver call throws. The execution is then left
+// running with its lease held. Another worker recovers it after the lease expires and retries the same logical operation.
+// Two implementations are compared: an idempotent one (the logical operation is recorded in the same transaction as its
+// effect, keyed by the operation, not by the attempt) and a deliberately non-idempotent one (no check for a prior effect).
+// Both effect stores are synthetic tables in the disposable database. Nothing external is contacted.
+
+const crashRuns: RecordedRunV3[] = [];
+const notifyKey = (executionId: string) => `notify-customer:${executionId}`;
+
+describe('crash after commit, through the real driver and PostgreSQL (gates-v3)', () => {
+  let armed = false;
+  const crashingStore = createDurableStore(runTenant, {
+    beforeTransition: async ({ state }) => {
+      if (armed && state === 'succeeded') {
+        armed = false;
+        throw new Error('connection lost before the outcome was recorded');
+      }
+    },
+  });
+
+  const effectsFor = async (executionId: string): Promise<number> => Number((await admin.query<{ n: string }>(
+    'SELECT count(*)::text AS n FROM public.c9_synthetic_effects WHERE execution_id = $1', [executionId])).rows[0]!.n);
+
+  const observedEffects = async (executionId: string) => (await admin.query<{ operation_key: string; rows: string }>(
+    'SELECT operation_key, count(*)::text AS rows FROM public.c9_synthetic_effects WHERE execution_id = $1 GROUP BY operation_key', [executionId]))
+    .rows.map((r) => ({ operationKey: r.operation_key, rows: Number(r.rows) }));
+
+  /** Idempotent: the logical operation is recorded in the same transaction as the effect. A second attempt finds it and does nothing. */
+  const idempotentEffect = async (executionId: string, attempt: number) => {
+    const client = await admin.connect();
+    try {
+      await client.query('BEGIN');
+      const claimed = await client.query('INSERT INTO public.c9_synthetic_idempotency (operation_key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING operation_key',
+        [notifyKey(executionId)]);
+      if (claimed.rowCount === 1) {
+        await client.query('INSERT INTO public.c9_synthetic_effects (operation_key, execution_id, attempt) VALUES ($1, $2, $3)',
+          [notifyKey(executionId), executionId, attempt]);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+
+  /** Non-idempotent: records the effect every time it runs, with no check for a prior effect. */
+  const nonIdempotentEffect = async (executionId: string, attempt: number) => {
+    await admin.query('INSERT INTO public.c9_synthetic_effects (operation_key, execution_id, attempt) VALUES ($1, $2, $3)',
+      [notifyKey(executionId), executionId, attempt]);
+  };
+
+  /** Runs the crash scenario. The effect function decides whether the retry duplicates the business effect. */
+  async function crashScenario(effect: typeof idempotentEffect, name: string, scenarioClass: ScenarioClass, controlFor?: string): Promise<RecordedRunV3> {
+    const world = await newWorld();
+    const steps: StepV3[] = [];
+    const record = (outcome: StepV3['outcome'], reasons: string[], delta: number, consumes: ObservedConsume[]) =>
+      steps.push({ tool: TOOL, tenantId: tenant, outcome, reasons, subject: SUBJECT, actionDigest: world.digest, observedStateDelta: delta, consumes });
+
+    // 1. Approval requested, then granted.
+    const requested = await runDurableAttempt({ store, executionId: world.executionId, tenantId: tenant, owner: 'worker-1', policy,
+      leaseMs: 5000, timeoutMs: 2000, clock: () => at(world.clockMs), approvalGate: world.gate, step: async () => undefined });
+    expect(requested.status).toBe('approval_requested');
+    record('denied', ['approval_requested'], 0, []);
+    await approveNext(world);
+
+    // 2. The worker commits the business effect, then the connection is lost before the success is recorded.
+    const beforeCrash = await effectsFor(world.executionId);
+    const consumesBeforeCrash = world.gate.consumes.length;
+    armed = true;
+    let crashed = false;
+    try {
+      await runDurableAttempt({ store: crashingStore, executionId: world.executionId, tenantId: tenant, owner: 'worker-1', policy,
+        leaseMs: 5000, timeoutMs: 2000, clock: () => at(world.clockMs), approvalGate: world.gate,
+        step: async (attempt) => { await effect(world.executionId, attempt); } });
+    } catch {
+      crashed = true;
+    }
+    expect(crashed).toBe(true);
+    expect(armed).toBe(false);
+    record('uncertain', ['connection_lost_after_commit'], (await effectsFor(world.executionId)) - beforeCrash,
+      world.gate.consumes.slice(consumesBeforeCrash));
+
+    // 3. Another worker recovers the execution after the lease expires. The lost attempt is counted, and the step does not run.
+    world.clockMs += 10_000;
+    const beforeRecovery = await effectsFor(world.executionId);
+    const recovered = await runDurableAttempt({ store, executionId: world.executionId, tenantId: tenant, owner: 'recovery-worker', policy,
+      leaseMs: 5000, timeoutMs: 2000, clock: () => at(world.clockMs), approvalGate: world.gate, step: async () => undefined });
+    expect(recovered.status).toBe('lost_attempt_recovered');
+    record('error', ['lost_attempt_recovered'], (await effectsFor(world.executionId)) - beforeRecovery, []);
+
+    // 4. The retry: a fresh approval, then the same logical operation again.
+    world.clockMs += 10_000;
+    const consumesBeforeRetry = world.gate.consumes.length;
+    const beforeRetry = await effectsFor(world.executionId);
+    const retryRequest = await runDurableAttempt({ store, executionId: world.executionId, tenantId: tenant, owner: 'recovery-worker', policy,
+      leaseMs: 5000, timeoutMs: 2000, clock: () => at(world.clockMs), approvalGate: world.gate, step: async () => undefined });
+    expect(retryRequest.status).toBe('approval_requested');
+    record('denied', ['approval_requested'], 0, []);
+    await approveNext(world);
+    const retry = await runDurableAttempt({ store, executionId: world.executionId, tenantId: tenant, owner: 'recovery-worker', policy,
+      leaseMs: 5000, timeoutMs: 2000, clock: () => at(world.clockMs), approvalGate: world.gate,
+      step: async (attempt) => { await effect(world.executionId, attempt); } });
+    expect(retry.status).toBe('succeeded');
+    record('ok', [], (await effectsFor(world.executionId)) - beforeRetry, world.gate.consumes.slice(consumesBeforeRetry));
+
+    const effects = await observedEffects(world.executionId);
+    return { scenario: name, scenarioClass, tenantId: tenant, subject: SUBJECT, expectedFinal: 'ok', finalOutcome: 'ok',
+      expectedStateDelta: 1, steps, observedEffects: effects, ...(controlFor !== undefined ? { controlFor } : {}) };
+  }
+
+  beforeAll(async () => {
+    await admin.query(`CREATE TABLE IF NOT EXISTS public.c9_synthetic_effects (id bigserial primary key, operation_key text not null,
+      execution_id uuid not null, attempt integer not null, created_at timestamptz not null default now())`);
+    await admin.query(`CREATE TABLE IF NOT EXISTS public.c9_synthetic_idempotency (operation_key text primary key,
+      applied_at timestamptz not null default now())`);
+  });
+
+  afterAll(async () => {
+    await admin.query('DROP TABLE IF EXISTS public.c9_synthetic_effects');
+    await admin.query('DROP TABLE IF EXISTS public.c9_synthetic_idempotency');
+  });
+
+  it('idempotent recovery: the business effect commits once, even though the retry runs the same operation', async () => {
+    const run = await crashScenario(idempotentEffect, 'durable_crash_after_commit_idempotent', 'idempotent_recovery');
+    crashRuns.push(run);
+    // One logical operation, one effect, observed in the store.
+    expect(run.observedEffects).toHaveLength(1);
+    expect(run.observedEffects![0]!.rows).toBe(1);
+    expect(findViolationsV3(run).violations).toEqual([]);
+    expect(run.steps.find((s) => s.outcome === 'uncertain')!.observedStateDelta).toBe(1);
+    expect(run.steps.filter((s) => s.observedStateDelta > 0)).toHaveLength(1);
+  });
+
+  it('non-idempotent control: the retry records a second business effect, which the evaluator detects', async () => {
+    const run = await crashScenario(nonIdempotentEffect, 'control_durable_non_idempotent_recovery', 'idempotent_recovery', 'duplicate_business_effect');
+    crashRuns.push(run);
+    const kinds = findViolationsV3(run).violations.map((v) => v.kind);
+    expect(kinds).toContain('duplicate_business_effect');
+    expect(kinds).toContain('duplicate_state_change');
+    expect(run.observedEffects!.some((e) => e.rows === 2)).toBe(true);
+  });
+
+  it('the crash itself is not an unauthorised side effect: the crashed step had a consumed approval', () => {
+    const run = crashRuns.find((r) => r.scenario === 'durable_crash_after_commit_idempotent')!;
+    const violations = findViolationsV3(run).violations.map((v) => v.kind);
+    expect(violations).not.toContain('unauthorised_side_effect');
+    expect(violations).not.toContain('state_change_on_failed_step');
+  });
+
+  it('gates-v3 require the mandatory idempotent_recovery class, and fail when it is absent', () => {
+    const withoutIdempotent = crashRuns.filter((r) => r.scenario !== 'durable_crash_after_commit_idempotent');
+    const gates = evaluateGatesV3([...runs.map((r) => r as unknown as RecordedRunV3), ...withoutIdempotent]);
+    expect(gates.coverage.missing).toContain('idempotent_recovery');
+    expect(gates.passed).toBe(false);
+  });
+
+  it('gates-v3 pass with the idempotent baseline present and the non-idempotent control detected', () => {
+    const gates = evaluateGatesV3([...runs.map((r) => r as unknown as RecordedRunV3), ...crashRuns]);
+    expect(gates.hard.filter((g) => !g.passed)).toEqual([]);
+    expect(gates.missedControls).toEqual([]);
+    expect(gates.passed).toBe(true);
   });
 });
