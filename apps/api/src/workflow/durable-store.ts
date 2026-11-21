@@ -101,7 +101,15 @@ export type RequeueOutcome =
   | { readonly outcome: 'not_found' }
   | { readonly outcome: 'not_failed' };
 
-export function createDurableStore(runTenant: TenantRunner) {
+/**
+ * Test seams. Production passes none. afterCancelRead runs after the cancellation reads the execution and before it writes,
+ * which is where a concurrent writer can change the row. The regression test uses it to reproduce the race deterministically.
+ */
+export interface DurableStoreHooks {
+  readonly afterCancelRead?: () => Promise<void>;
+}
+
+export function createDurableStore(runTenant: TenantRunner, hooks: DurableStoreHooks = {}) {
   return {
     /** Idempotent on (tenant, key): a repeated request returns the existing execution with created = false. */
     async createExecution(tenantId: string, idempotencyKey: string, maxAttempts: number, correlationId: string | null = null): Promise<{ executionId: string; created: boolean }> {
@@ -198,6 +206,7 @@ export function createDurableStore(runTenant: TenantRunner) {
         const row = current.rows[0];
         if (!row) return 'not_found';
         if (['succeeded', 'failed', 'cancelled'].includes(row.state)) return 'terminal';
+        await hooks.afterCancelRead?.();
         const recordRequest = () => client.query(
           `UPDATE aegis.workflow_executions
               SET cancel_requested = true,
@@ -234,6 +243,18 @@ export function createDurableStore(runTenant: TenantRunner) {
           [executionId, tenantId, version, 'cancelled', row.attempts, actor, reason],
         );
         return 'cancelled';
+      });
+    },
+
+    /**
+     * PostgreSQL's clock for this tenant's connection. Lease expiry and retry times are set from this value, so a worker
+     * whose own clock is skewed cannot take or keep a lease that the database considers held.
+     */
+    async databaseNow(tenantId: string): Promise<Date> {
+      assertUuid(tenantId, 'tenantId');
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<{ now: Date }>('SELECT clock_timestamp() AS now', []);
+        return result.rows[0]!.now;
       });
     },
 
