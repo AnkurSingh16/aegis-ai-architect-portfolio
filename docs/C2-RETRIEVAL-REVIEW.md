@@ -55,3 +55,7 @@ independently written corpus.
 - Any change to fusion weights, reranking, query reformulation or chunking.
 - Reporting of truncated lexical results (finding 1) if it changes a response.
 - Any production retrieval change.
+
+## Latency
+
+Measured on a disposable local PostgreSQL 17 with synthetic data at 4 to 5,000 chunks. See `docs/C2-LATENCY-RESULTS.md`.
