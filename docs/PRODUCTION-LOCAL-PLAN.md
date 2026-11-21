@@ -229,3 +229,16 @@ Additional constraints recorded from the approval:
 - The migration job is a separate, development-only role (`requireDevelopment`). The API container runs with `NODE_ENV=production`.
 - Images are official and pinned by digest: `node@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54` (node 24 bookworm slim, arm64 verified) and `nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10` (nginx 1.27 alpine, arm64 verified).
 - The existing containers (`agentic-rag-chatbot-postgres-1`, `local-ai-assistant-searxng-1`, `ragverify-postgres-1`, and the exited `aegis-ai-portfolio-git-postgres-1`) are not stopped, reused or removed. The compose project is `aegis-local`, with its own network and volume.
+
+## 9. Status at this checkpoint (local-platform-p1)
+
+| Step | State | Evidence |
+| --- | --- | --- |
+| P1 containerised platform | Implemented and operational locally | `docs/LOCAL-PLATFORM.md` sections 2 and 4 |
+| P2 local OIDC (Keycloak) and issuer and key handling | Implemented and operational locally. Real token acceptance and signing-key rotation verified | `scripts/e2e-auth.mjs` (14 checks, run twice) |
+| Web sign-in on the provider-neutral OIDC client | **Not started** | `docs/LOCAL-PLATFORM.md` L1 |
+| P3 SPIRE workload identity and mTLS | **Not started** | not built |
+| P7 OpenTelemetry collector and SDK | **Not started** | not built |
+| P4 durable multi-agent persistence, P5 outbox | Not started | not built |
+
+Register statuses are unchanged by this checkpoint. C6 remains PARTIAL with independent review pending. C8 remains MISSING.

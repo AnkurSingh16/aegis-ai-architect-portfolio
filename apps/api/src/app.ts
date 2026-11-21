@@ -17,6 +17,7 @@ import type { GroundedAnalysisProvider } from './ai/grounded-analysis.js';
 import { createWorkflowMetrics } from './workflow/workflow-metrics.js';
 import { metricsEndpointEnabled, registerMetricsRoute } from './observability/metrics-endpoint.js';
 import { tracingFromEnv } from './observability/tracing.js';
+import { checkReadiness } from './readiness.js';
 
 export interface AppOptions {
   authConfig?: AuthConfig;
@@ -25,8 +26,11 @@ export interface AppOptions {
 
 export function createApp(options: AppOptions = {}) {
   if (options.testDependencies && process.env.NODE_ENV !== 'test') throw new Error('Test dependencies are unavailable.');
-  const authConfig = options.authConfig ? resolveAuthConfig({ AUTH0_ISSUER: options.authConfig.issuer,
-    AUTH0_AUDIENCE: options.authConfig.audience, DATABASE_URL: options.authConfig.databaseUrl }) : resolveAuthConfig(process.env);
+  const authConfig = options.authConfig ? resolveAuthConfig({ OIDC_ISSUER: options.authConfig.issuer,
+    OIDC_AUDIENCE: options.authConfig.audience, DATABASE_URL: options.authConfig.databaseUrl,
+    ...(options.authConfig.jwksUri === undefined ? {} : { OIDC_JWKS_URI: options.authConfig.jwksUri }),
+    AEGIS_ENVIRONMENT: process.env.AEGIS_ENVIRONMENT, AEGIS_ALLOWED_SERVICE_HOSTS: process.env.AEGIS_ALLOWED_SERVICE_HOSTS })
+    : resolveAuthConfig(process.env);
   const aiConfig = resolveOllamaConfig(process.env);
   if (aiConfig && !authConfig) throw new Error('AI analysis requires the authenticated case API.');
   const analysisProvider = options.testDependencies?.analysisProvider ?? (aiConfig ? createOllamaProvider(aiConfig) : undefined);
@@ -37,6 +41,10 @@ export function createApp(options: AppOptions = {}) {
   const app = Fastify({ logger: false, requestIdHeader: false, genReqId: () => randomUUID(),
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   app.get('/api/health', async () => ({ ok: true, service: 'aegis-api', mode: 'starter' }));
+  if (!authConfig) {
+    // Without a database configuration this instance cannot serve case data, so it must not report ready.
+    app.get('/api/ready', async (_request, reply) => reply.code(503).send({ ready: false, reason: 'database_not_configured' }));
+  }
 
   if (authConfig) {
     const verify = createTokenVerifier(authConfig, options.testDependencies?.keyResolver);
@@ -50,6 +58,10 @@ export function createApp(options: AppOptions = {}) {
       catch { await closeDatabase(); throw new Error('Protected case storage initialization failed.'); }
     });
     app.addHook('onClose', closeDatabase);
+    app.get('/api/ready', async (_request, reply) => {
+      const result = await checkReadiness(pool);
+      return reply.code(result.ready ? 200 : 503).send(result);
+    });
     app.register(async (protectedApp) => registerProtectedCaseRoutes(protectedApp, pool, verify, analysisProvider, groundedAnalysisProvider));
     // One collector per process: the triage route records into it, and the metrics endpoint (off by default) reads it.
     const processMetrics = createWorkflowMetrics();

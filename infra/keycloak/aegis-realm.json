@@ -1,0 +1,121 @@
+{
+  "realm": "aegis",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 300,
+  "revokeRefreshToken": true,
+  "bruteForceProtected": true,
+  "clientScopes": [
+    {
+      "name": "basic",
+      "description": "Subject claim for the API verifier (sub is required)",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "read:cases",
+      "description": "Read access to case data for the caller's tenant memberships",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "aegis-api-audience",
+      "description": "Audience aegis-api on every token for this realm's API clients",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aegis-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "aegis-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "aegis-web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:5190/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5190"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "optionalClientScopes": [
+        "read:cases"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "aegis-api-audience"
+      ]
+    },
+    {
+      "clientId": "aegis-test-client",
+      "description": "Local test client: direct grants for acceptance tests only. Never present in a production realm.",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "optionalClientScopes": [
+        "read:cases"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "aegis-api-audience"
+      ]
+    },
+    {
+      "clientId": "aegis-short-lived-client",
+      "description": "Local test client with a three-second access token lifetime, for expiry checks only.",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "optionalClientScopes": [
+        "read:cases"
+      ],
+      "attributes": {
+        "access.token.lifespan": "3"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "aegis-api-audience"
+      ]
+    }
+  ]
+}
