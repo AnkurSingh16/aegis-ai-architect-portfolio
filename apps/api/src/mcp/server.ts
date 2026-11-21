@@ -91,6 +91,11 @@ export function createRegisteredServer(options: AegisMcpServerOptions, registry:
     throw new Error('Side-effecting MCP tools are available only in test runs.');
   }
   if (!policy.allowSideEffects) {
+    // Without side effects allowed, only the reviewed production registry object is accepted. A caller cannot pass a different
+    // read-only tool set through this factory, even one that looks harmless.
+    if (registry !== PRODUCTION_REGISTRY) {
+      throw new Error('Without test privileges, the MCP server accepts only the production registry.');
+    }
     for (const definition of registry.definitions) {
       if (definition.sideEffect !== 'read' || definition.requiresApproval) {
         throw new Error('The production MCP registry is read-only; side-effecting tools are refused.');

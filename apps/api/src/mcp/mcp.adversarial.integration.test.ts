@@ -247,6 +247,17 @@ describe('unexpected tool registration and the production registry boundary', ()
     }
   });
 
+  it('refuses a read-only registry that is not the production registry object, even when it looks harmless', () => {
+    const lookalike: ToolRegistry = {
+      specs: MCP_TOOL_SPECS,
+      definitions: mcpToolDefinitions(),
+      agentScopes: [],
+      handlersFor: () => new Map(),
+    };
+    const options = { pool, bearerToken: memberToken, tenantId: tenantA, verify: auth.verify, approvals: createPostgresApprovalStore(runTenant), audit: memoryAuditSink() };
+    expect(() => createRegisteredServer(options, lookalike, { allowSideEffects: false })).toThrow(/production registry/);
+  });
+
   it('refuses a read-only policy registry that contains a side-effecting definition', () => {
     const registry: ToolRegistry = {
       specs: MCP_TOOL_SPECS,
@@ -255,7 +266,7 @@ describe('unexpected tool registration and the production registry boundary', ()
       handlersFor: () => new Map(),
     };
     const options = { pool, bearerToken: memberToken, tenantId: tenantA, verify: auth.verify, approvals: createPostgresApprovalStore(runTenant), audit: memoryAuditSink() };
-    expect(() => createRegisteredServer(options, registry, { allowSideEffects: false })).toThrow(/read-only/);
+    expect(() => createRegisteredServer(options, registry, { allowSideEffects: false })).toThrow(/production registry|read-only/);
   });
 });
 

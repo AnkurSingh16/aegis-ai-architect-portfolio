@@ -36,7 +36,7 @@ The MCP SDK validates arguments before our callback runs, so a call rejected by 
 ## Tool registry
 
 - The production registry is fixed in code (`PRODUCTION_REGISTRY`): the two read-only tools, no extension point. `createAegisMcpServer` takes no tool or registry argument.
-- `createRegisteredServer` is the shared core. It refuses any side-effecting definition unless the caller passes `allowSideEffects` **and** `NODE_ENV=test`. Without `allowSideEffects` it refuses any definition that is not read-only with no approval requirement.
+- `createRegisteredServer` is the shared core. It refuses any side-effecting definition unless the caller passes `allowSideEffects` **and** `NODE_ENV=test`. Without `allowSideEffects` it accepts only the `PRODUCTION_REGISTRY` object itself (checked by identity, so a look-alike read-only registry is refused) and refuses any definition that is not read-only with no approval requirement.
 - `createTestAegisMcpServer` (`test-support.ts`) adds the synthetic side-effecting tool for the approval-boundary tests. Production code does not import it, and it is refused outside test runs.
 
 ## Tools
