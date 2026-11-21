@@ -80,7 +80,7 @@ Not present: persisted agent executions beyond the workflow tables, persisted gr
 | MCP over supported transports | stdio only | Streamable HTTP is not implemented. Deliberately deferred | Keep stdio local; HTTP needs approval (decision D5) |
 | OpenTelemetry tracing, metrics, structured logs | Hand-written exporter | Real OTel SDK and a local collector | OTel SDK plus `otel-collector` container (decision D4) |
 | Local model serving via Ollama, provider abstraction | Client code exists, no service | Provider interface, container, approved model list | Ollama container; model calls only with approval (see 4.6) |
-| Health, readiness, reproducible startup | Postgres healthcheck only | Liveness and readiness endpoints; one-command startup | Compose with healthchecks and `depends_on` conditions |
+| Health, readiness, reproducible startup | `GET /api/health` exists as a static starter response (see section 8); no readiness check; Postgres healthcheck only | Liveness and readiness endpoints; one-command startup | Compose with healthchecks and `depends_on` conditions |
 | Secure local security and integration test environment | CI service container | Compose-based environment for E2E and security tests | Same compose file used by tests |
 
 ## 3. Components evaluated and deferred
@@ -103,7 +103,7 @@ Each step lists its dependencies, the work, and measurable acceptance criteria. 
 - **Work:** Dockerfiles for the API and the web application. Compose services for the API, the web application, a one-shot migration job, and healthchecks. Environment files with generated local passwords (never committed). A single documented start command.
 - **Acceptance:**
   - `docker compose up` on a clean machine reaches all services healthy, with no manual steps beyond creating the environment file.
-  - `GET /health` (liveness) and `GET /ready` (readiness, checks the database and the migration version) return correct status, including when the database is stopped.
+  - `GET /api/health` (liveness, no dependencies) and `GET /api/ready` (readiness: database reachable and every migration applied) return correct status, including when the database is stopped.
   - The migration job is idempotent when run twice.
   - No port is bound beyond 127.0.0.1.
 - **Evidence to record:** command transcript, `docker compose ps` health table, and a test that stops PostgreSQL and checks readiness goes false.
@@ -213,3 +213,19 @@ For each capability the record must state: what is implemented in production-int
 - C8 remains MISSING. Its design (PR #77) is not runtime evidence.
 - Nothing in this plan merges, deploys or changes live identity or cloud configuration.
 - The current repository has no workload identity, no OpenTelemetry instrumentation, no broker and no containerised application. These are gaps, not design choices already made.
+
+## 8. Corrections from review (2026-11-21)
+
+These findings correct sections 1 to 4 and are binding on the implementation.
+
+1. **Health route.** `GET /api/health` already exists (`apps/api/src/app.ts`). It returns a static starter response that does not touch the database. It is kept as the liveness endpoint. A separate `GET /api/ready` will check database reachability and that every migration in `db/migrations` is recorded in `aegis_migrations.versions`. The plan does not claim that no health route exists.
+2. **Issuer validation.** `validateIssuer` currently requires HTTPS, an origin-only URL with no path, and no port. An OIDC issuer identifier is a URL that may include a path (Keycloak issues realm-specific issuers such as `https://host/realms/<realm>`), and may include a port. The verifier also derives the JWKS URL as `issuer + /.well-known/jwks.json`, which is not where Keycloak publishes keys. The implementation will (a) validate issuers against the OIDC rules (scheme, no userinfo, query or fragment, exact string match against the `iss` claim), (b) resolve keys through OIDC discovery (`.well-known/openid-configuration`), checking that the discovered `issuer` equals the configured issuer, with an explicit JWKS URL as an override for container networks, and (c) keep production strict: HTTPS only. Plain HTTP is accepted only when `AEGIS_ENVIRONMENT=local` and the host is loopback or a named local service. Signature, algorithm (RS256), issuer, audience and expiry checks are unchanged.
+3. **Web authentication.** `apps/web` uses `@auth0/auth0-react` (`DevAuthExperience.tsx`). Provider-neutral OIDC needs an authorization-code flow with PKCE, token storage policy, silent renewal and logout handling. The proposed replacement is `oidc-client-ts` with `react-oidc-context`, which work with any compliant issuer, including Keycloak locally and a managed identity platform later. Only the issuer, client id and audience move into configuration. No authentication bypass is introduced; the development sign-in path must go through the same provider. This migration is a separate step after P2 backend verification.
+4. **Bind address.** `apps/api/src/server.ts` listens on `127.0.0.1` only. Inside a container that is unreachable from other services. The host will come from `AEGIS_API_HOST`. The default stays `127.0.0.1`. The container sets `0.0.0.0` inside its own network namespace. Compose publishes the host port only on `127.0.0.1`, so the API is reachable from the host loopback and from named services only.
+5. **Branch relationships.** This plan is on `production-local-plan` (from C10 base, `ff7156e`). It does not include C6 (PR #76, head `c90b26a`) or C8 (PR #77, head `08c305f`). The implementation of P1 and P2 is on `local-platform-p1`, created from `production-local-plan`. Neither C6 nor C8 is merged into it. C6 and C8 remain as separate draft or ready PRs against C10.
+
+Additional constraints recorded from the approval:
+- Database host guard: `localDatabaseUrl` accepts only loopback hosts today. Containers need a named service host. The rule becomes: loopback is always allowed; another host is allowed only when `AEGIS_ENVIRONMENT=local` and the host is listed in `AEGIS_ALLOWED_DATABASE_HOSTS`.
+- The migration job is a separate, development-only role (`requireDevelopment`). The API container runs with `NODE_ENV=production`.
+- Images are official and pinned by digest: `node@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54` (node 24 bookworm slim, arm64 verified) and `nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10` (nginx 1.27 alpine, arm64 verified).
+- The existing containers (`agentic-rag-chatbot-postgres-1`, `local-ai-assistant-searxng-1`, `ragverify-postgres-1`, and the exited `aegis-ai-portfolio-git-postgres-1`) are not stopped, reused or removed. The compose project is `aegis-local`, with its own network and volume.
