@@ -135,13 +135,23 @@ export function issueGrant(input: {
   readonly action: string;
   readonly argumentsDigest: string;
   readonly requiredScopes: readonly string[];
+  /**
+   * P5 extension (not in the C8 text). 'forward' is the C8 behaviour: the grant runs from the holder before the last hop to the last
+   * hop. 'return' is used only for result grants: the grant runs from the last hop back to the agent that delegated it, on the same
+   * chain, so a delegate can report back through the durable message path. Default: 'forward'.
+   */
+  readonly direction?: 'forward' | 'return';
 }): { readonly ok: true; readonly grant: Grant; readonly state: ExecutionState } | { readonly ok: false; readonly reason: GrantRefusal } {
   const { record, state, chain, kind, action, argumentsDigest, requiredScopes } = input;
+  const direction = input.direction ?? 'forward';
   if (chain.length === 0) return { ok: false, reason: 'empty_chain' };
+  if (direction === 'return' && kind !== 'result') return { ok: false, reason: 'scope_escalation' };
   const last = chain[chain.length - 1];
   if (!isSubset(requiredScopes, last.effectiveScopes)) return { ok: false, reason: 'scope_escalation' };
 
-  const from = chain.length === 1 ? record.rootAgent : chain[chain.length - 2].to;
+  const backHop = chain.length === 1 ? record.rootAgent : chain[chain.length - 2].to;
+  const from = direction === 'return' ? last.to : backHop;
+  const to = direction === 'return' ? backHop : last.to;
   const body = {
     kind,
     executionId: record.executionId,
@@ -150,7 +160,7 @@ export function issueGrant(input: {
     chainDigest: chainDigest(chain),
     depth: chain.length,
     from,
-    to: last.to,
+    to,
     action,
     argumentsDigest,
     requiredScopes: sortedUnique(requiredScopes),

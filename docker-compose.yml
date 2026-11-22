@@ -484,6 +484,125 @@ services:
     networks: [agent-mesh]
 
 
+  # ---------------------------------------------------------------------------------------------------------------------------------
+  # P5 agent messaging (profile "messaging"). Not started by a plain `docker compose up`.
+  # Per agent: one proxy (Go, the agent's registered UID, in the PID namespace of the agent's SPIRE agent) and one runtime (Node, the
+  # dispatcher and inbox). The runtime shares the proxy's network namespace, so its only peers are the proxy's loopback listeners.
+  # The proxy is the only component that performs mTLS, and the runtime has no SPIFFE identity of its own.
+  # ---------------------------------------------------------------------------------------------------------------------------------
+  p5-orchestrator-proxy:
+    build:
+      context: ./infra/spire/messaging
+      dockerfile: Dockerfile.orchestrator-proxy
+    image: aegis-p5-orchestrator-proxy:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on: [orchestrator]
+    restart: unless-stopped
+    user: '1001:1001'
+    pid: 'service:orchestrator'
+    command: ['proxy']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_P5_CONFIG: /etc/aegis/p5-proxy.json
+      AEGIS_SERVICE_NAME: aegis-p5-orchestrator-proxy
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-orchestrator:/run/spire/sockets:ro
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh, aegis]
+
+  p5-orchestrator-runtime:
+    image: aegis-api:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on:
+      p5-orchestrator-proxy:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    network_mode: 'service:p5-orchestrator-proxy'
+    command: ['node', '--import', '@opentelemetry/instrumentation/hook.mjs', '--import', './apps/api/dist/observability/register.js', 'apps/api/dist/orchestration/messaging/runtime.js']
+    environment:
+      NODE_ENV: production
+      AEGIS_ENVIRONMENT: local
+      AEGIS_ALLOWED_DATABASE_HOSTS: postgres
+      AEGIS_AGENT_ID: orchestrator
+      DATABASE_URL: postgres://aegis_app:${AEGIS_DB_APP_PASSWORD}@postgres:5432/aegis_local
+      AEGIS_PROXY_EGRESS_URL: http://127.0.0.1:7001
+      AEGIS_PROXY_IDENTITY_URL: http://127.0.0.1:7002
+      AEGIS_INBOX_LISTEN: 127.0.0.1:7100
+      AEGIS_OTEL_ENABLED: '1'
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      AEGIS_ALLOWED_SERVICE_HOSTS: otel-collector
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+
+  p5-triage-proxy:
+    build:
+      context: ./infra/spire/messaging
+      dockerfile: Dockerfile.triage-proxy
+    image: aegis-p5-triage-proxy:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on: [triage]
+    restart: unless-stopped
+    user: '1002:1002'
+    pid: 'service:triage'
+    command: ['proxy']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_P5_CONFIG: /etc/aegis/p5-proxy.json
+      AEGIS_SERVICE_NAME: aegis-p5-triage-proxy
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-triage:/run/spire/sockets:ro
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh, aegis]
+
+  p5-triage-runtime:
+    image: aegis-api:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on:
+      p5-triage-proxy:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    network_mode: 'service:p5-triage-proxy'
+    command: ['node', '--import', '@opentelemetry/instrumentation/hook.mjs', '--import', './apps/api/dist/observability/register.js', 'apps/api/dist/orchestration/messaging/runtime.js']
+    environment:
+      NODE_ENV: production
+      AEGIS_ENVIRONMENT: local
+      AEGIS_ALLOWED_DATABASE_HOSTS: postgres
+      AEGIS_AGENT_ID: triage
+      DATABASE_URL: postgres://aegis_app:${AEGIS_DB_APP_PASSWORD}@postgres:5432/aegis_local
+      AEGIS_PROXY_EGRESS_URL: http://127.0.0.1:7001
+      AEGIS_PROXY_IDENTITY_URL: http://127.0.0.1:7002
+      AEGIS_INBOX_LISTEN: 127.0.0.1:7100
+      AEGIS_OTEL_ENABLED: '1'
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      AEGIS_ALLOWED_SERVICE_HOSTS: otel-collector
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+
+
 volumes:
   postgres-data:
   tempo-data:

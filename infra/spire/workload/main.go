@@ -9,6 +9,7 @@
 // Subcommands:
 //
 //	serve                      run the mTLS endpoint (GET /identity) and the metrics endpoint
+//	proxy                      run the P5 agent proxy (inbound mTLS, loopback egress, loopback identity); see proxy.go
 //	probe <url> <serverID>     call a peer over mTLS, requiring the exact expected server SPIFFE ID
 //
 // Output never contains key material, certificate bodies or bearer tokens.
@@ -159,7 +160,7 @@ func logger() *slog.Logger {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: aegis-workload serve | probe <url> <serverSPIFFEID>")
+		fmt.Fprintln(os.Stderr, "usage: aegis-workload serve | proxy | probe <url> <serverSPIFFEID>")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -168,6 +169,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = serve(ctx)
+	case "proxy":
+		err = proxy(ctx)
 	case "probe":
 		if len(os.Args) != 4 {
 			fmt.Fprintln(os.Stderr, "usage: aegis-workload probe <url> <serverSPIFFEID>")
