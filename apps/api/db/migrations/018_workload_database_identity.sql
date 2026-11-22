@@ -291,8 +291,10 @@ CREATE POLICY agent_event_agent_insert ON aegis.agent_execution_events FOR INSER
 -- in the same execution, and only to the root agent. A result is therefore never produced without a verified request.
 CREATE POLICY agent_outbox_sender_read ON aegis.agent_outbox FOR SELECT TO aegis_orchestrator, aegis_triage, aegis_retrieval, aegis_reviewer
   USING (sender_agent = aegis.current_agent());
+-- Lifecycle updates of undelivered rows only. A dead message is not the sender's to change: only the operator role may requeue it.
 CREATE POLICY agent_outbox_sender_update ON aegis.agent_outbox FOR UPDATE TO aegis_orchestrator, aegis_triage, aegis_retrieval, aegis_reviewer
-  USING (sender_agent = aegis.current_agent()) WITH CHECK (sender_agent = aegis.current_agent());
+  USING (sender_agent = aegis.current_agent() AND status IN ('pending', 'leased'))
+  WITH CHECK (sender_agent = aegis.current_agent() AND status IN ('pending', 'leased', 'delivered', 'dead'));
 CREATE POLICY agent_outbox_agent_reply ON aegis.agent_outbox FOR INSERT TO aegis_triage, aegis_retrieval, aegis_reviewer
   WITH CHECK (sender_agent = aegis.current_agent() AND kind = 'result' AND destination_agent = 'orchestrator'
     AND status = 'pending' AND attempts = 0 AND fencing_token = 0 AND lease_instance IS NULL AND delivered_at IS NULL AND dead_at IS NULL
