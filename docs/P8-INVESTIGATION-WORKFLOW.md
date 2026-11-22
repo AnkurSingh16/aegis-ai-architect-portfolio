@@ -97,13 +97,30 @@ PR review (section 3, on PRs #74 and #75): PR #75 (C2) adds verification tests, 
 
 The protected area (`apps/web/src/auth/InvestigationPanel.tsx`) shows, after Keycloak sign-in: a tenant choice, a question, an idempotent submit (the key is created once per question and reused by retries), status polling until a terminal stage, the cited answer, an insufficient-evidence or failure message, and cancellation. The browser holds no agent endpoint, no SPIRE socket and no database credential. Every call is a bearer-authorised request to the API.
 
-## 8. Verification
-
-Results are recorded in section 9 from the final runs.
-
 ## 9. Results
 
-Filled in at the checkpoint.
+Test and build results from this checkpoint (commit `916a8d5` and the following local changes):
+
+| Check | Result |
+| --- | --- |
+| API unit tests (`src/investigation/review.test.ts`, pure) | 10 tests passed |
+| P8 PostgreSQL: investigation end to end, adversarial and stage machine (`investigation.integration.test.ts`) | 15 tests passed |
+| P5/P8 messaging PostgreSQL (`messaging.integration.test.ts`) | 16 tests passed |
+| P5/P8 multi-process crash and restart (`messaging-multiprocess.integration.test.ts`) | 9 tests passed (restart test needs `P5_TEST_CONTAINER`) |
+| Authenticated investigation API (`auth/investigation-routes.integration.test.ts`) | 8 tests passed |
+| P4 persistence (store, multi-process, migrations, telemetry) | 32 + 3 tests passed (multi-process and migration suites run separately) |
+| Go vet and tests (proxy and workload) | 8 tests passed |
+| `npm run lint` on changed sources; `tsc --noEmit` for the API | clean |
+| Local stack acceptance (`scripts/p8-acceptance.mjs`), latest complete run | 37 of 38 checks passed. The single failure was Tempo search, during a window in which Tempo had been stopped by an operator mistake (see below). Not yet re-run. |
+
+Not yet verified on the local stack: the answer path with real evidence. The synthetic corpus is in the disposable test database only,
+because seeding the local database goes through the gated ingestion path (`ingestSyntheticCatalogLocal`), which requires an explicit
+local opt-in and a verified desktop Docker context that this machine does not have. The answer path is verified in the test database.
+
+Operational events during this checkpoint, recorded for the review:
+- A stop command issued without a service list stopped the observability and web services; they were restarted. Probe, rogue and intruder containers were also stopped and restarted.
+- The local Keycloak container became unhealthy after restarts (JGroups JDBC_PING join timeouts), and at one point consumed most of the VM CPU. It was recreated (container only; no data volume removed). At the time of this checkpoint it was still rebuilding its configuration image.
+- The Docker VM was under heavy load for much of the session; some command timeouts were caused by that load, not by the code.
 
 ## 10. Status by capability
 
