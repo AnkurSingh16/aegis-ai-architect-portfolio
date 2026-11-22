@@ -13,7 +13,8 @@ export function createDatabasePool(url: string, max = 4): Pool {
 export async function verifyRuntimeRole(pool: Pool): Promise<void> {
   const result = await pool.query<{ safe: boolean }>(`
     WITH expected_tables(name) AS (VALUES
-      ('tenants'), ('support_cases'), ('audit_events'), ('memberships'), ('documents'), ('document_chunks'), ('case_reviews'), ('tool_approvals'), ('workflow_executions'), ('workflow_checkpoints'), ('chunk_embeddings'), ('rate_limit_buckets'), ('agent_registrations'), ('agent_executions'), ('agent_delegations'), ('agent_grants'), ('agent_execution_events'), ('agent_outbox'), ('agent_inbox'), ('agent_message_events'), ('agent_outbox_actions')),
+      ('tenants'), ('support_cases'), ('audit_events'), ('memberships'), ('documents'), ('document_chunks'), ('case_reviews'), ('tool_approvals'), ('workflow_executions'), ('workflow_checkpoints'), ('chunk_embeddings'), ('rate_limit_buckets'), ('agent_registrations'), ('agent_executions'), ('agent_delegations'), ('agent_grants'), ('agent_execution_events'), ('agent_outbox'), ('agent_inbox'), ('agent_message_events'), ('agent_outbox_actions'),
+      ('agent_database_roles'), ('investigation_requests'), ('investigation_results'), ('investigation_candidates')),
     aegis_tables AS (
       SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, c.relowner
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -28,7 +29,7 @@ export async function verifyRuntimeRole(pool: Pool): Promise<void> {
       AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
       AND NOT has_table_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND NOT has_any_column_privilege(current_user, 'aegis.memberships', 'INSERT,UPDATE,REFERENCES')
-      AND (SELECT count(*) = 21 AND bool_and(t.relrowsecurity AND t.relforcerowsecurity AND t.relowner <> r.oid)
+      AND (SELECT count(*) = 25 AND bool_and(t.relrowsecurity AND t.relforcerowsecurity AND t.relowner <> r.oid)
         FROM aegis_tables t JOIN expected_tables e ON e.name = t.relname)
       AND NOT has_table_privilege(current_user, 'aegis.rate_limit_buckets', 'DELETE,TRUNCATE,REFERENCES,TRIGGER')
       AND has_table_privilege(current_user, 'aegis.rate_limit_buckets', 'SELECT')

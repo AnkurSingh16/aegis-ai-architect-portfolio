@@ -8,7 +8,7 @@ import { createDatabasePool } from '../../../storage/database.js';
 import { receiveMessage, type ReceiveResult } from '../inbox.js';
 import { startInvestigationInTx } from '../handlers.js';
 import { withMessagingContext } from '../context.js';
-import { ROOT_AGENT, TRIAGE_AGENT } from '../workflow.js';
+import { ROOT_AGENT } from '../workflow.js';
 import { submitInvestigation, type Principal } from '../../../investigation/gateway.js';
 import type { TenantQueryable } from '../../../security/tool-approval-store.js';
 import type { ExecutionHooks } from '../../persistence/execution-store.js';

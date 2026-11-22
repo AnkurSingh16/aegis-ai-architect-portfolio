@@ -8,7 +8,7 @@ import { withMessagingContext } from './context.js';
 import { startInvestigationInTx } from './handlers.js';
 import { receiveMessage } from './inbox.js';
 import { submitInvestigation, readInvestigation, requestCancellation, GatewayError, principalDigest, validateQuestion } from '../../investigation/gateway.js';
-import { createHarness, closeHarness, startInvestigation, startStubEgress, readerPrincipal, wireOf, roleUrl, SPIFFE, NORTH, SOUTH, QUESTION,
+import { createHarness, closeHarness, startInvestigation, startStubEgress, readerPrincipal, wireOf, SPIFFE, NORTH, SOUTH, QUESTION,
   TEST_ISSUER, type AgentName, type Harness, type StubEgress } from './testing/support.js';
 
 // P8 end to end on real PostgreSQL: the gateway, the orchestrator's stage machine, triage, retrieval over the seeded synthetic corpus,

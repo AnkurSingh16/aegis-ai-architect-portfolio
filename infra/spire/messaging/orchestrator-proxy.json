@@ -2,13 +2,30 @@
   "inbound": {
     "listen": ":8443",
     "forwardTo": "http://127.0.0.1:7100",
-    "allowClients": ["spiffe://aegis.local/workload/triage"]
+    "allowClients": [
+      "spiffe://aegis.local/workload/triage",
+      "spiffe://aegis.local/workload/retrieval",
+      "spiffe://aegis.local/workload/reviewer"
+    ]
   },
   "outbound": {
     "listen": "127.0.0.1:7001",
     "peers": {
-      "triage": { "url": "https://p5-triage-proxy:8443", "serverId": "spiffe://aegis.local/workload/triage" }
+      "triage": {
+        "url": "https://p5-triage-proxy:8443",
+        "serverId": "spiffe://aegis.local/workload/triage"
+      },
+      "retrieval": {
+        "url": "https://p5-retrieval-proxy:8443",
+        "serverId": "spiffe://aegis.local/workload/retrieval"
+      },
+      "reviewer": {
+        "url": "https://p5-reviewer-proxy:8443",
+        "serverId": "spiffe://aegis.local/workload/reviewer"
+      }
     }
   },
-  "identity": { "listen": "127.0.0.1:7002" }
+  "identity": {
+    "listen": "127.0.0.1:7002"
+  }
 }

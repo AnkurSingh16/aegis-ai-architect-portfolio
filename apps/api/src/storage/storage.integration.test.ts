@@ -152,7 +152,7 @@ describe('real PostgreSQL persistence and role boundary', () => {
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'aegis' AND c.relkind = 'r' ORDER BY c.relname`);
     expect(tables.rows.map((row) => row.relname)).toEqual([
-      'agent_delegations', 'agent_execution_events', 'agent_executions', 'agent_grants', 'agent_inbox', 'agent_message_events', 'agent_outbox', 'agent_outbox_actions', 'agent_registrations', 'audit_events', 'case_reviews', 'chunk_embeddings', 'document_chunks', 'documents', 'memberships', 'rate_limit_buckets', 'support_cases', 'tenants', 'tool_approvals', 'workflow_checkpoints', 'workflow_executions',
+      'agent_database_roles', 'agent_delegations', 'agent_execution_events', 'agent_executions', 'agent_grants', 'agent_inbox', 'agent_message_events', 'agent_outbox', 'agent_outbox_actions', 'agent_registrations', 'audit_events', 'case_reviews', 'chunk_embeddings', 'document_chunks', 'documents', 'investigation_candidates', 'investigation_requests', 'investigation_results', 'memberships', 'rate_limit_buckets', 'support_cases', 'tenants', 'tool_approvals', 'workflow_checkpoints', 'workflow_executions',
     ]);
     for (const table of tables.rows) expect(table).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true, owned: false });
     expect((await pool.query(`SELECT count(*)::int AS count FROM pg_auth_members

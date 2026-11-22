@@ -1,0 +1,3 @@
+# P8 reviewer agent proxy: the P3 workload image with this agent's peer configuration baked in (no bind mounts). The only peer is the orchestrator.
+FROM aegis-spire-workload:local
+COPY reviewer-proxy.json /etc/aegis/p5-proxy.json

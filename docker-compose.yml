@@ -77,7 +77,7 @@ services:
   migrate:
     build: *api-build
     image: aegis-api:local
-    command: ['node', 'apps/api/dist/storage/migrate-cli.js']
+    command: ['sh', '-c', 'node apps/api/dist/storage/migrate-cli.js && node apps/api/dist/storage/agent-roles-cli.js']
     environment:
       NODE_ENV: development
       AEGIS_ENVIRONMENT: local
@@ -85,6 +85,12 @@ services:
       DATABASE_ADMIN_URL: postgres://aegis_admin:${AEGIS_DB_ADMIN_PASSWORD}@postgres:5432/aegis_local
       DATABASE_APP_PASSWORD: ${AEGIS_DB_APP_PASSWORD}
       DATABASE_INGEST_PASSWORD: ${AEGIS_DB_INGEST_PASSWORD}
+      AGENT_ROLE_PASSWORD_ORCHESTRATOR: ${AGENT_ROLE_PASSWORD_ORCHESTRATOR}
+      AGENT_ROLE_PASSWORD_TRIAGE: ${AGENT_ROLE_PASSWORD_TRIAGE}
+      AGENT_ROLE_PASSWORD_RETRIEVAL: ${AGENT_ROLE_PASSWORD_RETRIEVAL}
+      AGENT_ROLE_PASSWORD_REVIEWER: ${AGENT_ROLE_PASSWORD_REVIEWER}
+      AGENT_ROLE_PASSWORD_GATEWAY: ${AGENT_ROLE_PASSWORD_GATEWAY}
+      AGENT_ROLE_PASSWORD_OPERATOR: ${AGENT_ROLE_PASSWORD_OPERATOR}
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,6 +115,8 @@ services:
       AEGIS_API_HOST: 0.0.0.0
       PORT: '4000'
       DATABASE_URL: postgres://aegis_app:${AEGIS_DB_APP_PASSWORD}@postgres:5432/aegis_local
+      # Investigations run under the gateway role only (migration 018). The API verifies the token; the gateway checks the database.
+      DATABASE_GATEWAY_URL: postgres://aegis_gateway:${AGENT_ROLE_PASSWORD_GATEWAY}@postgres:5432/aegis_local
       OIDC_ISSUER: ${AEGIS_OIDC_ISSUER:-http://localhost:8180/realms/aegis}
       OIDC_AUDIENCE: ${AEGIS_OIDC_AUDIENCE:-aegis-api}
       # Keys are fetched over the compose network. The token issuer stays the host-facing URL, which is compared exactly.
@@ -534,7 +542,7 @@ services:
       AEGIS_ENVIRONMENT: local
       AEGIS_ALLOWED_DATABASE_HOSTS: postgres
       AEGIS_AGENT_ID: orchestrator
-      DATABASE_URL: postgres://aegis_app:${AEGIS_DB_APP_PASSWORD}@postgres:5432/aegis_local
+      DATABASE_URL: postgres://aegis_orchestrator:${AGENT_ROLE_PASSWORD_ORCHESTRATOR}@postgres:5432/aegis_local
       AEGIS_PROXY_EGRESS_URL: http://127.0.0.1:7001
       AEGIS_PROXY_IDENTITY_URL: http://127.0.0.1:7002
       AEGIS_INBOX_LISTEN: 127.0.0.1:7100
@@ -590,7 +598,7 @@ services:
       AEGIS_ENVIRONMENT: local
       AEGIS_ALLOWED_DATABASE_HOSTS: postgres
       AEGIS_AGENT_ID: triage
-      DATABASE_URL: postgres://aegis_app:${AEGIS_DB_APP_PASSWORD}@postgres:5432/aegis_local
+      DATABASE_URL: postgres://aegis_triage:${AGENT_ROLE_PASSWORD_TRIAGE}@postgres:5432/aegis_local
       AEGIS_PROXY_EGRESS_URL: http://127.0.0.1:7001
       AEGIS_PROXY_IDENTITY_URL: http://127.0.0.1:7002
       AEGIS_INBOX_LISTEN: 127.0.0.1:7100
@@ -601,6 +609,139 @@ services:
     tmpfs: ['/tmp']
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
+
+  p5-retrieval-proxy:
+    build:
+      context: ./infra/spire/messaging
+      dockerfile: Dockerfile.retrieval-proxy
+    image: aegis-p5-retrieval-proxy:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on: [retrieval]
+    restart: unless-stopped
+    user: '1003:1003'
+    pid: 'service:retrieval'
+    command: ['proxy']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_P5_CONFIG: /etc/aegis/p5-proxy.json
+      AEGIS_SERVICE_NAME: aegis-p5-retrieval-proxy
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-retrieval:/run/spire/sockets:ro
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh, aegis]
+
+  p5-retrieval-runtime:
+    image: aegis-api:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on:
+      p5-retrieval-proxy:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    network_mode: 'service:p5-retrieval-proxy'
+    command: ['node', '--import', '@opentelemetry/instrumentation/hook.mjs', '--import', './apps/api/dist/observability/register.js', 'apps/api/dist/orchestration/messaging/runtime.js']
+    environment:
+      NODE_ENV: production
+      AEGIS_ENVIRONMENT: local
+      AEGIS_ALLOWED_DATABASE_HOSTS: postgres
+      AEGIS_AGENT_ID: retrieval
+      DATABASE_URL: postgres://aegis_retrieval:${AGENT_ROLE_PASSWORD_RETRIEVAL}@postgres:5432/aegis_local
+      AEGIS_PROXY_EGRESS_URL: http://127.0.0.1:7001
+      AEGIS_PROXY_IDENTITY_URL: http://127.0.0.1:7002
+      AEGIS_INBOX_LISTEN: 127.0.0.1:7100
+      AEGIS_OTEL_ENABLED: '1'
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      AEGIS_ALLOWED_SERVICE_HOSTS: otel-collector
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+
+  p5-reviewer-proxy:
+    build:
+      context: ./infra/spire/messaging
+      dockerfile: Dockerfile.reviewer-proxy
+    image: aegis-p5-reviewer-proxy:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on: [reviewer]
+    restart: unless-stopped
+    user: '1004:1004'
+    pid: 'service:reviewer'
+    command: ['proxy']
+    environment:
+      AEGIS_SPIRE_SOCKET: unix:///run/spire/sockets/agent.sock
+      AEGIS_P5_CONFIG: /etc/aegis/p5-proxy.json
+      AEGIS_SERVICE_NAME: aegis-p5-reviewer-proxy
+      AEGIS_OTEL_ENDPOINT: otel-collector:4318
+    volumes:
+      - spire-socket-reviewer:/run/spire/sockets:ro
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [agent-mesh, aegis]
+
+  p5-reviewer-runtime:
+    image: aegis-api:local
+    pull_policy: never
+    profiles: [messaging]
+    depends_on:
+      p5-reviewer-proxy:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    network_mode: 'service:p5-reviewer-proxy'
+    command: ['node', '--import', '@opentelemetry/instrumentation/hook.mjs', '--import', './apps/api/dist/observability/register.js', 'apps/api/dist/orchestration/messaging/runtime.js']
+    environment:
+      NODE_ENV: production
+      AEGIS_ENVIRONMENT: local
+      AEGIS_ALLOWED_DATABASE_HOSTS: postgres
+      AEGIS_AGENT_ID: reviewer
+      DATABASE_URL: postgres://aegis_reviewer:${AGENT_ROLE_PASSWORD_REVIEWER}@postgres:5432/aegis_local
+      AEGIS_PROXY_EGRESS_URL: http://127.0.0.1:7001
+      AEGIS_PROXY_IDENTITY_URL: http://127.0.0.1:7002
+      AEGIS_INBOX_LISTEN: 127.0.0.1:7100
+      AEGIS_OTEL_ENABLED: '1'
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      AEGIS_ALLOWED_SERVICE_HOSTS: otel-collector
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+
+  # Operator actions (dead-letter listing, requeue, retention). Not started by `up`: run on demand with `docker compose --profile operator run --rm p8-operator`.
+  # It holds only the operator role. The orchestrator and the agent runtimes do not have this credential.
+  p8-operator:
+    image: aegis-api:local
+    pull_policy: never
+    profiles: [operator]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ['node', 'apps/api/dist/orchestration/messaging/cli.js', 'dead']
+    environment:
+      NODE_ENV: production
+      AEGIS_ENVIRONMENT: local
+      AEGIS_ALLOWED_DATABASE_HOSTS: postgres
+      DATABASE_OPERATOR_URL: postgres://aegis_operator:${AGENT_ROLE_PASSWORD_OPERATOR}@postgres:5432/aegis_local
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [aegis]
 
 
 volumes:
