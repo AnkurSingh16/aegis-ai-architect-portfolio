@@ -1,0 +1,3 @@
+# P5 triage agent proxy: the P3 workload image with this agent's peer configuration baked in (see Dockerfile.orchestrator-proxy).
+FROM aegis-spire-workload:local
+COPY triage-proxy.json /etc/aegis/p5-proxy.json

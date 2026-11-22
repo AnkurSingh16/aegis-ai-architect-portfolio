@@ -424,7 +424,7 @@ describe('tenant isolation and least privilege in the database', () => {
   it('every agent table has forced row level security, so the owner is also governed', async () => {
     const result = await admin.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
       `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname LIKE 'agent\\_%' AND relkind = 'r' ORDER BY relname`);
-    expect(result.rows.length).toBe(5);
+    expect(result.rows.length).toBe(9); // five P4 tables and four P5 messaging tables
     expect(result.rows.every((r) => r.relrowsecurity && r.relforcerowsecurity)).toBe(true);
   });
 });

@@ -134,3 +134,22 @@ The browser suite includes `observability.spec.ts`: a real authenticated browser
 - **Cardinality is bounded by design, not measured under load.**
 - **Browser telemetry.** The browser is not instrumented; traces start at the API.
 - **Not independently reviewed.**
+
+## 11. P5 messaging telemetry
+
+The P5 runtime (dispatcher and inbox) and the agent proxies export through the same Collector. Metric labels are bounded: outcomes, a closed reason set, and the agent identifier from the fixed registry. Tenant, execution and message identifiers, payloads and envelopes never become labels.
+
+| Instrument | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `aegis.outbox.enqueued` | counter | none | Outbound messages committed with their P4 decision |
+| `aegis.outbox.deliveries` | counter | `outcome`, `reason`, `agent` | Delivery decisions: delivered, retry, dead, ack_refused |
+| `aegis.outbox.delivery.duration` | histogram (ms) | `agent` | One delivery attempt, from send to response |
+| `aegis.outbox.attempts` | histogram | `agent` | Attempts a message took to reach its final state |
+| `aegis.outbox.lease.recoveries` | counter | `agent` | Messages re-leased after an expired lease |
+| `aegis.outbox.pending` | gauge | `agent` | Undelivered messages for the sending agent |
+| `aegis.outbox.oldest_pending_age` | gauge (s) | `agent` | Age of the oldest undelivered message |
+| `aegis.outbox.requeues` | counter | none | Operator requeues of dead-lettered messages |
+| `aegis.inbox.decisions` | counter | `outcome`, `reason`, `agent` | Inbound decisions: processed, duplicate, refused, transient |
+| `aegis.inbox.duplicates` | counter | `agent` | Repeated deliveries suppressed by the inbox |
+
+Spans: `aegis.message.deliver` (dispatcher), `aegis.message.inbound` and `aegis.message.outbound` (proxies). Span attributes are allowlisted: message and execution identifiers (random UUIDs), agent identifiers, the bounded outcome and reason, and the attempt number. W3C `traceparent` is forwarded for correlation only; it grants nothing. P4's `aegis.agent.*` instruments are emitted by the same runtime for every store decision.

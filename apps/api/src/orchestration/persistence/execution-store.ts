@@ -107,8 +107,15 @@ export interface AgentExecutionStore {
   recordDelegation(fence: Fence, input: { parentSeq: number | null; to: string; requestedScopes: readonly string[] }):
     Promise<Result<{ seq: number; depth: number }, WriteRefusal>>;
   issueGrant(fence: Fence, input: { chainSeq: number; kind: 'request' | 'result'; action: string; argumentsDigest: string;
-    requiredScopes: readonly string[] }): Promise<Result<{ grantId: string }, WriteRefusal>>;
+    requiredScopes: readonly string[]; direction?: 'forward' | 'return' }): Promise<Result<{ grantId: string }, WriteRefusal>>;
   consumeEnvelope(fence: Fence, envelope: unknown): Promise<Result<{ grantId: string; stepsTaken: number }, WriteRefusal>>;
+  /**
+   * P5: a recipient consumes the grant for a message it received. No lease is involved: the recipient is not the lease holder. The
+   * envelope must be addressed to `recipient` and sent by `sender` (both verified by the caller), and it must match an open grant
+   * exactly. A result envelope addressed to the root agent also finalises the execution (succeeded), under the same lock.
+   */
+  receiveEnvelope(input: { tenantId: string; executionId: string; recipient: string; sender: string; envelope: unknown }):
+    Promise<Result<{ grantId: string; finalised: boolean }, string>>;
   requestCancel(tenantId: string, executionId: string, actorDigest: string, reason: string):
     Promise<Result<{ state: 'cancelled' | 'cancel_requested' }, 'not_found' | 'terminal'>>;
   snapshot(tenantId: string, executionId: string): Promise<ExecutionSnapshot | null>;
@@ -148,6 +155,17 @@ const assertUuid = (value: string, label: string): void => {
   if (!UUID.test(value)) throw new RangeError(`${label} must be a UUID`);
 };
 
+/**
+ * P5: runs store operations inside a transaction the caller already owns. A message produced by a P4 decision is inserted by the caller
+ * in that same transaction, so the decision and its message commit or roll back together. The bound tenant must match.
+ */
+export function joinTransaction(client: TenantQueryable, tenantId: string): TenantRunner {
+  return async <T>(requested: string, operation: (queryable: TenantQueryable) => Promise<T>): Promise<T> => {
+    if (requested !== tenantId) throw new Error('joined transaction is bound to another tenant');
+    return operation(client);
+  };
+}
+
 export function createAgentExecutionStore(runTenant: TenantRunner, hooks: ExecutionHooks = {}): AgentExecutionStore {
   const built = buildStore(runTenant, hooks);
   return {
@@ -159,6 +177,7 @@ export function createAgentExecutionStore(runTenant: TenantRunner, hooks: Execut
     recordDelegation: observed('delegate', hooks, built.recordDelegation, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     issueGrant: observed('grant', hooks, built.issueGrant, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     consumeEnvelope: observed('consume', hooks, built.consumeEnvelope, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
+    receiveEnvelope: observed('consume', hooks, built.receiveEnvelope, (r, args) => ({ started: false, terminal: r.ok && r.value.finalised, recovered: false, reason: r.ok ? null : r.reason, executionId: String(args[0].executionId) })),
     requestCancel: observed('cancel', hooks, built.requestCancel, (r, args) => ({ started: false, terminal: r.ok && r.value.state === 'cancelled', recovered: false, reason: null, executionId: String(args[1]) })),
     snapshot: built.snapshot,
     delegations: built.delegations,
@@ -309,6 +328,39 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
       await beforeCommit(`${label}:${outcome.ok ? 'accepted' : outcome.reason}`);
       return outcome;
     });
+  }
+
+  /**
+   * The single implementation of grant consumption, shared by the fenced path (the lease holder consumes an envelope) and the recipient
+   * path (P5: a receiver consumes its inbound grant). Runs under the execution lock held by the caller.
+   */
+  async function consumeDecision(client: TenantQueryable, row: ExecRow, tenantId: string, executionId: string,
+    actor: { agentId: string; instance: string | null; fencingToken: number }, envelope: unknown):
+    Promise<Result<{ grantId: string; stepsTaken: number }, string>> {
+    await sweepExpiredGrants(client, executionId);
+    const { open, consumed } = await openAndConsumedGrants(client, tenantId, executionId, row.principal_ref);
+    const structure = checkEnvelopeStructure(envelope);
+    const refuse = async (reason: string) => {
+      await audit(client, tenantId, executionId, { eventType: reason === 'step_budget_exceeded' ? 'step_refused' : 'grant_rejected',
+        outcome: 'refused', reason, actorAgent: actor.agentId, actorInstance: actor.instance, fencingToken: actor.fencingToken,
+        delegationSeq: null, grantId: null });
+      return { ok: false as const, reason };
+    };
+    if (!structure.ok) return refuse(structure.reason);
+    const authorised = authoriseEnvelope({ value: envelope, record: recordOf(row), state: stateOf(row, open, consumed) });
+    if (!authorised.ok) return refuse(authorised.reason);
+    const grant = authorised.grant;
+    const consumedRows = await client.query<{ grant_id: string }>(
+      `UPDATE aegis.agent_grants SET status = 'consumed', consumed_at = clock_timestamp(), consumed_by_agent = $2,
+           consumed_by_fencing_token = $3
+        WHERE grant_id = $1 AND status = 'open' RETURNING grant_id`,
+      [grant.grantId, actor.agentId, actor.fencingToken]);
+    if (consumedRows.rows.length !== 1) throw new Error('grant changed under the execution lock');
+    await client.query('UPDATE aegis.agent_executions SET steps_taken = $2, version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1',
+      [executionId, authorised.state.stepsTaken]);
+    await audit(client, tenantId, executionId, { eventType: 'grant_consumed', outcome: 'accepted', reason: null,
+      actorAgent: actor.agentId, actorInstance: actor.instance, fencingToken: actor.fencingToken, delegationSeq: null, grantId: grant.grantId });
+    return { ok: true, value: { grantId: grant.grantId, stepsTaken: authorised.state.stepsTaken } };
   }
 
   return {
@@ -481,7 +533,7 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         const chain = chainTo(rows, input.chainSeq);
         const { open, consumed } = await openAndConsumedGrants(client, fence.tenantId, fence.executionId, row.principal_ref);
         const issued = issueGrant({ record: recordOf(row), state: stateOf(row, open, consumed), chain, kind: input.kind,
-          action: input.action, argumentsDigest: input.argumentsDigest, requiredScopes: input.requiredScopes });
+          action: input.action, argumentsDigest: input.argumentsDigest, requiredScopes: input.requiredScopes, direction: input.direction });
         if (!issued.ok) {
           await audit(client, fence.tenantId, fence.executionId, { eventType: 'grant_refused', outcome: 'refused', reason: issued.reason,
             actorAgent: fence.agentId, actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: input.chainSeq, grantId: null });
@@ -514,33 +566,51 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
     },
 
     async consumeEnvelope(fence, envelope) {
-      return fencedWrite<{ grantId: string; stepsTaken: number }, string>(fence.tenantId, fence.executionId, fence, async (client, row) => {
-        await sweepExpiredGrants(client, fence.executionId);
-        const { open, consumed } = await openAndConsumedGrants(client, fence.tenantId, fence.executionId, row.principal_ref);
-        const structure = checkEnvelopeStructure(envelope);
-        const refuse = async (reason: string) => {
-          await audit(client, fence.tenantId, fence.executionId, { eventType: reason === 'step_budget_exceeded' ? 'step_refused' : 'grant_rejected',
-            outcome: 'refused', reason, actorAgent: fence.agentId, actorInstance: fence.instance, fencingToken: fence.fencingToken,
-            delegationSeq: null, grantId: null });
+      return fencedWrite<{ grantId: string; stepsTaken: number }, string>(fence.tenantId, fence.executionId, fence, async (client, row) =>
+        consumeDecision(client, row, fence.tenantId, fence.executionId,
+          { agentId: fence.agentId, instance: fence.instance, fencingToken: fence.fencingToken }, envelope),
+      'consume', (reason) => ({ eventType: 'fenced_write_refused', outcome: 'refused', reason, actorAgent: fence.agentId,
+        actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: null }));
+    },
+
+    async receiveEnvelope({ tenantId, executionId, recipient, sender, envelope }) {
+      assertUuid(tenantId, 'tenantId');
+      assertUuid(executionId, 'executionId');
+      return runTenant(tenantId, async (client) => {
+        const locked = await lockAndFence(client, tenantId, executionId, null);
+        if (!locked.ok) { await beforeCommit('receive:not_found'); return { ok: false as const, reason: 'not_found' }; }
+        const row = locked.row;
+        const refuseAt = async (reason: string) => {
+          await audit(client, tenantId, executionId, { eventType: 'grant_rejected', outcome: 'refused', reason, actorAgent: recipient,
+            actorInstance: null, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
+          await beforeCommit(`receive:${reason}`);
           return { ok: false as const, reason };
         };
-        if (!structure.ok) return refuse(structure.reason);
-        const authorised = authoriseEnvelope({ value: envelope, record: recordOf(row), state: stateOf(row, open, consumed) });
-        if (!authorised.ok) return refuse(authorised.reason);
-        const grant = authorised.grant;
-        const consumedRows = await client.query<{ grant_id: string }>(
-          `UPDATE aegis.agent_grants SET status = 'consumed', consumed_at = clock_timestamp(), consumed_by_agent = $2,
-               consumed_by_fencing_token = $3
-            WHERE grant_id = $1 AND status = 'open' RETURNING grant_id`,
-          [grant.grantId, fence.agentId, fence.fencingToken]);
-        if (consumedRows.rows.length !== 1) throw new Error('grant changed under the execution lock');
-        await client.query('UPDATE aegis.agent_executions SET steps_taken = $2, version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1',
-          [fence.executionId, authorised.state.stepsTaken]);
-        await audit(client, fence.tenantId, fence.executionId, { eventType: 'grant_consumed', outcome: 'accepted', reason: null,
-          actorAgent: fence.agentId, actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: grant.grantId });
-        return { ok: true, value: { grantId: grant.grantId, stepsTaken: authorised.state.stepsTaken } };
-      }, 'consume', (reason) => ({ eventType: 'fenced_write_refused', outcome: 'refused', reason, actorAgent: fence.agentId,
-        actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: null }));
+        if (TERMINAL.includes(row.status)) return refuseAt('terminal');
+        const structure = checkEnvelopeStructure(envelope);
+        if (!structure.ok) return refuseAt(structure.reason);
+        // Addressing is checked before authorisation so a message for another agent is refused by name, not by grant lookup.
+        if (structure.envelope.to !== recipient) return refuseAt('wrong_recipient');
+        if (structure.envelope.from !== sender) return refuseAt('sender_mismatch');
+        const finalising = structure.envelope.kind === 'result' && recipient === row.root_agent;
+        if (finalising && row.lease_live) return refuseAt('lease_held');
+        const consumed = await consumeDecision(client, row, tenantId, executionId,
+          { agentId: recipient, instance: null, fencingToken: Number(row.fencing_token) }, envelope);
+        if (!consumed.ok) {
+          await beforeCommit(`receive:${consumed.reason}`);
+          return consumed;
+        }
+        if (finalising) {
+          await client.query(`UPDATE aegis.agent_executions SET status = 'succeeded', version = version + 1, updated_at = clock_timestamp()
+            WHERE execution_id = $1`, [executionId]);
+          await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
+            WHERE execution_id = $1 AND status = 'open'`, [executionId]);
+          await audit(client, tenantId, executionId, { eventType: 'succeeded', outcome: 'accepted', reason: 'result_received',
+            actorAgent: recipient, actorInstance: null, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: consumed.value.grantId });
+        }
+        await beforeCommit('receive:accepted');
+        return { ok: true as const, value: { grantId: consumed.value.grantId, finalised: finalising } };
+      });
     },
 
     async requestCancel(tenantId, executionId, actorDigest, reason) {

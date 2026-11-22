@@ -1,0 +1,9 @@
+# Go vet and unit tests for the SPIRE workload and the P5 agent proxy. Run from infra/spire:
+#   docker build --no-cache -f workload/Dockerfile.test -t aegis-workload-tests:local .
+# The pinned Go toolchain is the same one the workload image is built from.
+FROM golang@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac
+WORKDIR /src
+COPY workload/go.mod workload/go.sum ./
+RUN go mod download
+COPY workload/*.go ./
+RUN CGO_ENABLED=0 go vet ./... && CGO_ENABLED=0 go test -count=1 -v ./...

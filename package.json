@@ -28,6 +28,7 @@
     "spire:bootstrap": "node scripts/spire-bootstrap.mjs",
     "spire:register": "node scripts/spire-register.mjs",
     "test:spire": "node scripts/spire-acceptance.mjs",
+    "test:p5": "node scripts/p5-acceptance.mjs",
     "test:spire:outage": "node scripts/spire-acceptance.mjs --outage",
     "test:tempo-wal": "node scripts/tempo-wal-check.mjs --iterations=2"
   },

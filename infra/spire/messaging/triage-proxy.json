@@ -1,0 +1,14 @@
+{
+  "inbound": {
+    "listen": ":8443",
+    "forwardTo": "http://127.0.0.1:7100",
+    "allowClients": ["spiffe://aegis.local/workload/orchestrator"]
+  },
+  "outbound": {
+    "listen": "127.0.0.1:7001",
+    "peers": {
+      "orchestrator": { "url": "https://p5-orchestrator-proxy:8443", "serverId": "spiffe://aegis.local/workload/orchestrator" }
+    }
+  },
+  "identity": { "listen": "127.0.0.1:7002" }
+}

@@ -1,0 +1,4 @@
+# P5 orchestrator agent proxy: the P3 workload image with this agent's peer configuration baked in. No bind mounts, so the same image
+# runs under any Docker runtime. The binary holds no credentials and takes its SPIFFE ID only from the SPIRE Workload API.
+FROM aegis-spire-workload:local
+COPY orchestrator-proxy.json /etc/aegis/p5-proxy.json

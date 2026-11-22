@@ -226,3 +226,11 @@ node scripts/spire-acceptance.mjs --outage  # also expiry, server outage and age
 
 The acceptance-only services (the unregistered probe, the same-UID intruder, the impersonation server) run only with
 `docker compose --profile spire-tests up -d probe spire-agent-probe intruder rogue`.
+
+## 10. P5 agent proxies
+
+P5 adds one proxy per agent (`infra/spire/workload/proxy.go`, command `proxy`). It runs under the agent's registered UID, in the PID namespace of the agent's SPIRE agent, and it is the only component that performs mTLS for messages. Inbound connections are accepted only from exact SPIFFE IDs in `allowClients`; outbound deliveries are pinned to the exact SPIFFE ID of the destination. The configuration is baked into a small image (`infra/spire/messaging/Dockerfile.*-proxy`), so no bind mounts are used.
+
+Operational rule found during P5: a workload container that is recreated must have its SPIRE agent recreated as well, because the agent attests processes through the PID namespace it joined at creation. A recreated workload with an old agent gets no SVID. `scripts/p5-acceptance.mjs` recreates the agent pair before it starts the proxies.
+
+Negative tests in the containerised acceptance: a registered but non-allowed workload (`reviewer`) is refused by the triage proxy (exit 3); an unregistered workload (`probe`) obtains no SVID (exit 1). Go unit tests (`workload/Dockerfile.test`) cover the proxy configuration refusals: unknown fields, empty allow-list, foreign trust domain, plain HTTP peers, non-loopback listeners and malformed identities.

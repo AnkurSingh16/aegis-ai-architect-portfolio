@@ -5,7 +5,7 @@ FROM golang@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea7
 WORKDIR /src
 COPY workload/go.mod workload/go.sum ./
 RUN go mod download
-COPY workload/main.go ./
+COPY workload/*.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/aegis-workload .
 
 FROM node@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
