@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:prepare": "tsx src/storage/prepare-integration-roles.ts",
     "test:execution": "vitest run --config vitest.integration.config.ts src/orchestration",
     "test:messaging": "vitest run --config vitest.integration.config.ts src/orchestration/messaging",
     "ai:evaluate:local": "tsx src/ai/evaluation/run-local-evaluation.ts",

@@ -12,7 +12,7 @@ import type { DelegationChain } from '../types.js';
 // P4 in real PostgreSQL, in one process. Concurrency across processes is in execution-multiprocess.integration.test.ts.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
 const runtimeUrl = process.env.TEST_ROLE_URL_ORCHESTRATOR;
-if (!adminUrl || !runtimeUrl) throw new Error('Set TEST_DATABASE_ADMIN_URL and TEST_DATABASE_URL for real PostgreSQL tests.');
+if (!adminUrl || !runtimeUrl) throw new Error('Set TEST_DATABASE_ADMIN_URL and TEST_ROLE_URL_ORCHESTRATOR for real PostgreSQL tests.');
 
 const admin = new Pool({ connectionString: adminUrl, max: 2 });
 const pool = createDatabasePool(runtimeUrl, 8);

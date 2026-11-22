@@ -48,7 +48,8 @@ services:
       context: ./infra/keycloak
     image: aegis-keycloak:local
     restart: unless-stopped
-    command: ['start', '--import-realm', '--http-enabled=true', '--hostname=http://localhost:8180', '--health-enabled=true']
+    # 'start --optimized' uses the build from the image (see infra/keycloak/Dockerfile) and does not rebuild on every start.
+    command: ['start', '--optimized', '--import-realm', '--http-enabled=true', '--hostname=http://localhost:8180']
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
