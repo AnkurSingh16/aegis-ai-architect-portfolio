@@ -25,6 +25,7 @@
     "ai:evaluate:grounded:supported-output-diagnostic:local": "tsx src/ai/evaluation/run-grounded-supported-output-diagnostic-local.ts",
     "db:migrate": "tsx src/storage/migrate-cli.ts",
     "documents:ingest": "tsx src/documents/ingest-cli.ts",
+    "documents:ingest-local": "tsx src/documents/ingest-cli.ts --apply-local",
     "cases": "tsx src/storage/cli.ts",
     "memberships": "tsx src/auth/membership-cli.ts"
   },
