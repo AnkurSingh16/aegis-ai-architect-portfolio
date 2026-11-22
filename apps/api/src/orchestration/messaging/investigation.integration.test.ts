@@ -66,7 +66,7 @@ describe('investigation end to end (real PostgreSQL, real corpus)', () => {
     expect(result.rows[0].citations.every((c) => c.ref.startsWith('SYNTHETIC-NORTH-'))).toBe(true);
     expect(result.rows[0].answer.length).toBeGreaterThan(20);
     expect(await count(`SELECT count(*)::text AS n FROM aegis.agent_outbox WHERE execution_id = $1 AND status <> 'delivered'`, [started.executionId])).toBe(0);
-    const view = await readInvestigation(((t, op) => withMessagingContext(h.pools.gateway, { tenantId: t }, op as never)) as never,
+    const view = await readInvestigation(((t: string, op: never) => withMessagingContext(h.pools.gateway, { tenantId: t }, op)) as never,
       readerPrincipal(), { tenantId: NORTH, executionId: started.executionId });
     expect(view.result?.verdict).toBe('answered');
     expect(view.status).toBe('succeeded');

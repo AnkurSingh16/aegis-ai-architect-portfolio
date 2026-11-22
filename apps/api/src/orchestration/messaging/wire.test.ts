@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { argumentsDigest } from '../delegation.js';
 import { backoffSeconds, BACKOFF_CAP_SECONDS } from './backoff.js';
 import { buildWireMessage, MAX_PAYLOAD_BYTES, payloadDigest, validateWireMessage } from './wire.js';
-import { parseTriageArguments, triageEffect } from './workflow.js';
+import { parseTriageArguments } from './handlers.js';
+import { planFromQuestion } from '../../investigation/triage.js';
 
 const MESSAGE = '11111111-1111-4111-8111-111111111111';
 const TENANT = '22222222-2222-4222-8222-222222222222';
@@ -79,15 +80,14 @@ describe('P5 backoff', () => {
 
 describe('P5 triage effect (pure, read-only)', () => {
   it('depends only on the authorised arguments', () => {
-    expect(triageEffect(args)).toEqual({ verdict: 'documents_present', documentCount: 2, questionCode: 'status_check' });
-    expect(triageEffect({ ...args, documentCount: 0 }).verdict).toBe('no_documents');
+    expect(planFromQuestion('Which policy document covers approvals?').retrieve).toBe(true);
+    expect(planFromQuestion('What is the weather?').retrieve).toBe(false);
   });
 
   it('accepts only the exact argument shape', () => {
-    expect(parseTriageArguments(args)).not.toBeNull();
-    expect(parseTriageArguments({ ...args, extra: true })).toBeNull();
-    expect(parseTriageArguments({ ...args, documentCount: 101 })).toBeNull();
-    expect(parseTriageArguments({ ...args, questionCode: 'free_text' })).toBeNull();
+    expect(parseTriageArguments({ question: 'Which policy?' })).not.toBeNull();
+    expect(parseTriageArguments({ question: 'Which policy?', extra: true })).toBeNull();
+    expect(parseTriageArguments({ question: '' })).toBeNull();
     expect(parseTriageArguments('not an object')).toBeNull();
   });
 });

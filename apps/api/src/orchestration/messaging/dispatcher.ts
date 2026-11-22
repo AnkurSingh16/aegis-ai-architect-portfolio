@@ -170,7 +170,7 @@ async function finish(config: DispatcherConfig, scope: { tenantId: string }, mes
 
 /** Samples the backlog for the gauges. Read-only and scoped to this agent's own sender rows. */
 export async function sampleBacklog(pool: Pool, agentId: string, telemetry: MessagingTelemetry): Promise<{ pending: number; oldest: number }> {
-  const row = await withMessagingContext(pool, { agentId }, async (client) => {
+  const row = await withMessagingContext(pool, {}, async (client) => {
     const result = await client.query<{ pending: string; oldest: string | null }>(
       `SELECT count(*)::text AS pending, COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(created_at)), 0)::text AS oldest
          FROM aegis.agent_outbox WHERE sender_agent = $1 AND status IN ('pending', 'leased')`, [agentId]);

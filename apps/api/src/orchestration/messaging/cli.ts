@@ -88,8 +88,8 @@ async function submit(): Promise<unknown> {
   const principal: Principal = { issuer: 'synthetic-acceptance', subject, scopes: new Set(['read:cases']) };
   const pool = poolFrom('DATABASE_GATEWAY_URL');
   try {
-    const run = (tenant: string, op: Parameters<typeof withMessagingContext>[2]) => withMessagingContext(pool, { tenantId: tenant }, op);
-    return await submitInvestigation(run, principal, { tenantId, idempotencyKey: flag('idempotency-key') ?? randomUUID(), question });
+    const run = (tenant: string, op: never) => withMessagingContext(pool, { tenantId: tenant }, op);
+    return await submitInvestigation(run as never, principal, { tenantId, idempotencyKey: flag('idempotency-key') ?? randomUUID(), question });
   } finally {
     await pool.end();
   }

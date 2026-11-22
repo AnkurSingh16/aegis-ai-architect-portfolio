@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import type { PoolClient } from 'pg';
 import type { TenantQueryable, TenantRunner } from '../security/tool-approval-store.js';
 import { limits } from './contracts.js';
 
@@ -125,7 +124,7 @@ export async function requestCancellation(run: TenantRunner, principal: Principa
   if (!UUID.test(input.tenantId) || !UUID.test(input.executionId)) throw new GatewayError('invalid_request');
   if (!/^[a-z_]{1,40}$/.test(input.reason)) throw new GatewayError('invalid_request');
   const digest = principalDigest(principal.issuer, principal.subject);
-  return run(input.tenantId, async (client: TenantQueryable & PoolClient) => {
+  return run(input.tenantId, async (client) => {
     await membershipRole(client, principal, input.tenantId);
     const owned = (await client.query<{ principal_ref: string; status: string }>(
       'SELECT principal_ref, status FROM aegis.agent_executions WHERE execution_id = $1 AND tenant_id = $2', [input.executionId, input.tenantId])).rows[0];
