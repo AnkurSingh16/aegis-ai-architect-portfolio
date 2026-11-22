@@ -5,7 +5,7 @@ import { createDatabasePool } from '../../../storage/database.js';
 import type { ExecutionHooks } from '../../persistence/execution-store.js';
 import { dispatchOnce } from '../dispatcher.js';
 import { receiveMessage } from '../inbox.js';
-import { delegateAndDispatch, type DelegateAndDispatchInput } from '../workflow.js';
+import { delegateAndDispatch, type StepInput } from '../workflow.js';
 import { createMessagingTelemetry } from '../telemetry.js';
 
 interface ChildArgs {
@@ -18,8 +18,8 @@ interface ChildArgs {
   readonly pauseAfterDeliver?: boolean;
   readonly pauseBeforeAck?: boolean;
   readonly receive?: { receiver: string; peerSpiffeId: string; messageId: string; body: unknown };
-  readonly dispatch?: { agentId: string; egressUrl: string; leaseSeconds: number; batchSize: number };
-  readonly delegate?: DelegateAndDispatchInput;
+  readonly dispatch?: { agentId: string; egressUrl: string; leaseSeconds: number; batchSize: number };;
+  readonly delegate?: StepInput;
 }
 
 const args = JSON.parse(process.argv[2] ?? '{}') as ChildArgs;

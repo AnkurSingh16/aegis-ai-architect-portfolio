@@ -263,24 +263,24 @@ describe('dispatcher behaviour and isolation', () => {
 
   it('a stale holder\'s acknowledgement is refused after its lease is recovered by another dispatcher', async () => {
     const started = await startExecution(h);
-    const first = await withMessagingContext(h.pool, { agentId: 'orchestrator' }, (c) => claimDueMessages(c, { sender: 'orchestrator', limit: 50, instance: 'a', leaseSeconds: 1 }));
+    const first = await withMessagingContext(h.pool, {}, (c) => claimDueMessages(c, { sender: 'orchestrator', limit: 50, instance: 'a', leaseSeconds: 1 }));
     const mine = first.find((m) => m.messageId === started.requestMessageId)!;
     expect(mine.fencingToken).toBe(1);
     await sleep(1100);
-    const second = await withMessagingContext(h.pool, { agentId: 'orchestrator' }, (c) => claimDueMessages(c, { sender: 'orchestrator', limit: 50, instance: 'b', leaseSeconds: 30 }));
+    const second = await withMessagingContext(h.pool, {}, (c) => claimDueMessages(c, { sender: 'orchestrator', limit: 50, instance: 'b', leaseSeconds: 30 }));
     const recovered = second.find((m) => m.messageId === started.requestMessageId)!;
     expect(recovered).toMatchObject({ fencingToken: 2, previousStatus: 'leased' });
-    const stale = await withMessagingContext(h.pool, { tenantId: started.tenantId, agentId: 'orchestrator' }, (c) =>
+    const stale = await withMessagingContext(h.pool, { tenantId: started.tenantId }, (c) =>
       acknowledgeDelivery(c, { messageId: mine.messageId, fencingToken: 1 }));
     expect(stale).toBe(false);
-    const fresh = await withMessagingContext(h.pool, { tenantId: started.tenantId, agentId: 'orchestrator' }, (c) =>
+    const fresh = await withMessagingContext(h.pool, { tenantId: started.tenantId }, (c) =>
       acknowledgeDelivery(c, { messageId: mine.messageId, fencingToken: 2 }));
     expect(fresh).toBe(true);
   });
 
   it('concurrent claims lease disjoint messages (SKIP LOCKED), so no message is leased twice', async () => {
     for (let i = 0; i < 6; i += 1) await startExecution(h);
-    const claims = await Promise.all([0, 1, 2].map((i) => withMessagingContext(h.pool, { agentId: 'orchestrator' }, (c) =>
+    const claims = await Promise.all([0, 1, 2].map((i) => withMessagingContext(h.pool, {}, (c) =>
       claimDueMessages(c, { sender: 'orchestrator', limit: 4, instance: `c${i}`, leaseSeconds: 60 }))));
     const ids = claims.flat().map((m) => m.messageId);
     expect(new Set(ids).size).toBe(ids.length);
@@ -289,7 +289,7 @@ describe('dispatcher behaviour and isolation', () => {
 
   it('a dispatcher for one agent cannot acknowledge another sender\'s message, and a tenant scope cannot read another tenant', async () => {
     const started = await startExecution(h, { tenantId: h.tenantA });
-    const crossAck = await withMessagingContext(h.pool, { tenantId: h.tenantA, agentId: 'triage' }, (c) =>
+    const crossAck = await withMessagingContext(h.pool, { tenantId: h.tenantA }, (c) =>
       acknowledgeDelivery(c, { messageId: started.requestMessageId, fencingToken: 1 }));
     expect(crossAck).toBe(false);
     const seenByOtherTenant = await withMessagingContext(h.pool, { tenantId: h.tenantB }, (c) => c.query<{ n: string }>(
@@ -306,7 +306,7 @@ describe('dispatcher behaviour and isolation', () => {
     const started = await startExecution(h);
     await expect(h.pool.query('UPDATE aegis.agent_outbox SET payload = \'{}\'::jsonb WHERE message_id = $1', [started.requestMessageId]))
       .rejects.toThrow(/permission denied|42501/);
-    await expect(withMessagingContext(h.pool, { tenantId: started.tenantId, agentId: 'triage' }, (c) => c.query(
+    await expect(withMessagingContext(h.pool, { tenantId: started.tenantId }, (c) => c.query(
       `INSERT INTO aegis.agent_inbox (receiver_agent, message_id, tenant_id, execution_id, sender_agent, kind, payload_digest, outcome, grant_id, result_digest, decided_at)
        VALUES ('triage', $1, $2, $3, 'orchestrator', 'request', $4, 'processed', $5, $4, clock_timestamp())`,
       [randomUUID(), started.tenantId, started.executionId, 'f'.repeat(64), randomUUID()]))).rejects.toThrow();

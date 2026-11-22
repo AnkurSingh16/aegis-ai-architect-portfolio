@@ -115,7 +115,7 @@ export interface AgentExecutionStore {
    * exactly. A result envelope addressed to the root agent also finalises the execution (succeeded), under the same lock.
    */
   receiveEnvelope(input: { tenantId: string; executionId: string; recipient: string; sender: string; envelope: unknown }):
-    Promise<Result<{ grantId: string; finalised: boolean }, string>>;
+    Promise<Result<{ grantId: string }, string>>;
   requestCancel(tenantId: string, executionId: string, actorDigest: string, reason: string):
     Promise<Result<{ state: 'cancelled' | 'cancel_requested' }, 'not_found' | 'terminal'>>;
   snapshot(tenantId: string, executionId: string): Promise<ExecutionSnapshot | null>;
@@ -177,7 +177,7 @@ export function createAgentExecutionStore(runTenant: TenantRunner, hooks: Execut
     recordDelegation: observed('delegate', hooks, built.recordDelegation, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     issueGrant: observed('grant', hooks, built.issueGrant, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     consumeEnvelope: observed('consume', hooks, built.consumeEnvelope, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
-    receiveEnvelope: observed('consume', hooks, built.receiveEnvelope, (r, args) => ({ started: false, terminal: r.ok && r.value.finalised, recovered: false, reason: r.ok ? null : r.reason, executionId: String(args[0].executionId) })),
+    receiveEnvelope: observed('consume', hooks, built.receiveEnvelope, (r, args) => ({ started: false, terminal: false, recovered: false, reason: r.ok ? null : r.reason, executionId: String(args[0].executionId) })),
     requestCancel: observed('cancel', hooks, built.requestCancel, (r, args) => ({ started: false, terminal: r.ok && r.value.state === 'cancelled', recovered: false, reason: null, executionId: String(args[1]) })),
     snapshot: built.snapshot,
     delegations: built.delegations,
@@ -356,8 +356,7 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         WHERE grant_id = $1 AND status = 'open' RETURNING grant_id`,
       [grant.grantId, actor.agentId, actor.fencingToken]);
     if (consumedRows.rows.length !== 1) throw new Error('grant changed under the execution lock');
-    await client.query('UPDATE aegis.agent_executions SET steps_taken = $2, version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1',
-      [executionId, authorised.state.stepsTaken]);
+    // The step counter is maintained by the database when the grant is consumed (migration 018), not written here.
     await audit(client, tenantId, executionId, { eventType: 'grant_consumed', outcome: 'accepted', reason: null,
       actorAgent: actor.agentId, actorInstance: actor.instance, fencingToken: actor.fencingToken, delegationSeq: null, grantId: grant.grantId });
     return { ok: true, value: { grantId: grant.grantId, stepsTaken: authorised.state.stepsTaken } };
@@ -399,7 +398,9 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
       return runTenant(tenantId, async (client) => {
         // The worker is bound to a registration by its verified SPIFFE ID. Only the orchestrator role may drive an execution.
         const who = await client.query<{ agent_id: string; role: string }>(
-          `SELECT agent_id, role FROM aegis.agent_registrations WHERE spiffe_id = $1 AND status = 'active'`, [spiffeId]);
+          // P8: the registration must be the agent of this database session. The session's identity comes from its login role, so a
+          // process cannot claim as another agent by passing a different SPIFFE identifier.
+          `SELECT agent_id, role FROM aegis.agent_registrations WHERE spiffe_id = $1 AND status = 'active' AND agent_id = aegis.current_agent()`, [spiffeId]);
         const agent = who.rows[0];
         if (!agent) {
           const row = await lockAndFence(client, tenantId, executionId, null);
@@ -422,7 +423,8 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         if (row.lease_live) return refuse('lease_held');
         if (row.cancel_requested) {
           // Nothing holds the lease, so the cancellation is applied now, and open grants are revoked with it.
-          await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', version = version + 1, updated_at = clock_timestamp()
+          await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', version = version + 1, updated_at = clock_timestamp(),
+              workflow_stage = CASE WHEN workflow_stage IN ('completed', 'insufficient_evidence', 'failed', 'cancelled') THEN workflow_stage ELSE 'cancelled' END
             WHERE execution_id = $1`, [executionId]);
           await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
             WHERE execution_id = $1 AND status = 'open'`, [executionId]);
@@ -432,7 +434,9 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         }
         if (row.attempts >= row.max_attempts) {
           await client.query(`UPDATE aegis.agent_executions SET status = 'failed', lease_agent_id = NULL, lease_instance = NULL,
-              lease_expires_at = NULL, version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`, [executionId]);
+              lease_expires_at = NULL, version = version + 1, updated_at = clock_timestamp(),
+              workflow_stage = CASE WHEN workflow_stage IN ('completed', 'insufficient_evidence', 'failed', 'cancelled') THEN workflow_stage ELSE 'failed' END
+            WHERE execution_id = $1`, [executionId]);
           await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
             WHERE execution_id = $1 AND status = 'open'`, [executionId]);
           await audit(client, tenantId, executionId, { eventType: 'retry_exhausted', outcome: 'accepted', reason: 'retries_exhausted',
@@ -592,24 +596,16 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         // Addressing is checked before authorisation so a message for another agent is refused by name, not by grant lookup.
         if (structure.envelope.to !== recipient) return refuseAt('wrong_recipient');
         if (structure.envelope.from !== sender) return refuseAt('sender_mismatch');
-        const finalising = structure.envelope.kind === 'result' && recipient === row.root_agent;
-        if (finalising && row.lease_live) return refuseAt('lease_held');
         const consumed = await consumeDecision(client, row, tenantId, executionId,
           { agentId: recipient, instance: null, fencingToken: Number(row.fencing_token) }, envelope);
         if (!consumed.ok) {
           await beforeCommit(`receive:${consumed.reason}`);
           return consumed;
         }
-        if (finalising) {
-          await client.query(`UPDATE aegis.agent_executions SET status = 'succeeded', version = version + 1, updated_at = clock_timestamp()
-            WHERE execution_id = $1`, [executionId]);
-          await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
-            WHERE execution_id = $1 AND status = 'open'`, [executionId]);
-          await audit(client, tenantId, executionId, { eventType: 'succeeded', outcome: 'accepted', reason: 'result_received',
-            actorAgent: recipient, actorInstance: null, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: consumed.value.grantId });
-        }
+        // Finalisation is not a side effect of receiving a result. The orchestration layer decides what a result means (see
+        // messaging/handlers.ts): an intermediate result advances the workflow, and only the final review completes it.
         await beforeCommit('receive:accepted');
-        return { ok: true as const, value: { grantId: consumed.value.grantId, finalised: finalising } };
+        return { ok: true as const, value: { grantId: consumed.value.grantId } };
       });
     },
 

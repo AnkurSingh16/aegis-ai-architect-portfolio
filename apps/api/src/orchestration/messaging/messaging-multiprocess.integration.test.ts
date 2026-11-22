@@ -99,7 +99,7 @@ describe('dispatcher crashes', () => {
     const orchestrator = await stub(SPIFFE.orchestrator);
     const started = await startExecution(h);
     const child = spawnMessagingWorker({ op: 'dispatch', dbUrl, pauseBeforeDeliver: true,
-      dispatch: { agentId: 'orchestrator', egressUrl: orchestrator.url, leaseSeconds: 1, batchSize: 8 } });
+      dispatch: {} });
     await child.waitForEvent('PAUSED');
     child.kill();
     await child.exited();
@@ -120,7 +120,7 @@ describe('dispatcher crashes', () => {
     const orchestrator = await stub(SPIFFE.orchestrator);
     const started = await startExecution(h);
     const child = spawnMessagingWorker({ op: 'dispatch', dbUrl, pauseBeforeAck: true,
-      dispatch: { agentId: 'orchestrator', egressUrl: orchestrator.url, leaseSeconds: 1, batchSize: 8 } });
+      dispatch: {} });
     await child.waitForEvent('PAUSED');
     child.kill();
     await child.exited();
@@ -140,7 +140,7 @@ describe('dispatcher crashes', () => {
     const started = [] as string[];
     for (let i = 0; i < 12; i += 1) started.push((await startExecution(h)).requestMessageId);
     const children = [0, 1, 2].map(() => spawnMessagingWorker({ op: 'dispatch', dbUrl,
-      dispatch: { agentId: 'orchestrator', egressUrl: orchestrator.url, leaseSeconds: 30, batchSize: 4 } }));
+      dispatch: {} }));
     const summaries = await Promise.all(children.map(async (c) => (await c.exited()).events.find((e) => e.event === 'RESULT')?.summary as { claimed: number }));
     expect(summaries.reduce((sum, s) => sum + s.claimed, 0)).toBe(12);
     for (const id of started) {
