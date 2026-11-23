@@ -1,23 +1,20 @@
-import { createHash } from 'node:crypto';
-import type { Pool } from 'pg';
-import { createDatabasePool, verifyRuntimeRole } from '../../storage/database.js';
-import { createAgentExecutionStore, type ExecutionHooks } from '../persistence/execution-store.js';
-import { createExecutionTelemetry } from '../persistence/execution-telemetry.js';
-import type { TenantRunner } from '../../security/tool-approval-store.js';
+import { Pool } from 'pg';
+import { createDatabasePool } from '../../storage/database.js';
+import { requeueDeadMessage, purgeDelivered } from './outbox.js';
 import { withMessagingContext } from './context.js';
-import { ACTION_REQUEST, ACTION_RESULT, TRIAGE_AGENT, WORKFLOW_SCOPES, delegateAndDispatch, type TriageArguments } from './workflow.js';
-import { purgeDelivered, requeueDeadMessage } from './outbox.js';
 import { createMessagingTelemetry } from './telemetry.js';
+import { submitInvestigation, type Principal } from '../../investigation/gateway.js';
+import { createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 /**
- * Operator and workflow commands. They run inside the orchestrator runtime's network namespace, so they reach PostgreSQL the same way the
- * runtime does, and the orchestrator identity they act as is the one its proxy verified.
- *
- *   start      create (or resume, by idempotency key) a tenant-bound execution and dispatch the triage request
- *   status     show the execution, its messages, inbox receipts and audit (bounded fields only)
- *   dead       list dead-lettered messages for a tenant
- *   requeue    operator action: requeue one dead message with a bounded new budget, audited
- *   purge      retention: delete delivered messages older than a cutoff, for one tenant
+ * Operator and acceptance commands. Each runs under its own database role, so no command can do another's work:
+ *   status     the execution, its stage, messages and audit for one tenant (orchestrator role, read-only use)
+ *   dead       dead-lettered messages for one tenant (operator role)
+ *   requeue    operator action: requeue one dead message with a bounded new budget, audited (operator role)
+ *   purge      operator retention: delete delivered messages older than a cutoff (operator role)
+ *   submit     SYNTHETIC ACCEPTANCE ONLY. Submits an investigation through the gateway role for a synthetic principal. It requires
+ *              --synthetic-acceptance and the synthetic issuer, and it cannot be used for authenticated operation (use the API).
  */
 
 const args = process.argv.slice(2);
@@ -35,59 +32,13 @@ function requireUuid(name: string): string {
   return value;
 }
 
-const pool: Pool = createDatabasePool(process.env.DATABASE_URL ?? '', 4);
-const runTenant: TenantRunner = (tenantId, operation) => withMessagingContext(pool, { tenantId, agentId: 'orchestrator' }, operation);
-
-async function identity(): Promise<string> {
-  const response = await fetch(`${process.env.AEGIS_PROXY_IDENTITY_URL ?? 'http://127.0.0.1:7002'}/v1/identity`, { signal: AbortSignal.timeout(3000) });
-  const body = await response.json() as { spiffeId?: string };
-  if (!body.spiffeId) throw new Error('no identity');
-  return body.spiffeId;
+function poolFrom(envName: string): Pool {
+  const url = process.env[envName];
+  if (!url) throw new Error(`${envName} is required for this command`);
+  return createDatabasePool(url, 2);
 }
 
-async function start(): Promise<unknown> {
-  const tenantId = requireUuid('tenant');
-  const caseRef = requireUuid('case');
-  const documentCount = Number(flag('document-count') ?? '1');
-  const principal = flag('principal') ?? 'acceptance-operator';
-  const hooks: ExecutionHooks = { onDecision: createExecutionTelemetry().onDecision };
-  const spiffeId = await identity();
-  const store = createAgentExecutionStore(runTenant, hooks);
-  const principalRef = sha(`principal:${principal}`);
-  const created = await store.createExecution({ tenantId, idempotencyKey: `p5-workflow:${caseRef}`, principalRef,
-    principalScopes: ['case:read', 'document:read'], limits: { maxDepth: 3, maxDelegations: 4, maxSteps: 8 }, grantTtlSeconds: 300, maxAttempts: 5 });
-  const claim = await store.claim({ tenantId, executionId: created.executionId, spiffeId, instance: 'workflow-cli', leaseSeconds: 60 });
-  if (!claim.ok) return { status: 'refused', stage: 'claim', reason: claim.reason, executionId: created.executionId };
-  const triage: TriageArguments = { caseRef, documentCount, questionCode: 'status_check' };
-  const maxAttempts = Number(flag('max-attempts') ?? '6');
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10) throw new Error('--max-attempts must be 1..10');
-  const dispatched = await delegateAndDispatch(pool, hooks, { tenantId, fence: { tenantId, executionId: created.executionId,
-    agentId: claim.value.agentId, instance: 'workflow-cli', fencingToken: claim.value.fencingToken }, to: TRIAGE_AGENT,
-  requestedScopes: [...WORKFLOW_SCOPES], action: ACTION_REQUEST, resultAction: ACTION_RESULT, arguments: triage, maxAttempts });
-  if (!dispatched.ok) return { status: 'refused', stage: 'dispatch', reason: dispatched.reason, executionId: created.executionId };
-  return { status: 'dispatched', executionId: created.executionId, requestMessageId: dispatched.requestMessageId,
-    created: created.created, delegationSeq: dispatched.delegationSeq };
-}
-
-async function status(): Promise<unknown> {
-  const tenantId = requireUuid('tenant');
-  const executionId = requireUuid('execution');
-  return withMessagingContext(pool, { tenantId }, async (client) => {
-    const execution = await client.query<{ status: string; fencing_token: string; steps_taken: number; delegations_issued: number }>(
-      'SELECT status, fencing_token::text AS fencing_token, steps_taken, delegations_issued FROM aegis.agent_executions WHERE execution_id = $1', [executionId]);
-    const messages = await client.query<{ message_id: string; kind: string; sender_agent: string; destination_agent: string; status: string;
-      attempts: number; dead_reason: string | null; last_error: string | null }>(
-      `SELECT message_id, kind, sender_agent, destination_agent, status, attempts, dead_reason, last_error
-         FROM aegis.agent_outbox WHERE execution_id = $1 ORDER BY created_at, message_id`, [executionId]);
-    const inbox = await client.query<{ receiver_agent: string; outcome: string; refusal_reason: string | null }>(
-      'SELECT receiver_agent, outcome, refusal_reason FROM aegis.agent_inbox WHERE execution_id = $1 ORDER BY received_at', [executionId]);
-    const events = await client.query<{ event_type: string; outcome: string; reason: string | null }>(
-      'SELECT event_type, outcome, reason FROM aegis.agent_execution_events WHERE execution_id = $1 ORDER BY event_id', [executionId]);
-    return { execution: execution.rows[0] ?? null, messages: messages.rows, inbox: inbox.rows, executionEvents: events.rows };
-  });
-}
-
-async function dead(): Promise<unknown> {
+async function dead(pool: Pool): Promise<unknown> {
   const tenantId = requireUuid('tenant');
   return withMessagingContext(pool, { tenantId }, async (client) => (await client.query<{ message_id: string; execution_id: string;
     sender_agent: string; destination_agent: string; dead_reason: string | null; attempts: number }>(
@@ -95,7 +46,7 @@ async function dead(): Promise<unknown> {
       WHERE status = 'dead' ORDER BY dead_at`, [])).rows);
 }
 
-async function requeue(): Promise<unknown> {
+async function requeue(pool: Pool): Promise<unknown> {
   const tenantId = requireUuid('tenant');
   const messageId = requireUuid('message');
   const operator = flag('operator');
@@ -110,7 +61,7 @@ async function requeue(): Promise<unknown> {
   return { requeued: done, messageId };
 }
 
-async function purge(): Promise<unknown> {
+async function purge(pool: Pool): Promise<unknown> {
   const tenantId = requireUuid('tenant');
   const hours = Number(flag('older-than-hours') ?? '168');
   if (!Number.isInteger(hours) || hours < 1) throw new Error('--older-than-hours must be a positive integer');
@@ -118,24 +69,50 @@ async function purge(): Promise<unknown> {
   return { deleted };
 }
 
-async function main(): Promise<void> {
-  await verifyRuntimeRole(pool);
-  const handlers: Record<string, () => Promise<unknown>> = { start, status, dead, requeue, purge };
-  const handler = command ? handlers[command] : undefined;
-  if (!handler) {
-    process.stderr.write('usage: cli.js start|status|dead|requeue|purge [flags]\n');
-    process.exitCode = 2;
-    return;
-  }
+async function status(pool: Pool): Promise<unknown> {
+  const tenantId = requireUuid('tenant');
+  const executionId = requireUuid('execution');
+  return withMessagingContext(pool, { tenantId }, async (client) => {
+    const execution = await client.query('SELECT status, workflow_stage, fencing_token::text AS fencing_token, steps_taken, delegations_issued FROM aegis.agent_executions WHERE execution_id = $1', [executionId]);
+    const messages = await client.query('SELECT kind, sender_agent, destination_agent, status, attempts, dead_reason FROM aegis.agent_outbox WHERE execution_id = $1 ORDER BY created_at, message_id', [executionId]);
+    const inbox = await client.query('SELECT receiver_agent, outcome, refusal_reason FROM aegis.agent_inbox WHERE execution_id = $1 ORDER BY received_at', [executionId]);
+    return { execution: execution.rows[0] ?? null, messages: messages.rows, inbox: inbox.rows };
+  });
+}
+
+async function submit(): Promise<unknown> {
+  if (!args.includes('--synthetic-acceptance')) throw new Error('submit is for synthetic acceptance only; use the authenticated API');
+  const tenantId = requireUuid('tenant');
+  const question = flag('question') ?? '';
+  const subject = flag('subject') ?? 'synthetic-acceptance-user';
+  const principal: Principal = { issuer: 'synthetic-acceptance', subject, scopes: new Set(['read:cases']) };
+  const pool = poolFrom('DATABASE_GATEWAY_URL');
   try {
-    process.stdout.write(`${JSON.stringify(await handler())}\n`);
+    const run = (tenant: string, op: never) => withMessagingContext(pool, { tenantId: tenant }, op);
+    return await submitInvestigation(run as never, principal, { tenantId, idempotencyKey: flag('idempotency-key') ?? randomUUID(), question });
   } finally {
     await pool.end();
   }
 }
 
+async function main(): Promise<void> {
+  const commands: Record<string, () => Promise<unknown>> = {
+    status: async () => { const p = poolFrom('DATABASE_URL'); try { return await status(p); } finally { await p.end(); } },
+    dead: async () => { const p = poolFrom('DATABASE_OPERATOR_URL'); try { return await dead(p); } finally { await p.end(); } },
+    requeue: async () => { const p = poolFrom('DATABASE_OPERATOR_URL'); try { return await requeue(p); } finally { await p.end(); } },
+    purge: async () => { const p = poolFrom('DATABASE_OPERATOR_URL'); try { return await purge(p); } finally { await p.end(); } },
+    submit,
+  };
+  const handler = command ? commands[command] : undefined;
+  if (!handler) {
+    process.stderr.write('usage: cli.js status|dead|requeue|purge|submit [flags]\n');
+    process.exitCode = 2;
+    return;
+  }
+  process.stdout.write(`${JSON.stringify(await handler())}\n`);
+}
+
 main().catch((error: unknown) => {
   process.stderr.write(`${JSON.stringify({ event: 'cli_error', error: error instanceof Error ? error.message : 'error' })}\n`);
   process.exitCode = 1;
-  void pool.end();
 });

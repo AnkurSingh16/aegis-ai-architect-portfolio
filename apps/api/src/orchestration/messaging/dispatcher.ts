@@ -49,16 +49,16 @@ export async function dispatchOnce(config: DispatcherConfig): Promise<DispatchSu
   const summary: DispatchSummary = { claimed: 0, delivered: 0, retried: 0, dead: 0, ackRefused: 0, recovered: 0 };
 
   // Expired leases with no attempts left are dead-lettered first, so the claim below never re-sends them.
-  const swept = await withMessagingContext(config.pool, { agentId: config.agentId }, (client) => deadLetterExhaustedLeases(client, config.agentId));
+  const swept = await withMessagingContext(config.pool, {}, (client) => deadLetterExhaustedLeases(client, config.agentId));
   for (const row of swept) {
-    await withMessagingContext(config.pool, { tenantId: row.tenant_id, agentId: config.agentId }, (client) => recordMessageEvent(client, {
+    await withMessagingContext(config.pool, { tenantId: row.tenant_id }, (client) => recordMessageEvent(client, {
       tenantId: row.tenant_id, executionId: row.execution_id, messageId: row.message_id, eventType: 'dead_lettered', actorAgent: config.agentId,
       fencingToken: null, reason: 'retry_exhausted' }));
     config.telemetry.deliveryDecision('dead', 'retry_exhausted', config.agentId);
     summary.dead += 1;
   }
 
-  const claimed = await withMessagingContext(config.pool, { agentId: config.agentId }, (client) => claimDueMessages(client, {
+  const claimed = await withMessagingContext(config.pool, {}, (client) => claimDueMessages(client, {
     sender: config.agentId, limit: config.batchSize, instance: config.instance, leaseSeconds: config.leaseSeconds }));
   summary.claimed = claimed.length;
   for (const message of claimed) {
@@ -73,7 +73,7 @@ export async function dispatchOnce(config: DispatcherConfig): Promise<DispatchSu
 
 async function deliverOne(config: DispatcherConfig, message: ClaimedMessage, summary: DispatchSummary): Promise<void> {
   const fence = { messageId: message.messageId, fencingToken: message.fencingToken };
-  const scope = { tenantId: message.tenantId, agentId: config.agentId };
+  const scope = { tenantId: message.tenantId };
   await config.telemetry.span('aegis.message.deliver', {
     'aegis.message.id': message.messageId, 'aegis.execution.id': message.executionId, 'aegis.message.sender': config.agentId,
     'aegis.message.destination': message.destination, 'aegis.message.attempt': message.attempts,
@@ -141,7 +141,7 @@ async function deliverOne(config: DispatcherConfig, message: ClaimedMessage, sum
   });
 }
 
-async function finish(config: DispatcherConfig, scope: { tenantId: string; agentId: string }, message: ClaimedMessage,
+async function finish(config: DispatcherConfig, scope: { tenantId: string }, message: ClaimedMessage,
   fence: { messageId: string; fencingToken: number }, outcome: 'retry' | 'dead', reason: { deadReason: string; lastError: string }, delay: number,
   summary: DispatchSummary): Promise<void> {
   const applied = await withMessagingContext(config.pool, scope, async (client) => {
@@ -170,7 +170,7 @@ async function finish(config: DispatcherConfig, scope: { tenantId: string; agent
 
 /** Samples the backlog for the gauges. Read-only and scoped to this agent's own sender rows. */
 export async function sampleBacklog(pool: Pool, agentId: string, telemetry: MessagingTelemetry): Promise<{ pending: number; oldest: number }> {
-  const row = await withMessagingContext(pool, { agentId }, async (client) => {
+  const row = await withMessagingContext(pool, {}, async (client) => {
     const result = await client.query<{ pending: string; oldest: string | null }>(
       `SELECT count(*)::text AS pending, COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(created_at)), 0)::text AS oldest
          FROM aegis.agent_outbox WHERE sender_agent = $1 AND status IN ('pending', 'leased')`, [agentId]);

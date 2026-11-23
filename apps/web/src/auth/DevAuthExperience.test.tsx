@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import DevAuthExperience from './DevAuthExperience';
 
 const authMocks = vi.hoisted(() => ({
@@ -77,7 +77,7 @@ describe('protected case experience', () => {
   it('offers sign-in without calling the API when unauthenticated', () => {
     globalThis.fetch = vi.fn();
     render(<DevAuthExperience config={config} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(within(screen.getByRole('region', { name: 'Protected case access' })).getByRole('button', { name: 'Sign in' }));
     expect(authMocks.loginWithRedirect).toHaveBeenCalledOnce();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
@@ -455,7 +455,7 @@ describe('protected case experience', () => {
     authMocks.state = { isAuthenticated: false, isLoading: false };
     authMocks.loginWithRedirect.mockRejectedValue(new Error('token secret detail'));
     render(<DevAuthExperience config={config} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(within(screen.getByRole('region', { name: 'Protected case access' })).getByRole('button', { name: 'Sign in' }));
     expect(await screen.findByText(/Sign-in could not be completed/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('token secret detail');
   });

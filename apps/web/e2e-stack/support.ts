@@ -10,6 +10,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 export const env: Record<string, string> = Object.fromEntries(readFileSync(join(root, '.env.local'), 'utf8').split('\n')
   .map((line) => /^([A-Z0-9_]+)=(.*)$/.exec(line.trim())).filter((m): m is RegExpExecArray => m !== null).map((m) => [m[1], m[2]]));
 
+/** The case-access panel's own sign-in control. The investigation panel also has a sign-in button, so queries are scoped to this region. */
+export const caseAccessSignIn = (page: Page) => page.getByRole('region', { name: 'Protected case access' }).getByRole('button', { name: 'Sign in', exact: true });
+
 export const TENANT_NORTH = '10000000-0000-4000-8000-000000000001';
 export const TENANT_SOUTH = '20000000-0000-4000-8000-000000000002';
 export const WEB = process.env.AEGIS_WEB_BASE_URL ?? 'http://localhost:5190';
@@ -49,7 +52,7 @@ export async function waitForContainerHealthy(container: string, timeoutMs = 180
 export async function signIn(page: Page, username: string): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     await page.goto(`${WEB}/`);
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await caseAccessSignIn(page).click();
     await page.waitForURL(/localhost:8180\/realms\/aegis/);
     await page.locator('#username').fill(username);
     await page.locator('#password').fill(PASSWORD);

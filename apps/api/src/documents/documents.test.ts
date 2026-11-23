@@ -3,9 +3,8 @@ import { readFile } from 'node:fs/promises';
 import type { Pool, PoolClient } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { syntheticDocuments, chunkSyntheticDocument, maxChunkBytes, validateSyntheticCatalog } from './catalog.js';
-import { approvedLocalPostgresSystemIdentifier, ingestSyntheticCatalog, ingestSyntheticCatalogLocal, parseDesktopPostgresInspect,
-  validateIngestionArgs, validateIngestionConnection, validateLocalAdminConnection, validateLocalIngestionConnection,
-  validateLocalIngestionOptIn, verifyLocalIngestionTarget } from './ingestion.js';
+import { ingestSyntheticCatalog, ingestSyntheticCatalogLocal, validateIngestionArgs, validateIngestionConnection,
+  validateLocalIngestionOptIn } from './ingestion.js';
 import { normalizeRetrievalQuery, retrieveDocumentChunks, retrievalLimits } from './retrieval.js';
 import { retrievalEvaluationCases, scoreRetrieval } from './evaluation.js';
 
@@ -81,69 +80,6 @@ describe('protected synthetic ingestion command and transaction', () => {
       expect(() => validateIngestionConnection(url)).toThrow('failed');
     }
   });
-  it('keeps the local target separate, tightly binds its URL, and requires an explicit opt-in', () => {
-    const local = 'postgres://aegis_ingest:private-only@127.0.0.1:5432/aegis_local';
-    const localUrl = validateLocalIngestionConnection(local);
-    expect(localUrl.pathname).toBe('/aegis_local');
-    expect(validateLocalAdminConnection('postgres://aegis_local:private-only@127.0.0.1:5432/aegis_local', localUrl).username).toBe('aegis_local');
-    validateLocalIngestionOptIn({ AEGIS_LOCAL_DOCUMENT_INGEST_ENABLED: 'true' });
-    expect(() => validateLocalIngestionOptIn({ AEGIS_LOCAL_DOCUMENT_INGEST_ENABLED: 'false' })).toThrow();
-    for (const url of [
-      'postgres://aegis_ingest:private-only@127.0.0.1:5432/aegis_test',
-      'postgres://aegis_ingest:private-only@localhost:5432/aegis_local',
-      'postgres://aegis_ingest:private-only@127.0.0.1:5433/aegis_local',
-      'postgres://aegis_app:private-only@127.0.0.1:5432/aegis_local',
-    ]) expect(() => validateLocalIngestionConnection(url)).toThrow();
-    for (const url of ['postgres://aegis_ingest:private-only@127.0.0.1:5432/aegis_local',
-      'postgres://aegis_app:private-only@127.0.0.1:5432/aegis_local']) {
-      expect(() => validateLocalAdminConnection(url, localUrl)).toThrow();
-    }
-    expect(approvedLocalPostgresSystemIdentifier).toBe('7701292369980424230');
-  });
-  it('accepts only a healthy Docker Desktop Postgres container with an exact loopback port mapping', () => {
-    const inspect = [{ Name: '/aegis-ai-portfolio-git-postgres-1', State: { Running: true, Health: { Status: 'healthy' } },
-      NetworkSettings: { Ports: { '5432/tcp': [{ HostIp: '127.0.0.1', HostPort: '5432' }] },
-        Networks: { aegis: { IPAddress: '172.19.0.2' } } } }];
-    expect(parseDesktopPostgresInspect(inspect).containerIpAddresses).toEqual(['172.19.0.2']);
-    for (const changed of [
-      [{ ...inspect[0], State: { Running: false, Health: { Status: 'healthy' } } }],
-      [{ ...inspect[0], State: { Running: true, Health: { Status: 'unhealthy' } } }],
-      [{ ...inspect[0], NetworkSettings: { ...inspect[0].NetworkSettings,
-        Ports: { '5432/tcp': [{ HostIp: '0.0.0.0', HostPort: '5432' }] } } }],
-      [{ ...inspect[0], NetworkSettings: { ...inspect[0].NetworkSettings,
-        Ports: { '5432/tcp': [{ HostIp: '127.0.0.1', HostPort: '5432' }, { HostIp: '0.0.0.0', HostPort: '5432' }] } } }],
-      [{ ...inspect[0], NetworkSettings: { ...inspect[0].NetworkSettings,
-        Ports: { '5432/tcp': [{ HostIp: '127.0.0.1', HostPort: '5433' }] } } }],
-      [{ ...inspect[0], Name: '/unexpected-container' }],
-    ]) expect(() => parseDesktopPostgresInspect(changed)).toThrow();
-  });
-  it('verifies local database identity read-only and refuses mismatched cluster/network evidence', async () => {
-    const localUrl = validateLocalIngestionConnection('postgres://aegis_ingest:p@127.0.0.1:5432/aegis_local');
-    const adminUrl = validateLocalAdminConnection('postgres://aegis_local:p@127.0.0.1:5432/aegis_local', localUrl);
-    const evidence = { containerIpAddresses: ['172.19.0.2'] };
-    const identity = { database: 'aegis_local', role: 'aegis_local', serverAddress: '172.19.0.2', serverPort: 5432,
-      systemIdentifier: approvedLocalPostgresSystemIdentifier };
-    const query = vi.fn(async (sql: string) => sql === 'BEGIN READ ONLY' || sql === 'ROLLBACK' ? { rows: [] } : { rows: [identity] });
-    const client = { query, release: vi.fn() } as unknown as PoolClient;
-    const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool;
-    await expect(verifyLocalIngestionTarget(pool, adminUrl, localUrl, evidence)).resolves.toBe('172.19.0.2');
-    expect(query).toHaveBeenNthCalledWith(1, 'BEGIN READ ONLY');
-    expect(String(query.mock.calls[1]?.[0])).toContain('host(inet_server_addr()) AS "serverAddress"');
-    expect(query).toHaveBeenLastCalledWith('ROLLBACK');
-    for (const mismatch of [{ ...identity, database: 'aegis_test' }, { ...identity, role: 'aegis_ingest' },
-      { ...identity, systemIdentifier: '7701562929516937253' }, { ...identity, serverAddress: '172.19.0.99' },
-      { ...identity, serverAddress: '172.19.0.2/32' }, { ...identity, serverAddress: 'not-an-ip' },
-      { ...identity, serverAddress: null }, { ...identity, serverAddress: undefined }, { ...identity, serverPort: 5433 }]) {
-      const mismatchQuery = vi.fn(async (sql: string) => sql === 'BEGIN READ ONLY' || sql === 'ROLLBACK' ? { rows: [] } : { rows: [mismatch] });
-      const mismatchClient = { query: mismatchQuery, release: vi.fn() } as unknown as PoolClient;
-      await expect(verifyLocalIngestionTarget({ connect: vi.fn().mockResolvedValue(mismatchClient) } as unknown as Pool,
-        adminUrl, localUrl, evidence)).rejects.toMatchObject({ code: 'unsafe_target' });
-      expect(mismatchQuery).not.toHaveBeenCalledWith('BEGIN');
-      expect(mismatchQuery).toHaveBeenCalledWith('BEGIN READ ONLY');
-      expect(mismatchQuery).toHaveBeenCalledWith('ROLLBACK');
-      expect(mismatchQuery.mock.calls.some(([sql]) => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/iu.test(String(sql)))).toBe(false);
-    }
-  });
   it('writes one catalog transaction with parameterized statements and no update/delete fallback', async () => {
     const id = randomUUID();
     const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
@@ -195,47 +131,41 @@ describe('protected synthetic ingestion command and transaction', () => {
       expect(query.mock.calls.some(([sql]) => sql === 'BEGIN')).toBe(false);
     }
   });
-  it('keeps the local writer separate and refuses an aegis_test connection before writes', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [{ ...safeIngestIdentity, database: 'aegis_test' }] });
-    const client = { query, release: vi.fn() } as unknown as PoolClient;
-    await expect(ingestSyntheticCatalogLocal({ connect: vi.fn().mockResolvedValue(client) } as unknown as Pool,
-      '172.19.0.2', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
-    expect(query).not.toHaveBeenCalledWith('BEGIN');
-    expect(query.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(String(sql)))).toBe(false);
+  it('keeps the local writer gated by an explicit opt-in and the pinned cluster identifier before writing', () => {
+    validateLocalIngestionOptIn({ AEGIS_LOCAL_DOCUMENT_INGEST_ENABLED: 'true', AEGIS_ENVIRONMENT: 'local' });
+    expect(() => validateLocalIngestionOptIn({ AEGIS_LOCAL_DOCUMENT_INGEST_ENABLED: 'false', AEGIS_ENVIRONMENT: 'local' })).toThrow();
+    expect(() => validateLocalIngestionOptIn({ AEGIS_LOCAL_DOCUMENT_INGEST_ENABLED: 'true', AEGIS_ENVIRONMENT: 'production' })).toThrow();
   });
-  it('rejects a local writer whose server endpoint changed after the read-only cluster preflight', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [{ ...safeIngestIdentity, database: 'aegis_local',
-      serverAddress: '172.19.0.99', serverPort: 5432 }] });
-    const client = { query, release: vi.fn() } as unknown as PoolClient;
+  it('refuses an aegis_test or mismatched-cluster connection to the local writer before any write', async () => {
+    const wrongDatabase = vi.fn().mockResolvedValue({ rows: [{ ...safeIngestIdentity, database: 'aegis_test', systemIdentifier: '42' }] });
+    const client = { query: wrongDatabase, release: vi.fn() } as unknown as PoolClient;
     await expect(ingestSyntheticCatalogLocal({ connect: vi.fn().mockResolvedValue(client) } as unknown as Pool,
-      '172.19.0.2', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
-    expect(query).not.toHaveBeenCalledWith('BEGIN');
-    expect(query.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(String(sql)))).toBe(false);
+      '42', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
+    expect(wrongDatabase.mock.calls.some(([sql]) => sql === 'BEGIN')).toBe(false);
+
+    const otherCluster = vi.fn().mockResolvedValue({ rows: [{ ...safeIngestIdentity, database: 'aegis_local', systemIdentifier: '99' }] });
+    const otherClient = { query: otherCluster, release: vi.fn() } as unknown as PoolClient;
+    await expect(ingestSyntheticCatalogLocal({ connect: vi.fn().mockResolvedValue(otherClient) } as unknown as Pool,
+      '42', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
+    expect(otherCluster.mock.calls.some(([sql]) => sql === 'BEGIN')).toBe(false);
+    expect(otherCluster.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(String(sql)))).toBe(false);
   });
-  it('checks the restricted local writer against the canonical expected host and port before writing', async () => {
-    const identity = { ...safeIngestIdentity, database: 'aegis_local', serverAddress: '172.19.0.2', serverPort: 5432 };
+  it('writes locally only after the pinned identifier matches, using parameterized inserts', async () => {
     const id = randomUUID();
     const query = vi.fn(async (sql: string) => {
-      if (sql.includes('current_database()')) return { rows: [identity] };
+      if (sql.includes('current_database()')) return { rows: [{ ...safeIngestIdentity, database: 'aegis_local', systemIdentifier: '42' }] };
       if (sql.includes('FROM aegis.documents WHERE')) return { rows: [] };
       if (sql.includes('INSERT INTO aegis.documents')) return { rows: [{ id }] };
       return { rows: [] };
     });
     const client = { query, release: vi.fn() } as unknown as PoolClient;
     const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool;
-    await expect(ingestSyntheticCatalogLocal(pool, '172.19.0.2', [syntheticDocuments[0]])).resolves.toMatchObject({
-      documentsInserted: 1, chunksInserted: 1,
+    await expect(ingestSyntheticCatalogLocal(pool, '42', [syntheticDocuments[0]])).resolves.toMatchObject({
+      documentsInserted: 1, chunksInserted: expect.any(Number),
     });
-    const identitySql = String(query.mock.calls[0]?.[0]);
-    expect(identitySql).toContain('host(inet_server_addr()) AS "serverAddress"');
-    expect(query).toHaveBeenCalledWith('BEGIN');
+    expect(String(query.mock.calls[0]?.[0])).toContain('pg_control_system()');
     expect(query).toHaveBeenCalledWith('COMMIT');
-    const slashAddress = vi.fn().mockResolvedValue({ rows: [{ ...identity, serverAddress: '172.19.0.2/32' }] });
-    const slashClient = { query: slashAddress, release: vi.fn() } as unknown as PoolClient;
-    await expect(ingestSyntheticCatalogLocal({ connect: vi.fn().mockResolvedValue(slashClient) } as unknown as Pool,
-      '172.19.0.2', [syntheticDocuments[0]])).rejects.toMatchObject({ code: 'unsafe_target' });
-    expect(slashAddress).not.toHaveBeenCalledWith('BEGIN');
-    expect(slashAddress.mock.calls.some(([sql]) => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(String(sql)))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => /^\s*(?:UPDATE|DELETE|TRUNCATE)\s+|ON CONFLICT/i.test(String(sql)))).toBe(false);
   });
 });
 

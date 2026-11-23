@@ -67,7 +67,7 @@ describe('migration 016 on disposable databases', () => {
     const db = await freshDatabase();
     expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBeGreaterThan(15);
     const rows = await rlsForced(db.url);
-    expect(rows.map((r) => r.relname)).toEqual(['agent_delegations', 'agent_execution_events', 'agent_executions', 'agent_grants',
+    expect(rows.map((r) => r.relname)).toEqual(['agent_database_roles', 'agent_delegations', 'agent_execution_events', 'agent_executions', 'agent_grants',
       'agent_inbox', 'agent_message_events', 'agent_outbox', 'agent_outbox_actions', 'agent_registrations']);
     expect(rows.every((r) => r.forced)).toBe(true);
     const pool = new Pool({ connectionString: db.url, max: 1 });
@@ -76,18 +76,19 @@ describe('migration 016 on disposable databases', () => {
     expect(seeded.rows[0].n).toBe('4');
   });
 
-  it('a database previously migrated to 015 upgrades additively through 016 and 017, and a second run applies nothing', async () => {
+  it('a database previously migrated to 015 upgrades additively through 016 to 019, and a second run applies nothing', async () => {
     const db = await freshDatabase();
     const before = await directoryUpTo('015_readiness_access.sql');
     expect(await migrateDatabase(db.url, appPassword, ingestPassword, before)).toBe(15);
     const pool = new Pool({ connectionString: db.url, max: 1 });
     const beforeTables = await pool.query<{ n: string }>("SELECT count(*)::text AS n FROM pg_tables WHERE schemaname = 'aegis' AND tablename LIKE 'agent\\_%'");
     expect(beforeTables.rows[0].n).toBe('0');
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(2);
+    // Four migrations are pending after 015: 016, 017, 018 and 019.
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(4);
     expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(0);
     const versions = await pool.query<{ version: string }>('SELECT version FROM aegis_migrations.versions ORDER BY version');
-    expect(versions.rows.at(-2)?.version).toBe('016_agent_execution_state.sql');
-    expect(versions.rows.at(-1)?.version).toBe('017_transactional_messaging.sql');
+    expect(versions.rows.slice(-4).map((row) => row.version)).toEqual(['016_agent_execution_state.sql', '017_transactional_messaging.sql',
+      '018_workload_database_identity.sql', '019_intake_identity_fix.sql']);
     await pool.end();
   });
 

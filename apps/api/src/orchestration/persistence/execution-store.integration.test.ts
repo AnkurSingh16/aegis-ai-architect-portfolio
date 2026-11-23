@@ -11,8 +11,8 @@ import type { DelegationChain } from '../types.js';
 
 // P4 in real PostgreSQL, in one process. Concurrency across processes is in execution-multiprocess.integration.test.ts.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
-const runtimeUrl = process.env.TEST_DATABASE_URL;
-if (!adminUrl || !runtimeUrl) throw new Error('Set TEST_DATABASE_ADMIN_URL and TEST_DATABASE_URL for real PostgreSQL tests.');
+const runtimeUrl = process.env.TEST_ROLE_URL_ORCHESTRATOR;
+if (!adminUrl || !runtimeUrl) throw new Error('Set TEST_DATABASE_ADMIN_URL and TEST_ROLE_URL_ORCHESTRATOR for real PostgreSQL tests.');
 
 const admin = new Pool({ connectionString: adminUrl, max: 2 });
 const pool = createDatabasePool(runtimeUrl, 8);
@@ -94,7 +94,7 @@ describe('registrations and claims', () => {
   it('a registered agent that is not the orchestrator cannot drive an execution', async () => {
     const executionId = await newExecution();
     const claim = await store.claim({ tenantId: tenantA, executionId, spiffeId: SPIFFE.triage, instance: 'triage-1', leaseSeconds: 30 });
-    expect(claim).toEqual({ ok: false, reason: 'not_orchestrator' });
+    expect(claim).toEqual({ ok: false, reason: 'not_registered' });
   });
 
   it('the orchestrator claims once; a second claim while the lease is live is refused', async () => {
@@ -418,13 +418,13 @@ describe('tenant isolation and least privilege in the database', () => {
     expect(seen.rows).toEqual([]);
     const role = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean; current_user: string }>(
       'SELECT rolsuper, rolbypassrls, current_user FROM pg_roles WHERE rolname = current_user');
-    expect(role.rows[0]).toEqual({ rolsuper: false, rolbypassrls: false, current_user: 'aegis_app' });
+    expect(role.rows[0]).toEqual({ rolsuper: false, rolbypassrls: false, current_user: 'aegis_orchestrator' });
   });
 
   it('every agent table has forced row level security, so the owner is also governed', async () => {
     const result = await admin.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
       `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname LIKE 'agent\\_%' AND relkind = 'r' ORDER BY relname`);
-    expect(result.rows.length).toBe(9); // five P4 tables and four P5 messaging tables
+    expect(result.rows.length).toBe(10); // five P4 tables, four P5 messaging tables, and the P8 role mapping
     expect(result.rows.every((r) => r.relrowsecurity && r.relforcerowsecurity)).toBe(true);
   });
 });
@@ -442,7 +442,7 @@ describe('telemetry hook', () => {
     const fence: Fence = { tenantId: tenantA, executionId, agentId: 'orchestrator', instance: 'orchestrator-1', fencingToken: claim.value.fencingToken };
     await observed.release(fence, 'succeeded', 'done');
     expect(seen).toEqual([
-      { operation: 'claim', outcome: 'refused', reason: 'not_orchestrator', started: false, terminal: false, executionId },
+      { operation: 'claim', outcome: 'refused', reason: 'not_registered', started: false, terminal: false, executionId },
       { operation: 'claim', outcome: 'accepted', reason: null, started: true, terminal: false, executionId },
       { operation: 'release', outcome: 'accepted', reason: null, started: false, terminal: true, executionId },
     ]);

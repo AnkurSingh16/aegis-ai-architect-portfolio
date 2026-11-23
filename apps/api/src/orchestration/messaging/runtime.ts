@@ -1,9 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createDatabasePool, verifyRuntimeRole } from '../../storage/database.js';
+import { createDatabasePool } from '../../storage/database.js';
 import { createExecutionTelemetry } from '../persistence/execution-telemetry.js';
 import type { ExecutionHooks } from '../persistence/execution-store.js';
 import { dispatchOnce, sampleBacklog } from './dispatcher.js';
 import { receiveMessage } from './inbox.js';
+import { verifyAgentRole, withMessagingContext } from './context.js';
+import { startInvestigationInTx } from './handlers.js';
 import { createMessagingTelemetry } from './telemetry.js';
 import { MAX_BODY_BYTES } from './wire.js';
 
@@ -32,8 +34,10 @@ const log = (event: string, fields: Record<string, unknown> = {}) => {
   process.stdout.write(`${JSON.stringify({ event, agent: agentId, ...fields })}\n`);
 };
 
+const AGENTS = ['orchestrator', 'triage', 'retrieval', 'reviewer'] as const;
+
 export function assertAgentId(value: string): void {
-  if (!/^[a-z][a-z0-9_-]{1,31}$/.test(value)) throw new Error('AEGIS_AGENT_ID must name a registered agent');
+  if (!(AGENTS as readonly string[]).includes(value)) throw new Error('AEGIS_AGENT_ID must name a registered agent');
 }
 
 async function fetchIdentity(): Promise<string> {
@@ -69,7 +73,7 @@ function send(response: ServerResponse, status: number, body: Record<string, unk
 async function main(): Promise<void> {
   assertAgentId(agentId);
   const pool = createDatabasePool(env.DATABASE_URL ?? '', 6);
-  await verifyRuntimeRole(pool);
+  await verifyAgentRole(pool, agentId);
 
   const spiffeId = await fetchIdentity();
   const registered = await pool.query<{ agent_id: string }>(
@@ -99,7 +103,8 @@ async function main(): Promise<void> {
       return send(response, 422, { status: 'refused', reason: 'malformed' });
     }
     try {
-      const result = await receiveMessage(pool, hooks, { receiver: agentId, peerSpiffeId: peer, messageId: match[1].toLowerCase(), body });
+      const result = await receiveMessage(pool, hooks, { receiver: agentId, peerSpiffeId: peer, messageId: match[1].toLowerCase(), body,
+        orchestrator: agentId === 'orchestrator' ? { spiffeId, instance } : undefined });
       telemetry.inboxDecision(result.status, result.reason, agentId);
       if (result.status === 'duplicate') telemetry.duplicates(agentId);
       log('inbox_decision', { messageId: match[1], status: result.status, reason: result.reason });
@@ -123,6 +128,23 @@ async function main(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, dispatchIntervalMs));
     }
   };
+  // Orchestrator intake: starts submitted investigations. Restart-safe: an execution is started only by a committed transaction, so a
+  // restarted orchestrator finds the same submitted executions and starts the ones that were not started yet.
+  const intakeLoop = async () => {
+    while (!stopping && agentId === 'orchestrator') {
+      try {
+        const candidates = await pool.query<{ tenant_id: string; execution_id: string }>('SELECT tenant_id, execution_id FROM aegis.orchestrator_intake($1)', [10]);
+        for (const row of candidates.rows) {
+          const outcome = await withMessagingContext(pool, { tenantId: row.tenant_id }, (client) => startInvestigationInTx(client, hooks,
+            { tenantId: row.tenant_id, executionId: row.execution_id, orchestrator: { spiffeId, instance } }));
+          log('intake_decision', { executionId: row.execution_id, outcome });
+        }
+      } catch (error) {
+        log('intake_error', { error: error instanceof Error ? error.name : 'error' });
+      }
+      await new Promise((resolve) => setTimeout(resolve, dispatchIntervalMs));
+    }
+  };
   const sampleLoop = async () => {
     while (!stopping) {
       try { await sampleBacklog(pool, agentId, telemetry); } catch { /* sampling never stops dispatch */ }
@@ -131,6 +153,7 @@ async function main(): Promise<void> {
   };
   void dispatchLoop();
   void sampleLoop();
+  void intakeLoop();
 
   const shutdown = () => {
     stopping = true;

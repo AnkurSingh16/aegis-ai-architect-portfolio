@@ -9,8 +9,8 @@ import { argsDigest, envelopeFor, principalRef, runWorker, sleep, spawnWorker, t
 // running as the runtime role. Crashes are real SIGKILLs at a precise point (before or after a commit). State is checked directly in
 // PostgreSQL through the owner connection, not through the store under test.
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
-const runtimeUrl = process.env.TEST_DATABASE_URL;
-if (!adminUrl || !runtimeUrl) throw new Error('Set TEST_DATABASE_ADMIN_URL and TEST_DATABASE_URL for real PostgreSQL tests.');
+const runtimeUrl = process.env.TEST_ROLE_URL_ORCHESTRATOR;
+if (!adminUrl || !runtimeUrl) throw new Error('Set TEST_DATABASE_ADMIN_URL and TEST_ROLE_URL_ORCHESTRATOR for real PostgreSQL tests.');
 
 const admin = new Pool({ connectionString: adminUrl, max: 2 });
 const runtimeCheck = createDatabasePool(runtimeUrl, 1);

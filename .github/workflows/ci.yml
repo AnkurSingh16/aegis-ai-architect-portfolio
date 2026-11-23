@@ -27,6 +27,20 @@ jobs:
       TEST_DOCUMENT_INGEST_URL: postgres://aegis_ingest:ci_isolated_ingestion_only@127.0.0.1:5432/aegis_test
       DATABASE_APP_PASSWORD: ci_isolated_runtime_only
       DATABASE_INGEST_PASSWORD: ci_isolated_ingestion_only
+      # Synthetic workload login roles on the disposable aegis_test database. Migrations create them NOLOGIN; the preparation step gives
+      # each its own credential, and each test process reads its own URL. Passwords are never printed.
+      AGENT_ROLE_PASSWORD_ORCHESTRATOR: ci-isolated-orchestrator-role
+      AGENT_ROLE_PASSWORD_TRIAGE: ci-isolated-triage-role-only
+      AGENT_ROLE_PASSWORD_RETRIEVAL: ci-isolated-retrieval-role-only
+      AGENT_ROLE_PASSWORD_REVIEWER: ci-isolated-reviewer-role-only
+      AGENT_ROLE_PASSWORD_GATEWAY: ci-isolated-gateway-role-only
+      AGENT_ROLE_PASSWORD_OPERATOR: ci-isolated-operator-role-only
+      TEST_ROLE_URL_ORCHESTRATOR: postgres://aegis_orchestrator:ci-isolated-orchestrator-role@127.0.0.1:5432/aegis_test
+      TEST_ROLE_URL_TRIAGE: postgres://aegis_triage:ci-isolated-triage-role-only@127.0.0.1:5432/aegis_test
+      TEST_ROLE_URL_RETRIEVAL: postgres://aegis_retrieval:ci-isolated-retrieval-role-only@127.0.0.1:5432/aegis_test
+      TEST_ROLE_URL_REVIEWER: postgres://aegis_reviewer:ci-isolated-reviewer-role-only@127.0.0.1:5432/aegis_test
+      TEST_ROLE_URL_GATEWAY: postgres://aegis_gateway:ci-isolated-gateway-role-only@127.0.0.1:5432/aegis_test
+      TEST_ROLE_URL_OPERATOR: postgres://aegis_operator:ci-isolated-operator-role-only@127.0.0.1:5432/aegis_test
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -52,6 +66,8 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Browser workflow tests (mocked identity and API)
         run: npm run test:e2e -w apps/web
+      - name: Prepare integration database and workload roles
+        run: npm run test:integration:prepare -w apps/api
       - name: PostgreSQL integration tests
         run: npm run test:integration
       - name: Build

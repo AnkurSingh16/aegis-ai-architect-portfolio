@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { messageFor, SessionProvider, SignInFailure, useSession } from './session';
+import InvestigationPanel from './InvestigationPanel';
 import type { OidcSettings } from './oidc-config';
 import { isAnalysisResult, type AnalysisResult } from '../../../api/src/ai/analysis.js';
 import { isGroundedAnalysisResult, type GroundedAnalysisResult } from '../../../api/src/ai/grounded-analysis.js';
@@ -501,5 +502,6 @@ export default function DevAuthExperience({ config }: { config: OidcSettings }) 
   // The session provider builds the redirect URI from this page's origin, so the callback can only return to the application.
   return <SessionProvider settings={config}>
     <CaseAccessPanel />
+    <InvestigationPanel />
   </SessionProvider>;
 }

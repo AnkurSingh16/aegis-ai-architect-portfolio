@@ -39,7 +39,7 @@ const args = JSON.parse(process.argv[2] ?? '{}') as ChildArgs;
 const forever = () => new Promise<never>(() => undefined);
 const emit = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
-const pool = createDatabasePool(process.env.TEST_DATABASE_URL ?? '', 2);
+const pool = createDatabasePool(process.env.TEST_ROLE_URL_ORCHESTRATOR ?? '', 2);
 
 async function runTenant<T>(tenantId: string, operation: (client: TenantQueryable) => Promise<T>): Promise<T> {
   const client = await pool.connect();

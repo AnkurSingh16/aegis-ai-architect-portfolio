@@ -11,6 +11,7 @@ import type { Pool } from 'pg';
 import { resolveAuthConfig, type AuthConfig } from './auth/config.js';
 import { createTokenVerifier } from './auth/token.js';
 import { registerProtectedCaseRoutes } from './auth/routes.js';
+import { registerInvestigationRoutes } from './auth/investigation-routes.js';
 import { registerProtectedWorkflowRoutes } from './workflow/workflow-routes.js';
 import { registerProtectedAnswerRoutes } from './rag/answer-routes.js';
 import { createDatabasePool, verifyRuntimeRole } from './storage/database.js';
@@ -24,7 +25,7 @@ import { checkReadiness } from './readiness.js';
 
 export interface AppOptions {
   authConfig?: AuthConfig;
-  testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool; analysisProvider?: AnalysisProvider; groundedAnalysisProvider?: GroundedAnalysisProvider };
+  testDependencies?: { keyResolver?: JWTVerifyGetKey; pool?: Pool; gatewayPool?: Pool; analysisProvider?: AnalysisProvider; groundedAnalysisProvider?: GroundedAnalysisProvider };
 }
 
 export function createApp(options: AppOptions = {}) {
@@ -95,6 +96,13 @@ export function createApp(options: AppOptions = {}) {
     }
     const spanSink = tracingFromEnv(process.env);
     app.register(async (answerApp) => registerProtectedAnswerRoutes(answerApp, pool, verify));
+    // Investigations run under the gateway role (migration 018). Routes are registered only when that role is configured.
+    const gatewayUrl = process.env.DATABASE_GATEWAY_URL;
+    if (gatewayUrl) {
+      const gatewayPool = options.testDependencies?.gatewayPool ?? createDatabasePool(gatewayUrl, 4);
+      app.addHook('onClose', async () => { await gatewayPool.end(); });
+      registerInvestigationRoutes(app, gatewayPool, verify);
+    }
   }
 
   // Do NOT enable unauthenticated demo routes in production.
