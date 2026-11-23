@@ -96,6 +96,19 @@ describe('authenticated investigation API', () => {
     expect(JSON.parse(status.body)).toMatchObject({ executionId: body.executionId, stage: 'submitted', status: 'pending' });
   });
 
+  it('a replayed key with a different question is refused with 409 and creates no second execution or request', async () => {
+    const key = uuid();
+    const first = await post('reader', NORTH, { question: 'Which policy document covers approvals?' }, key);
+    expect(first.statusCode).toBe(202);
+    const count = async () => Number((await h.adminPool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM aegis.investigation_requests WHERE tenant_id = $1', [NORTH])).rows[0].n);
+    const before = await count();
+    const conflict = await post('reader', NORTH, { question: 'Which policy document covers refunds?' }, key);
+    expect(conflict.statusCode).toBe(409);
+    expect(JSON.parse(conflict.body)).toEqual({ error: 'idempotency_conflict' });
+    expect(await count()).toBe(before);
+  });
+
   it('another principal cannot read an execution, and receives the same answer as for an unknown one', async () => {
     const created = JSON.parse((await post('reader', NORTH, { question: 'Which policy document?' })).body) as { executionId: string };
     const other = await app.inject({ method: 'GET', url: `/api/tenants/${NORTH}/investigations/${created.executionId}`, headers: { authorization: 'Bearer other' } });

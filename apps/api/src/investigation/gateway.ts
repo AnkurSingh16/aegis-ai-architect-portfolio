@@ -59,6 +59,7 @@ export async function submitInvestigation(run: TenantRunner, principal: Principa
   if (!UUID.test(input.tenantId) || !UUID.test(input.idempotencyKey)) throw new GatewayError('invalid_request');
   const question = validateQuestion(input.question);
   const digest = principalDigest(principal.issuer, principal.subject);
+  const questionDigest = createHash('sha256').update(question, 'utf8').digest('hex');
   return run(input.tenantId, async (client) => {
     await membershipRole(client, principal, input.tenantId);
     const inserted = await client.query<{ execution_id: string }>(
@@ -71,17 +72,22 @@ export async function submitInvestigation(run: TenantRunner, principal: Principa
     if (inserted.rows.length === 0) {
       // Idempotent retry. The same key from the same principal returns the same execution. Another principal cannot reuse it.
       const existing = (await client.query<{ execution_id: string; principal_ref: string }>(
-        'SELECT execution_id, principal_ref FROM aegis.agent_executions WHERE tenant_id = $1 AND idempotency_key = $2',
-        [input.tenantId, input.idempotencyKey])).rows[0];
+        `SELECT e.execution_id, e.principal_ref, r.question_digest
+           FROM aegis.agent_executions e
+           LEFT JOIN aegis.investigation_requests r ON r.execution_id = e.execution_id AND r.tenant_id = e.tenant_id
+          WHERE e.tenant_id = $1 AND e.idempotency_key = $2`,
+        [input.tenantId, input.idempotencyKey])).rows[0] as ({ execution_id: string; principal_ref: string; question_digest: string | null } | undefined);
       if (!existing) throw new GatewayError('unavailable');
+      // The same key must come from the same principal AND carry the same question. Anything else is a conflicting request, not a replay.
       if (existing.principal_ref !== digest) throw new GatewayError('idempotency_conflict');
+      if (existing.question_digest !== questionDigest) throw new GatewayError('idempotency_conflict');
       return { executionId: existing.execution_id, created: false };
     }
     const executionId = inserted.rows[0].execution_id;
     await client.query(
       `INSERT INTO aegis.investigation_requests (execution_id, tenant_id, question, question_digest, principal_ref)
        VALUES ($1, $2, $3, $4, $5)`,
-      [executionId, input.tenantId, question, createHash('sha256').update(question, 'utf8').digest('hex'), digest]);
+      [executionId, input.tenantId, question, questionDigest, digest]);
     await client.query(
       `INSERT INTO aegis.agent_execution_events (tenant_id, execution_id, event_type, outcome, reason, fencing_token)
        VALUES ($1, $2, 'execution_created', 'accepted', NULL, 0)`, [input.tenantId, executionId]);

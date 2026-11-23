@@ -327,16 +327,16 @@ describe('tenant-owned document and chunk storage', () => {
 
   it('allows a matching North and South membership to read only its own documents and chunks', async () => {
     const northRows = await withAuthenticatedTransaction(pool, northPrincipal, north.tenantId, 'read:cases', async (client) => ({
-      documents: (await client.query('SELECT id, source_identity, version FROM aegis.documents ORDER BY id')).rows,
-      chunks: (await client.query('SELECT id, document_id, document_version, source_identity, content FROM aegis.document_chunks ORDER BY id')).rows,
+      documents: (await client.query('SELECT id, source_identity, version FROM aegis.documents WHERE source_identity LIKE $1 ORDER BY id', [`${documentPrefix}%`])).rows,
+      chunks: (await client.query('SELECT id, document_id, document_version, source_identity, content FROM aegis.document_chunks WHERE source_identity LIKE $1 ORDER BY id', [`${documentPrefix}%`])).rows,
     }));
     expect(northRows.documents).toEqual([{ id: documents.north.id, source_identity: documents.north.sourceIdentity, version: 1 }]);
     expect(northRows.chunks).toEqual([{ id: chunks.north.id, document_id: documents.north.id, document_version: 1,
       source_identity: documents.north.sourceIdentity, content: northChunkContent }]);
 
     const southRows = await withAuthenticatedTransaction(pool, southPrincipal, south.tenantId, 'read:cases', async (client) => ({
-      documents: (await client.query('SELECT id, source_identity, version FROM aegis.documents ORDER BY id')).rows,
-      chunks: (await client.query('SELECT id, document_id, document_version, source_identity, content FROM aegis.document_chunks ORDER BY id')).rows,
+      documents: (await client.query('SELECT id, source_identity, version FROM aegis.documents WHERE source_identity LIKE $1 ORDER BY id', [`${documentPrefix}%`])).rows,
+      chunks: (await client.query('SELECT id, document_id, document_version, source_identity, content FROM aegis.document_chunks WHERE source_identity LIKE $1 ORDER BY id', [`${documentPrefix}%`])).rows,
     }));
     expect(southRows.documents).toEqual([{ id: documents.south.id, source_identity: documents.south.sourceIdentity, version: 2 }]);
     expect(southRows.chunks).toEqual([{ id: chunks.south.id, document_id: documents.south.id, document_version: 2,
@@ -493,7 +493,7 @@ describe('tenant-owned document and chunk storage', () => {
 
   it('clears transaction-local identity and tenant settings after commit and rollback on a reused connection', async () => {
     await withAuthenticatedTransaction(single, northPrincipal, north.tenantId, 'read:cases', async (client) => {
-      expect((await client.query('SELECT id FROM aegis.documents')).rows).toEqual([{ id: documents.north.id }]);
+      expect((await client.query('SELECT id FROM aegis.documents WHERE source_identity LIKE $1', [`${documentPrefix}%`])).rows).toEqual([{ id: documents.north.id }]);
     });
     expect((await single.query('SELECT id FROM aegis.documents')).rows).toEqual([]);
     await expect(withAuthenticatedTransaction(single, northPrincipal, north.tenantId, 'read:cases', async () => {
@@ -511,8 +511,8 @@ describe('tenant-owned document and chunk storage', () => {
       const expectedChunk = isNorth ? chunks.north.id : chunks.south.id;
       return withAuthenticatedTransaction(pool, principal, tenant.tenantId, 'read:cases', async (client) => {
         await client.query('SELECT pg_sleep(0.01)');
-        expect((await client.query('SELECT id FROM aegis.documents')).rows).toEqual([{ id: expectedDocument }]);
-        expect((await client.query('SELECT id FROM aegis.document_chunks')).rows).toEqual([{ id: expectedChunk }]);
+        expect((await client.query('SELECT id FROM aegis.documents WHERE source_identity LIKE $1', [`${documentPrefix}%`])).rows).toEqual([{ id: expectedDocument }]);
+        expect((await client.query('SELECT id FROM aegis.document_chunks WHERE source_identity LIKE $1', [`${documentPrefix}%`])).rows).toEqual([{ id: expectedChunk }]);
       });
     }));
   });

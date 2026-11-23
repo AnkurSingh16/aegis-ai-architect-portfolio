@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { TENANT_NORTH, WEB, compose, seedSyntheticCases, signIn, tokenExpiry, waitForApiReady, waitForContainerHealthy, waitForRealm } from './support';
+import { caseAccessSignIn, TENANT_NORTH, WEB, compose, seedSyntheticCases, signIn, tokenExpiry, waitForApiReady, waitForContainerHealthy, waitForRealm } from './support';
 
 test.beforeAll(() => { seedSyntheticCases(); });
 
@@ -7,7 +7,7 @@ test('anonymous visitor sees sign-in and no protected case data', async ({ page 
   const protectedCalls: string[] = [];
   page.on('request', (request) => { if (request.url().includes('/api/tenants/')) protectedCalls.push(request.url()); });
   await page.goto(`${WEB}/`);
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await expect(caseAccessSignIn(page)).toBeVisible();
   await expect(page.getByText('SYNTHETIC-LOGIN-001')).toHaveCount(0);
   expect(protectedCalls).toHaveLength(0);
 });
@@ -60,7 +60,7 @@ test('invalid callback state is refused and the code is removed from the address
   await page.goto(`${WEB}/?code=forged-authorisation-code&state=forged-state`);
   await expect(page.getByRole('alert').filter({ hasText: 'Sign-in could not be completed' })).toBeVisible({ timeout: 30_000 });
   expect(page.url()).not.toMatch(/[?&](code|state)=/);
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await expect(caseAccessSignIn(page)).toBeVisible();
 });
 
 test('sign-out ends the local session and the Keycloak session, so protected data is gone', async ({ page }) => {
@@ -69,17 +69,17 @@ test('sign-out ends the local session and the Keycloak session, so protected dat
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.waitForURL(/localhost:8180\/realms\/aegis/, { timeout: 30_000 }).catch(() => undefined);
   await page.goto(`${WEB}/`);
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(caseAccessSignIn(page)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('SYNTHETIC-LOGIN-001')).toHaveCount(0);
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(caseAccessSignIn(page)).toBeVisible({ timeout: 30_000 });
 });
 
 test('an unavailable identity provider is reported, and sign-in works again after it recovers', async ({ page }) => {
   compose(['stop', 'keycloak']);
   try {
     await page.goto(`${WEB}/`);
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await caseAccessSignIn(page).click();
     await expect(page.getByRole('alert').filter({ hasText: 'The identity provider is unavailable' })).toBeVisible({ timeout: 60_000 });
   } finally {
     compose(['start', 'keycloak']);

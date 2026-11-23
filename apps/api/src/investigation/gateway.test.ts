@@ -33,6 +33,7 @@ const membership = (role: string): Responder => (sql) => (sql.includes('aegis.me
   ? { rows: [{ role }], rowCount: 1 } : { rows: [], rowCount: 0 });
 
 const digestOf = (principal: Principal) => principalDigest(principal.issuer, principal.subject);
+const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
 
 describe('question validation', () => {
   it('normalises and trims a valid question', () => {
@@ -108,10 +109,21 @@ describe('submitInvestigation', () => {
     const script = scriptedRunner((sql) => {
       if (sql.includes('aegis.memberships')) return { rows: [{ role: 'operator' }], rowCount: 1 };
       if (sql.includes('INSERT INTO aegis.agent_executions')) return { rows: [], rowCount: 0 };
-      return { rows: [{ execution_id: EXECUTION, principal_ref: digestOf(owner) }], rowCount: 1 };
+      return { rows: [{ execution_id: EXECUTION, principal_ref: digestOf(owner), question_digest: sha256('q') }], rowCount: 1 };
     });
     expect(await submitInvestigation(script.run, owner, { tenantId: NORTH, idempotencyKey: KEY, question: 'q' }))
       .toEqual({ executionId: EXECUTION, created: false });
+    expect(script.calls.some((c) => c.sql.includes('INSERT INTO aegis.investigation_requests'))).toBe(false);
+  });
+
+  it('refuses an idempotency key replayed with a different question instead of returning the first execution', async () => {
+    const script = scriptedRunner((sql) => {
+      if (sql.includes('aegis.memberships')) return { rows: [{ role: 'operator' }], rowCount: 1 };
+      if (sql.includes('INSERT INTO aegis.agent_executions')) return { rows: [], rowCount: 0 };
+      return { rows: [{ execution_id: EXECUTION, principal_ref: digestOf(owner), question_digest: sha256('the original question') }], rowCount: 1 };
+    });
+    await expect(submitInvestigation(script.run, owner, { tenantId: NORTH, idempotencyKey: KEY, question: 'a different question' }))
+      .rejects.toMatchObject({ code: 'idempotency_conflict' });
     expect(script.calls.some((c) => c.sql.includes('INSERT INTO aegis.investigation_requests'))).toBe(false);
   });
 
