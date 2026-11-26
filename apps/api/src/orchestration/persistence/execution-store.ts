@@ -596,6 +596,10 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         // Addressing is checked before authorisation so a message for another agent is refused by name, not by grant lookup.
         if (structure.envelope.to !== recipient) return refuseAt('wrong_recipient');
         if (structure.envelope.from !== sender) return refuseAt('sender_mismatch');
+        // A request received after cancellation is refused here, under the row lock, as a normal refusal. Migration 023 also refuses
+        // its consumption in the database; that is a backstop and must not surface as an exception. Results still in flight are
+        // consumed and discarded downstream, as documented in migration 023.
+        if (row.cancel_requested && structure.envelope.kind === 'request') return refuseAt('cancel_requested');
         const consumed = await consumeDecision(client, row, tenantId, executionId,
           { agentId: recipient, instance: null, fencingToken: Number(row.fencing_token) }, envelope);
         if (!consumed.ok) {
