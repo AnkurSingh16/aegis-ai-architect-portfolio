@@ -25,6 +25,9 @@ used in earlier P8 notes, which overstated the guarantee.
 | `aegis_fixture` is not a login and has no membership | role definition, 020 | same file |
 | A participant cannot read, lock or write execution, delegation, grant, execution-event, inbox or reply-insert rows of a tenant other than its session tenant | 021 policies | `hardening-tenant-bound-participants.integration.test.ts` (execution, delegation, grant and event paths only; lock, consume, inbox and reply paths are not yet tested) |
 | A participant cannot change its workload identity with `SET ROLE` | role membership | same file |
+| A participant cannot update execution status, revoke grants, or discover pending cancellations (no table privilege; no function grant) | 018 grants, 024 | `cancellation-reconciliation.integration.test.ts` (F) |
+| Cancellation is finalised only by the orchestrator: bounded, idempotent, lease-preempting, and terminal results win | 024, orchestrator reconciliation | `cancellation-reconciliation.integration.test.ts` (A–E, H, K, L) |
+| A cancellation request is refused for participants (triage, retrieval, reviewer) and no request grant is consumed after cancellation commits | 023 trigger (owner-run, backstop), receive refusal | `cancellation-reconciliation.integration.test.ts` (D, G, I, J) |
 | Stage transitions and grant status moves are checked by triggers | 018, 023 | cancellation and provenance files |
 
 ## 3. Trusted application code (not enforced by the database)
@@ -43,6 +46,9 @@ used in earlier P8 notes, which overstated the guarantee.
 - Orchestrator intake (`aegis.orchestrator_intake`, migration 019) is `SECURITY DEFINER` and returns submitted executions for every tenant. It
   checks the caller's identity with `session_user` and is executable only by `aegis_orchestrator`. It is the only cross-tenant read on the
   intake path. It is not a general bypass.
+- Orchestrator cancellation discovery (`aegis.orchestrator_pending_cancellations`, migration 024) returns the (tenant, execution)
+  identifiers of pending cancellations across tenants. It is executable only by `aegis_orchestrator`, takes no tenant or principal
+  argument, and returns nothing to any other role. Finalisation then runs in the tenant's own transaction under the row lock.
 - The ingestion role and the synthetic catalog trigger (migration 004) accept owner, superuser and BYPASSRLS sessions. These are
   administrator sessions and are not reachable from application logins.
 
@@ -50,7 +56,7 @@ used in earlier P8 notes, which overstated the guarantee.
 1. Tenant selection by a participant process is application-trusted (section 3). Follow-up: derive the tenant from a database-checked grant
    inside the policy, so a participant login cannot choose another tenant's execution.
 2. Outbox dispatch is cross-tenant (section 4). Follow-up: tenant-scoped dispatch.
-3. The owner of the `SECURITY DEFINER` functions must have BYPASSRLS or explicit policies. Local stacks run as a superuser. Follow-up: startup
+3. The owner of the `SECURITY DEFINER` functions must have BYPASSRLS or explicit policies. The consumption trigger (023, replaced in 024) and the orchestrator discovery function (024) depend on the same assumption. Local stacks run as a superuser. Follow-up: startup
    assertion (F-02 in the review record).
 4. Participant read of the outbox and inbox across tenants is part of item 2.
 5. No human security audit has been performed. This document is an engineering statement to be reviewed independently.
