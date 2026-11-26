@@ -64,5 +64,5 @@ CREATE POLICY fixture_tenant_scope ON aegis.tenants TO aegis_fixture
 CREATE POLICY fixture_case_scope ON aegis.support_cases TO aegis_fixture
   USING (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture')
   WITH CHECK (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
-CREATE POLICY fixture_audit_scope ON aegis.audit_events TO aegis_fixture
-  FOR SELECT USING (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
+CREATE POLICY fixture_audit_scope ON aegis.audit_events FOR SELECT TO aegis_fixture
+  USING (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
