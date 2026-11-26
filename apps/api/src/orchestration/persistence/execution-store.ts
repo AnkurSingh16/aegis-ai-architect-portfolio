@@ -596,10 +596,21 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         // Addressing is checked before authorisation so a message for another agent is refused by name, not by grant lookup.
         if (structure.envelope.to !== recipient) return refuseAt('wrong_recipient');
         if (structure.envelope.from !== sender) return refuseAt('sender_mismatch');
-        // A request received after cancellation is refused here, under the row lock, as a normal refusal. Migration 023 also refuses
-        // its consumption in the database; that is a backstop and must not surface as an exception. Results still in flight are
-        // consumed and discarded downstream, as documented in migration 023.
-        if (row.cancel_requested && structure.envelope.kind === 'request') return refuseAt('cancel_requested');
+        // A request received after cancellation is refused here, under the row lock, and the cancellation is finalised in the same
+        // transaction. Without this, no reply would reach the orchestrator and the cancellation would never be applied. Migration 023
+        // also refuses the consumption in the database; that is a backstop and must not surface as an exception. A running attempt's
+        // later fenced writes are refused because the execution is terminal or cancel_requested. Results in flight are consumed and
+        // discarded downstream, as documented in migration 023.
+        if (row.cancel_requested && structure.envelope.kind === 'request') {
+          await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', version = version + 1, updated_at = clock_timestamp(),
+              workflow_stage = CASE WHEN workflow_stage IN ('completed', 'insufficient_evidence', 'failed', 'cancelled') THEN workflow_stage ELSE 'cancelled' END
+            WHERE execution_id = $1`, [executionId]);
+          await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
+            WHERE execution_id = $1 AND status = 'open'`, [executionId]);
+          await audit(client, tenantId, executionId, { eventType: 'cancelled', outcome: 'accepted', reason: 'cancel_requested',
+            actorAgent: null, actorInstance: null, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
+          return refuseAt('cancel_requested');
+        }
         const consumed = await consumeDecision(client, row, tenantId, executionId,
           { agentId: recipient, instance: null, fencingToken: Number(row.fencing_token) }, envelope);
         if (!consumed.ok) {
