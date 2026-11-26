@@ -22,6 +22,12 @@ ALTER POLICY agent_outbox_tenant_insert ON aegis.agent_outbox
     AND sender_agent = aegis.current_agent()
     AND status = 'pending' AND attempts = 0 AND fencing_token = 0 AND lease_instance IS NULL AND delivered_at IS NULL AND dead_at IS NULL);
 
+-- The orchestrator also held a tenant-only insert policy (017, moved to aegis_orchestrator in 018). PostgreSQL combines permissive
+-- policies with OR, so that policy alone would have allowed any actor label. The orchestrator may record events only as itself.
+ALTER POLICY agent_message_event_tenant_insert ON aegis.agent_message_events
+  WITH CHECK (agent_message_events.tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid
+    AND actor_agent = aegis.current_agent());
+
 ALTER POLICY agent_message_event_agent_insert ON aegis.agent_message_events
   WITH CHECK (agent_message_events.tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid
     AND actor_agent = aegis.current_agent() AND EXISTS (SELECT 1 FROM aegis.agent_delegations d

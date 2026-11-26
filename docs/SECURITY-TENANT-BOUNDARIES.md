@@ -20,8 +20,10 @@ used in earlier P8 notes, which overstated the guarantee.
 | Changed session flags (authenticated mode, another tenant) reveal no case | 002 membership policy, 020 | same file |
 | Without session flags `aegis_app` sees no case (no default allow) | 020 policies | same file |
 | `aegis_app` cannot `SET ROLE aegis_fixture` | role membership | same file |
+| The fixture role holds no audit write privilege and no sequence privilege | 020 grants | same file (fixture audit write refused, storage test) |
+| The orchestrator records message events only as itself (actor = orchestrator) | 022 policy | `hardening-messaging-provenance` (test to be added; see open items) |
 | `aegis_fixture` is not a login and has no membership | role definition, 020 | same file |
-| A participant cannot read, lock or write rows of an execution, delegation, grant, reply or inbox row of a tenant other than its session tenant | 021 policies | `hardening-tenant-bound-participants.integration.test.ts` |
+| A participant cannot read, lock or write execution, delegation, grant, execution-event, inbox or reply-insert rows of a tenant other than its session tenant | 021 policies | `hardening-tenant-bound-participants.integration.test.ts` (execution, delegation, grant and event paths only; lock, consume, inbox and reply paths are not yet tested) |
 | A participant cannot change its workload identity with `SET ROLE` | role membership | same file |
 | Stage transitions and grant status moves are checked by triggers | 018, 023 | cancellation and provenance files |
 
@@ -52,3 +54,19 @@ used in earlier P8 notes, which overstated the guarantee.
    assertion (F-02 in the review record).
 4. Participant read of the outbox and inbox across tenants is part of item 2.
 5. No human security audit has been performed. This document is an engineering statement to be reviewed independently.
+
+## 6. Open items and approvals (from the independent AI-assisted review of this branch)
+These are not closed. Items marked APPROVAL need an explicit decision before the branch is merged or any of them is accepted as residual.
+- F3 (APPROVAL, open): the principal (`aegis.principal_issuer`, `aegis.principal_subject`) and the access mode are plain session values.
+  The membership policies trust them, so an application login that can run SQL can act as any member of any tenant. This is the same
+  class of problem as the fixture bypass that remediation 1 removed, and it is not closed by this branch.
+- F4 (APPROVAL, accepted residual proposed): outbox sender policies expose a participant's own sender rows across tenants, and let a
+  participant update their delivery status. Closing it needs tenant-scoped dispatch or a narrow claim function.
+- F7 (APPROVAL, accepted residual proposed): the ingestion login sets its own access mode and tenant; the document policies trust them.
+- F2 (open functional gap): the development CLI (`apps/api/src/storage/cli.ts`) is not wired to `aegis_fixture`. Under `aegis_app` it sees
+  no fixture rows and cannot write. Wiring needs an administrator-provisioned login and an explicit role switch.
+- F1, F5, F6, F8 (fixed in this branch): audit write privilege removed from the fixture role; orchestrator message events bound to the
+  orchestrator's own actor; fixture privileges reduced to the minimum; the fixture pool applies its role at connection start.
+- Test coverage gaps: the lock, consume, inbox and reply paths of remediation 2 have no negative tests yet; the orchestrator actor
+  binding (F5) has no negative test yet.
+- The owner-role assumption (section 5 item 3) remains.

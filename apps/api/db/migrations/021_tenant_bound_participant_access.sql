@@ -13,8 +13,9 @@
 -- policies to one tenant needs a per-tenant dispatch loop or a narrowly scoped claim function. That is recorded as a residual risk in
 -- docs/SECURITY-TENANT-BOUNDARIES.md and is not closed by this migration.
 --
--- Database-enforced guarantee after this migration: a participant session scoped to tenant A cannot read or write participant-visible
--- execution, delegation, grant, inbox or reply rows of tenant B, even if it is a delegation participant of a tenant-B execution.
+-- Database-enforced guarantee after this migration: a participant session scoped to tenant A cannot read, lock or write execution,
+-- delegation, grant, execution-event, inbox or reply-insert rows of tenant B, even if it is a delegation participant of a tenant-B execution.
+-- Outbox rows are excluded: the sender policies (018) still expose a participant's own sender rows across tenants (recorded residual).
 
 ALTER POLICY agent_execution_participant_read ON aegis.agent_executions
   USING (agent_executions.tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid

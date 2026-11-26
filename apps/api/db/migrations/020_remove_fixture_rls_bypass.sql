@@ -8,10 +8,11 @@
 -- After this migration:
 -- - aegis_app is subject only to the 'authenticated' policies: a verified principal, a membership, and the tenant set by the
 --   application after membership is checked. The fixture branch is gone from every runtime policy.
--- - Local synthetic persistence (the development CLI and its tests) uses a separate role, aegis_fixture. It is NOLOGIN, has no
---   membership in any other role, and its policies apply only to that role. No application login can become it: SET ROLE requires
---   membership, and membership is granted only by the administrator. Provisioning a login for aegis_fixture is an administrator action
---   outside this migration.
+-- - Local synthetic persistence uses a separate role, aegis_fixture. It is NOLOGIN, has no membership in any other role, and its
+--   policies apply only to that role. No application login can become it: SET ROLE requires membership, and membership is granted only
+--   by the administrator. The storage tests reach it through a connection that starts in that role. The development CLI
+--   (apps/api/src/storage/cli.ts) is NOT yet wired to this role: under aegis_app it sees no fixture rows and writes are refused.
+--   Wiring it needs an administrator-provisioned login and an explicit SET ROLE. That is a recorded follow-up, not implemented here.
 -- - FORCE ROW LEVEL SECURITY stays enabled on all three tables (001), so the table owner is also subject to the policies.
 
 DO $$
@@ -50,17 +51,18 @@ CREATE POLICY audit_scope ON aegis.audit_events TO aegis_app
     AND current_setting('aegis.access_mode', true) = 'authenticated'
     AND EXISTS (SELECT 1 FROM aegis.memberships m WHERE m.tenant_id = audit_events.tenant_id AND m.role = 'operator'));
 
--- Fixture role: synthetic local persistence only. Reachable only when the fixture role itself is the session role.
+-- Fixture role: synthetic local persistence only. Privileges are the minimum the fixture path uses, mirroring what aegis_app holds
+-- in 001 for these tables. Audit rows are written by the owner-run trigger record_case_change (001), not by this role, so this role
+-- has no INSERT, UPDATE or DELETE on aegis.audit_events and no sequence privileges.
 GRANT USAGE ON SCHEMA aegis TO aegis_fixture;
-GRANT SELECT, INSERT, UPDATE ON aegis.tenants, aegis.support_cases, aegis.audit_events TO aegis_fixture;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA aegis TO aegis_fixture;
+GRANT SELECT ON aegis.tenants, aegis.support_cases, aegis.audit_events TO aegis_fixture;
+GRANT INSERT (tenant_id, synthetic_case_id) ON aegis.support_cases TO aegis_fixture;
+GRANT UPDATE (status) ON aegis.support_cases TO aegis_fixture;
 
 CREATE POLICY fixture_tenant_scope ON aegis.tenants TO aegis_fixture
-  USING (id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture')
-  WITH CHECK (id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
+  USING (id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
 CREATE POLICY fixture_case_scope ON aegis.support_cases TO aegis_fixture
   USING (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture')
   WITH CHECK (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
 CREATE POLICY fixture_audit_scope ON aegis.audit_events TO aegis_fixture
-  USING (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture')
-  WITH CHECK (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');
+  FOR SELECT USING (tenant_id = NULLIF(current_setting('aegis.tenant_id', true), '')::uuid AND current_setting('aegis.access_mode', true) = 'fixture');

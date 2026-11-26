@@ -38,6 +38,18 @@ describe('remediation 3: messaging provenance and audit integrity', () => {
       [row.tenant_id, row.execution_id, row.envelope, row.payload, row.payload_digest]))).rejects.toThrow(/row-level security/);
   });
 
+  it('the orchestrator cannot record a message event attributed to another actor (F5)', async () => {
+    await expect(inScope(h.pools.orchestrator, NORTH, (c) => c.query(
+      `INSERT INTO aegis.agent_message_events (tenant_id, execution_id, message_id, event_type, actor_agent)
+       VALUES ($1, $2, gen_random_uuid(), 'inbox_processed', 'triage')`, [NORTH, north.executionId]))).rejects.toThrow(/row-level security/);
+  });
+
+  it('the orchestrator can still record its own message event (legitimate path)', async () => {
+    await expect(inScope(h.pools.orchestrator, NORTH, (c) => c.query(
+      `INSERT INTO aegis.agent_message_events (tenant_id, execution_id, message_id, event_type, actor_agent)
+       VALUES ($1, $2, gen_random_uuid(), 'inbox_processed', 'orchestrator')`, [NORTH, north.executionId]))).resolves.toBeDefined();
+  });
+
   it('a message event cannot be labelled with another tenant, even for an execution that exists', async () => {
     await expect(inScope(h.pools.triage, SOUTH, (c) => c.query(
       `INSERT INTO aegis.agent_message_events (tenant_id, execution_id, message_id, event_type, actor_agent)

@@ -29,11 +29,11 @@ const south = resolveFixture('south');
 const log = vi.fn();
 const pool = createDatabasePool(runtimeUrl, 4);
 const single = createDatabasePool(runtimeUrl, 1);
-// Fixture persistence runs as the restricted aegis_fixture role (migration 020). The admin connection switches to it on connect; no application
-// login can do so. Authenticated paths keep the aegis_app pools above.
+// Fixture persistence runs as the restricted aegis_fixture role (migration 020), applied at connection start. No application login can do so.
+// Authenticated paths keep the aegis_app pools above.
 function createFixturePool(max: number): Pool {
-  const fixturePool = new Pool({ connectionString: adminUrl, max });
-  fixturePool.on("connect", (client) => { void client.query("SET ROLE aegis_fixture"); });
+  // The role is applied at connection start by the startup option, so a failure is an error, not a silent admin session.
+  const fixturePool = new Pool({ connectionString: adminUrl, max, options: "-c role=aegis_fixture" });
   return fixturePool;
 }
 const fixturePool = createFixturePool(4);
