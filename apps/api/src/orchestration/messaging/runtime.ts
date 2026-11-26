@@ -6,6 +6,7 @@ import { dispatchOnce, sampleBacklog } from './dispatcher.js';
 import { receiveMessage } from './inbox.js';
 import { verifyAgentRole, withMessagingContext } from './context.js';
 import { startInvestigationInTx } from './handlers.js';
+import { reconcileCancellations } from './cancellation.js';
 import { createMessagingTelemetry } from './telemetry.js';
 import { MAX_BODY_BYTES } from './wire.js';
 
@@ -145,6 +146,19 @@ async function main(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, dispatchIntervalMs));
     }
   };
+  // Orchestrator-owned cancellation: finalises requested cancellations that no reply will ever finalise. Bounded per cycle, and idempotent:
+  // a finalised execution is terminal, so it is not rediscovered. A crash loses nothing: the request flag is committed in the database.
+  const cancellationLoop = async () => {
+    while (!stopping && agentId === 'orchestrator') {
+      try {
+        const summary = await reconcileCancellations(pool, hooks, { instance, limit: 10 });
+        if (summary.applied > 0 || summary.refused > 0) log('cancellation_reconciled', { ...summary });
+      } catch (error) {
+        log('cancellation_error', { error: error instanceof Error ? error.name : 'error' });
+      }
+      await new Promise((resolve) => setTimeout(resolve, dispatchIntervalMs));
+    }
+  };
   const sampleLoop = async () => {
     while (!stopping) {
       try { await sampleBacklog(pool, agentId, telemetry); } catch { /* sampling never stops dispatch */ }
@@ -154,6 +168,7 @@ async function main(): Promise<void> {
   void dispatchLoop();
   void sampleLoop();
   void intakeLoop();
+  void cancellationLoop();
 
   const shutdown = () => {
     stopping = true;

@@ -85,12 +85,13 @@ describe('migration 016 on disposable databases', () => {
     expect(beforeTables.rows[0].n).toBe('0');
     // Eight migrations are pending after 015: 016 through 023 (019 intake fix; 020 fixture bypass removal; 021 tenant-bound participants;
     // 022 messaging provenance; 023 cancellation enforcement).
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(8);
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(9);
     expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(0);
     const versions = await pool.query<{ version: string }>('SELECT version FROM aegis_migrations.versions ORDER BY version');
-    expect(versions.rows.slice(-8).map((row) => row.version)).toEqual(['016_agent_execution_state.sql', '017_transactional_messaging.sql',
+    expect(versions.rows.slice(-9).map((row) => row.version)).toEqual(['016_agent_execution_state.sql', '017_transactional_messaging.sql',
       '018_workload_database_identity.sql', '019_intake_identity_fix.sql', '020_remove_fixture_rls_bypass.sql',
-      '021_tenant_bound_participant_access.sql', '022_messaging_provenance_and_audit.sql', '023_cancellation_enforcement.sql']);
+      '021_tenant_bound_participant_access.sql', '022_messaging_provenance_and_audit.sql', '023_cancellation_enforcement.sql',
+      '024_orchestrator_owned_cancellation.sql']);
     await pool.end();
   });
 
