@@ -30,18 +30,30 @@ const app = createDatabasePool(runtimeUrl, 2);
 let northCaseId: string;
 let southCaseId: string;
 
+/** Inserts a case as the administrator with the tenant set in the same transaction, as the audit trigger requires. */
+async function insertCase(tenant: string, caseId: string): Promise<string> {
+  const client = await admin.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('aegis.tenant_id', $1, true)", [tenant]);
+    const row = (await client.query<{ id: string }>(
+      'INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2) RETURNING id', [tenant, caseId])).rows[0];
+    await client.query('COMMIT');
+    return row.id;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally { client.release(); }
+}
+
 beforeAll(async () => {
   await migrateDatabase(adminUrl, password, ingestionPassword);
   await admin.query(`INSERT INTO aegis.tenants (id, name) VALUES ($1, $2), ($3, $4) ON CONFLICT (id) DO NOTHING`,
     [north.tenantId, north.name, south.tenantId, south.name]);
   await admin.query(`INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, $2, $3, 'reader')`,
     [issuer, memberSubject, north.tenantId]);
-  northCaseId = (await admin.query<{ id: string }>(
-    `INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2) RETURNING id`,
-    [north.tenantId, 'SYNTHETIC-LOGIN-001'])).rows[0].id;
-  southCaseId = (await admin.query<{ id: string }>(
-    `INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2) RETURNING id`,
-    [south.tenantId, 'SYNTHETIC-BILLING-002'])).rows[0].id;
+  northCaseId = await insertCase(north.tenantId, 'SYNTHETIC-LOGIN-001');
+  southCaseId = await insertCase(south.tenantId, 'SYNTHETIC-BILLING-002');
 });
 
 afterAll(async () => {

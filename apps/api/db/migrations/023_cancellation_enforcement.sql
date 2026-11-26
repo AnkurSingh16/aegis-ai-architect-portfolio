@@ -31,14 +31,23 @@ BEGIN
 END;
 $$;
 
+-- Narrow read of one boolean, run by the owner so that a participant's row visibility cannot hide the flag. It returns only
+-- cancel_requested for one (tenant, execution) pair. The owner must be able to read the table (superuser or BYPASSRLS), as the
+-- other owner-run functions in this schema already require; see docs/SECURITY-TENANT-BOUNDARIES.md section 5.
+CREATE FUNCTION aegis.execution_cancel_requested(p_tenant uuid, p_execution uuid) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, aegis AS $$
+  SELECT e.cancel_requested FROM aegis.agent_executions e WHERE e.tenant_id = p_tenant AND e.execution_id = p_execution
+$$;
+REVOKE ALL ON FUNCTION aegis.execution_cancel_requested(uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION aegis.execution_cancel_requested(uuid, uuid) TO aegis_orchestrator, aegis_triage, aegis_retrieval, aegis_reviewer;
+
 CREATE FUNCTION aegis.refuse_request_consumption_after_cancel() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, aegis AS $$
 DECLARE
   requested boolean;
 BEGIN
   IF NEW.kind = 'request' AND OLD.status = 'open' AND NEW.status = 'consumed' THEN
-    SELECT e.cancel_requested INTO requested FROM aegis.agent_executions e
-     WHERE e.tenant_id = NEW.tenant_id AND e.execution_id = NEW.execution_id;
+    requested := aegis.execution_cancel_requested(NEW.tenant_id, NEW.execution_id);
     -- A missing or unreadable execution is refused as well: consumption requires a visible, uncancelled execution.
     IF requested IS DISTINCT FROM false THEN
       RAISE EXCEPTION 'request grant cannot be consumed after cancellation' USING ERRCODE = '42501';
