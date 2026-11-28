@@ -13,7 +13,7 @@ single policy against `pg_policies` before relying on it.
 
 | Class | Predicate basis | Meaning under T1 |
 |---|---|---|
-| A. Tenant existence | `tenant_id = aegis.tenant_id` AND `access_mode = 'authenticated'` AND `EXISTS (membership in that tenant, any principal)` | **Not principal-bound.** Any caller that sets a tenant with at least one member reads it. |
+| A. Tenant existence | `tenant_id = aegis.tenant_id` AND `access_mode = 'authenticated'` AND `EXISTS (membership in that tenant)` | Appears tenant-only, but the `memberships` subquery is filtered by its own policy to the session principal, so it is **effectively principal-bound** (runtime-confirmed, run 46130642730). No class in this inventory is tenant-only. |
 | B. Principal-bound | membership join on `issuer`/`subject` taken from `aegis.principal_*` | Bound to a session value, which is caller-controlled. Forgeable under T1. |
 | C. Tenant only | `tenant_id = aegis.tenant_id` with no membership at all | Caller-controlled tenant with no authority check. |
 | D. Mode gate | `access_mode` alone selects the branch | Caller-controlled. |
@@ -23,9 +23,9 @@ single policy against `pg_policies` before relying on it.
 
 | Table | Policy | Class | Settings read |
 |---|---|---|---|
-| `aegis.support_cases` | `case_scope` (020) | **A** | access_mode, tenant_id |
-| `aegis.tenants` | `tenant_scope` (020) | **A** | access_mode, tenant_id |
-| `aegis.audit_events` | `audit_scope` (020) | **A** | access_mode, tenant_id |
+| `aegis.support_cases` | `case_scope` (020) | B (via nested `memberships` policy) | access_mode, tenant_id |
+| `aegis.tenants` | `tenant_scope` (020) | B (via nested `memberships` policy) | access_mode, tenant_id |
+| `aegis.audit_events` | `audit_scope` (020) | B (via nested `memberships` policy) | access_mode, tenant_id |
 | `aegis.memberships` | `principal_memberships` (002) | B | access_mode, principal_issuer, principal_subject |
 | `aegis.documents` | `document_membership_read` (003) | B | access_mode, principal, tenant_id |
 | `aegis.document_chunks` | `document_chunk_membership_read` (003) | B | access_mode, principal, tenant_id |
@@ -35,11 +35,15 @@ single policy against `pg_policies` before relying on it.
 | `aegis.chunk_embeddings` | `chunk_embedding_tenant_read/insert` (009) | C | tenant_id |
 | `aegis.rate_limit_buckets` | `rate_limit_buckets_tenant` (013) | C (no TO clause: all roles) | tenant_id |
 
-**Finding (confirmed by source reading, reproduced in baseline B1, B2, B4, B5 once CI runs):** `support_cases`, `tenants` and `audit_events`
-are class A. The verified principal is not part of their predicate, so the existing F3 claim about "membership policies" understates the
-exposure: the **case** table is reachable with a tenant setting alone, as long as that tenant has any member. The existing fixture-boundary
-test passes only because its target tenant has no membership row. The tenant-only control in
-`fixture-boundary.integration.test.ts` (around lines 96–100) is therefore not evidence of tenant binding.
+**Correction (runtime evidence, run 46130642730).** An earlier reading of this inventory concluded that `support_cases`, `tenants` and
+`audit_events` were tenant-only. That was **wrong**. Their `EXISTS (SELECT 1 FROM aegis.memberships ...)` subquery is itself subject to the
+row-level policy `principal_memberships` (migration 002), which shows only rows matching the session principal. So those predicates are
+principal-bound through the nested policy. Baseline B1 (tenant change only), B4 (mode and tenant, no principal) and B5 (attacker with no
+membership) each returned no case. The fixture-boundary control was valid.
+
+The confirmed exposure is **principal forgery** (B2): a session that sets the principal of a real member reads that member's tenant. The
+member's subject is needed, and the gateway can enumerate it (B3). Lesson for the review: a predicate that reads a table is only as strong as
+that table's own policy, and only runtime evidence shows the effective result.
 
 ## aegis_gateway (investigation gateway login)
 

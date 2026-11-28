@@ -89,14 +89,14 @@ describe('F3 baseline: the current exposure of the effective policies (aegis_app
     expect(await asAppWith({}, 'SELECT id FROM aegis.support_cases')).toEqual([]);
   });
 
-  it('B1 TENANT CHANGE ONLY (EXPOSURE): a verified NORTH member, not a member of SOUTH, changes only the tenant and reads a SOUTH case', async () => {
-    // The principal is a real, verified member of NORTH. Only the tenant setting changes. The case policy checks that some membership row
-    // exists for the tenant. It does not check that the principal belongs to it.
+  it('B1 TENANT CHANGE ONLY (control): a verified NORTH member, not a member of SOUTH, changes only the tenant and reads no SOUTH case', async () => {
+    // Recorded result (run 46130642730): no row. The case policy's EXISTS subquery reads aegis.memberships, whose own policy
+    // principal_memberships shows only rows for the session principal. So the tenant alone does not establish membership.
     const rows = await asAppWith(authenticated(northMember, south.tenantId), 'SELECT id FROM aegis.support_cases');
-    expect(ids(rows)).toContain(southCaseId);
+    expect(ids(rows)).not.toContain(southCaseId);
   });
 
-  it('B2 PRINCIPAL FORGERY OF A REAL MEMBER (EXPOSURE): a session that is not the victim names the victim and the victim\'s tenant, and reads the case', async () => {
+  it('B2 PRINCIPAL FORGERY OF A REAL MEMBER (EXPOSURE, confirmed by run 46130642730): a session that is not the victim names the victim and the victim\'s tenant, and reads the case', async () => {
     // The database cannot tell this session from the victim's own. The subject needs no secret: membership rows are readable (see B3).
     const rows = await asAppWith(authenticated(northMember, north.tenantId), 'SELECT id FROM aegis.support_cases');
     expect(ids(rows)).toContain(northCaseId);
@@ -109,13 +109,13 @@ describe('F3 baseline: the current exposure of the effective policies (aegis_app
     expect(subjects).toEqual(expect.arrayContaining([northMember, southMember]));
   });
 
-  it('B4 ACCESS MODE AND TENANT ONLY, no principal (EXPOSURE): the case policy needs neither a principal nor a membership of that principal', async () => {
+  it('B4 ACCESS MODE AND TENANT ONLY, no principal (control): no case is visible without a principal', async () => {
     const rows = await asAppWith({ 'aegis.access_mode': 'authenticated', 'aegis.tenant_id': north.tenantId }, 'SELECT id FROM aegis.support_cases');
-    expect(ids(rows)).toContain(northCaseId);
+    expect(ids(rows)).not.toContain(northCaseId);
   });
 
-  it('B5 AUTHENTICATED ATTACKER WITH NO MEMBERSHIP (EXPOSURE): an identity with no membership anywhere reads a NORTH case by naming a NORTH tenant', async () => {
+  it('B5 AUTHENTICATED ATTACKER WITH NO MEMBERSHIP (control): an identity with no membership reads no NORTH case by naming NORTH', async () => {
     const rows = await asAppWith(authenticated(attacker, north.tenantId), 'SELECT id FROM aegis.support_cases');
-    expect(ids(rows)).toContain(northCaseId);
+    expect(ids(rows)).not.toContain(northCaseId);
   });
 });
