@@ -29,9 +29,18 @@ const south = resolveFixture('south');
 const log = vi.fn();
 const pool = createDatabasePool(runtimeUrl, 4);
 const single = createDatabasePool(runtimeUrl, 1);
+// Fixture persistence runs as the restricted aegis_fixture role (migration 020), applied at connection start. No application login can do so.
+// Authenticated paths keep the aegis_app pools above.
+function createFixturePool(max: number): Pool {
+  // The role is applied at connection start by the startup option, so a failure is an error, not a silent admin session.
+  const fixturePool = new Pool({ connectionString: adminUrl, max, options: "-c role=aegis_fixture" });
+  return fixturePool;
+}
+const fixturePool = createFixturePool(4);
+const fixtureSingle = createFixturePool(1);
 const admin = new Pool({ connectionString: adminUrl, max: 1 });
-const a = new CaseRepository(pool, north, log);
-const b = new CaseRepository(pool, south, log);
+const a = new CaseRepository(fixturePool, north, log);
+const b = new CaseRepository(fixturePool, south, log);
 let northId: string;
 let southId: string;
 const documentIssuer = 'https://synthetic-docs.auth0.example/';
@@ -97,7 +106,7 @@ afterAll(async () => {
     await admin.query('DELETE FROM aegis.documents WHERE id = ANY($1::uuid[])', [[documents.north.id, documents.south.id]]);
     await admin.query('DELETE FROM aegis.memberships WHERE issuer = $1 AND subject = ANY($2::text[])',
       [documentIssuer, [documentNorthSubject, documentSouthSubject]]);
-  } finally { await Promise.all([pool.end(), single.end(), admin.end()]); }
+  } finally { await Promise.all([pool.end(), single.end(), fixturePool.end(), fixtureSingle.end(), admin.end()]); }
 });
 
 describe('real PostgreSQL persistence and role boundary', () => {
@@ -192,7 +201,7 @@ describe('real PostgreSQL persistence and role boundary', () => {
   it('persists synthetic cases across independent pools and retains deterministic triage', async () => {
     const updated = await a.update(northId, 'in_progress');
     expect(updated).toMatchObject({ id: northId, tenant_id: north.tenantId, status: 'in_progress' });
-    const anotherPool = createDatabasePool(runtimeUrl, 1);
+    const anotherPool = createFixturePool(1);
     try {
       expect(await new CaseRepository(anotherPool, north, log).read(northId)).toMatchObject({ status: 'in_progress' });
       expect(await a.triage(northId)).toMatchObject({ mode: 'synthetic-mock', caseId: 'SYNTHETIC-LOGIN-001' });
@@ -212,7 +221,7 @@ describe('real PostgreSQL persistence and role boundary', () => {
       'UPDATE aegis.audit_events SET new_status = \'open\' WHERE tenant_id = $1 AND case_id = $2',
       'DELETE FROM aegis.audit_events WHERE tenant_id = $1 AND case_id = $2',
     ]) {
-      await expect(withTenantTransaction(pool, north, (client) => client.query(sql, [north.tenantId, created.id])))
+      await expect(withTenantTransaction(fixturePool, north, (client) => client.query(sql, [north.tenantId, created.id])))
         .rejects.toMatchObject({ code: '42501' });
     }
   });
@@ -224,7 +233,7 @@ describe('default-deny tenant isolation in real SQL', () => {
     await expect(a.update(southId, 'resolved')).rejects.toMatchObject({ code: 'not_found' });
     await expect(b.read(northId)).rejects.toMatchObject({ code: 'not_found' });
     expect(await a.audit(southId)).toEqual([]);
-    await withTenantTransaction(pool, north, async (client) => {
+    await withTenantTransaction(fixturePool, north, async (client) => {
       expect((await client.query('SELECT * FROM aegis.tenants')).rows).toEqual([{ id: north.tenantId, name: north.name }]);
       expect((await client.query('SELECT * FROM aegis.support_cases WHERE id = $1', [southId])).rows).toEqual([]);
       expect((await client.query('SELECT * FROM aegis.audit_events WHERE case_id = $1', [southId])).rows).toEqual([]);
@@ -233,10 +242,10 @@ describe('default-deny tenant isolation in real SQL', () => {
   });
 
   it('rejects foreign tenant INSERT and tenant reassignment even with valid SQL', async () => {
-    await expect(withTenantTransaction(pool, north, (client) => client.query(
+    await expect(withTenantTransaction(fixturePool, north, (client) => client.query(
       'INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2)',
       [south.tenantId, 'SYNTHETIC-LOGIN-001']))).rejects.toMatchObject({ code: '42501' });
-    await expect(withTenantTransaction(pool, north, (client) => client.query(
+    await expect(withTenantTransaction(fixturePool, north, (client) => client.query(
       'UPDATE aegis.support_cases SET tenant_id = $1 WHERE id = $2', [south.tenantId, northId])))
       .rejects.toMatchObject({ code: '42501' });
     expect((await b.read(southId)).status).toBe('open');
@@ -249,7 +258,7 @@ describe('default-deny tenant isolation in real SQL', () => {
     expect((await single.query('UPDATE aegis.support_cases SET status = \'resolved\'')).rowCount).toBe(0);
     await expect(single.query('INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2)',
       [north.tenantId, 'SYNTHETIC-LOGIN-001'])).rejects.toMatchObject({ code: '42501' });
-    await expect(withTenantTransaction(single, north, async (client) => {
+    await expect(withTenantTransaction(fixtureSingle, north, async (client) => {
       await client.query("SELECT set_config('row_security', 'off', true)");
       await client.query('SELECT * FROM aegis.support_cases');
     })).rejects.toMatchObject({ code: '42501' });
@@ -262,40 +271,40 @@ describe('default-deny tenant isolation in real SQL', () => {
       await expect(a.read(value)).rejects.toMatchObject({ code: 'invalid_input' });
       await expect(a.update(northId, value)).rejects.toMatchObject({ code: 'invalid_input' });
     }
-    await expect(withTenantTransaction(pool, north, (client) => client.query(
+    await expect(withTenantTransaction(fixturePool, north, (client) => client.query(
       'INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2)', [north.tenantId, 'arbitrary-input'])))
       .rejects.toMatchObject({ code: '23514' });
-    await expect(withTenantTransaction(pool, north, (client) => client.query(
+    await expect(withTenantTransaction(fixturePool, north, (client) => client.query(
       'UPDATE aegis.support_cases SET status = $1 WHERE id = $2', ['invalid', northId])))
       .rejects.toMatchObject({ code: '23514' });
   });
 
   it('clears context after commit and rollback on the same pooled connection', async () => {
     for (const fixture of [north, south]) {
-      await withTenantTransaction(single, fixture, async (client) => {
+      await withTenantTransaction(fixtureSingle, fixture, async (client) => {
         expect((await client.query('SELECT id FROM aegis.tenants')).rows).toEqual([{ id: fixture.tenantId }]);
       });
       expect((await single.query('SELECT id FROM aegis.tenants')).rows).toEqual([]);
-      await expect(withTenantTransaction(single, fixture, async () => { throw new Error('rollback requested'); }))
+      await expect(withTenantTransaction(fixtureSingle, fixture, async () => { throw new Error('rollback requested'); }))
         .rejects.toThrow('rollback requested');
       expect((await single.query('SELECT id FROM aegis.tenants')).rows).toEqual([]);
     }
   });
 
   it('fails closed on malformed SQL tenant context and clears it after rollback', async () => {
-    await expect(withTenantTransaction(single, north, async (client) => {
+    await expect(withTenantTransaction(fixtureSingle, north, async (client) => {
       await client.query("SELECT set_config('aegis.tenant_id', $1, true)", ['not-a-uuid']);
       await client.query('SELECT * FROM aegis.support_cases');
     })).rejects.toMatchObject({ code: '22P02' });
     expect((await single.query('SELECT * FROM aegis.tenants')).rows).toEqual([]);
-    expect(await new CaseRepository(single, south, log).read(southId)).toMatchObject({ tenant_id: south.tenantId });
+    expect(await new CaseRepository(fixtureSingle, south, log).read(southId)).toMatchObject({ tenant_id: south.tenantId });
   });
 
   it('rolls back case creation, update and audit records together', async () => {
     let rolledBackId: string | undefined;
     const before = await a.audit(northId);
     const original = await a.read(northId);
-    await expect(withTenantTransaction(pool, north, async (client) => {
+    await expect(withTenantTransaction(fixturePool, north, async (client) => {
       rolledBackId = (await client.query('INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2) RETURNING id',
         [north.tenantId, 'SYNTHETIC-LOGIN-001'])).rows[0].id;
       await client.query('UPDATE aegis.support_cases SET status = \'resolved\' WHERE id = $1', [northId]);
@@ -310,7 +319,7 @@ describe('default-deny tenant isolation in real SQL', () => {
   it('keeps concurrent transactions isolated across checked-out connections', async () => {
     await Promise.all(Array.from({ length: 12 }, (_, index) => {
       const fixture = index % 2 ? north : south;
-      return withTenantTransaction(pool, fixture, async (client) => {
+      return withTenantTransaction(fixturePool, fixture, async (client) => {
         await client.query('SELECT pg_sleep(0.01)');
         expect((await client.query('SELECT id FROM aegis.tenants')).rows).toEqual([{ id: fixture.tenantId }]);
         const result = await client.query('SELECT tenant_id FROM aegis.support_cases');

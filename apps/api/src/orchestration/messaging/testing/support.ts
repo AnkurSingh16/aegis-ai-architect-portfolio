@@ -8,6 +8,7 @@ import { createDatabasePool } from '../../../storage/database.js';
 import { receiveMessage, type ReceiveResult } from '../inbox.js';
 import { startInvestigationInTx } from '../handlers.js';
 import { withMessagingContext } from '../context.js';
+import { reconcileCancellations } from '../cancellation.js';
 import { ROOT_AGENT } from '../workflow.js';
 import { submitInvestigation, type Principal } from '../../../investigation/gateway.js';
 import type { TenantQueryable } from '../../../security/tool-approval-store.js';
@@ -189,3 +190,38 @@ export async function wireOf(h: Harness, messageId: string): Promise<Record<stri
   return { schemaVersion: 1, messageId, tenantId: row.tenant_id, executionId: row.execution_id, kind: row.kind, envelope: row.envelope,
     payload: row.payload, payloadDigest: row.payload_digest };
 }
+
+/**
+ * The number of cancellations that are requested and not yet terminal, across tenants. An exact count is meaningful only after
+ * `isolateCancellationBacklog`, which establishes an empty backlog first.
+ */
+export async function pendingCancellationCount(h: Harness): Promise<number> {
+  const result = await h.adminPool.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM aegis.agent_executions WHERE cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')`, []);
+  return Number(result.rows[0].n);
+}
+
+/**
+ * Establishes an empty cancellation backlog for a test that asserts exact reconciliation counts. The database is shared by every
+ * integration suite, and the suites run serially, so a cancellation left deferred by one test is eligible for discovery in a later one.
+ *
+ * Only the production path finalises anything: the reconciler runs as the orchestrator, with no fault injection. The only test-only change
+ * is scheduling: each pending cancellation is made due, so it can be finalised now rather than after its backoff. Nothing is deleted and
+ * no terminal state is written by the test. Bounded: if a cancellation still cannot be finalised, the step fails with the identifiers and
+ * scheduling of the rows that remain, rather than letting them contaminate the next scenario.
+ */
+export async function isolateCancellationBacklog(h: Harness): Promise<void> {
+  for (let round = 0; round < 40; round += 1) {
+    if (await pendingCancellationCount(h) === 0) return;
+    await h.adminPool.query(`UPDATE aegis.agent_executions SET cancellation_next_attempt_at = clock_timestamp() - interval '1 second'
+       WHERE cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')`, []);
+    await reconcileCancellations(h.pools.orchestrator, {}, { instance: 'isolation', limit: 50, lockTimeoutMs: 15000 });
+  }
+  const left = await h.adminPool.query<{ execution_id: string; cancellation_attempts: number; cancellation_failure_class: string | null;
+    scheduled_in_future: boolean }>(
+    `SELECT execution_id, cancellation_attempts, cancellation_failure_class,
+            (cancellation_next_attempt_at > clock_timestamp()) AS scheduled_in_future
+       FROM aegis.agent_executions WHERE cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled') LIMIT 10`, []);
+  throw new Error(`pending cancellations remain after isolation: ${JSON.stringify(left.rows)}`);
+}
+

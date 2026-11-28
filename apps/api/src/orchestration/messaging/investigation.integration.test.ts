@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { ingestSyntheticCatalog } from '../../documents/ingestion.js';
 import { dispatchOnce } from './dispatcher.js';
+import { reconcileCancellations } from './cancellation.js';
 import { createMessagingTelemetry } from './telemetry.js';
 import { withMessagingContext } from './context.js';
 import { startInvestigationInTx } from './handlers.js';
@@ -42,6 +43,8 @@ const count = async (sql: string, values: unknown[] = []) => Number((await h.adm
 /** Runs every agent's dispatcher, each through its own role, until no message is pending. Bounded. */
 async function drain(): Promise<void> {
   for (let round = 0; round < 40; round += 1) {
+    // The same orchestrator-owned reconciliation the runtime loop runs (not a test-only finalisation).
+    await reconcileCancellations(h.pools.orchestrator, {}, { instance: 'drain-reconciler' });
     for (const agent of AGENTS) {
       await dispatchOnce({ pool: h.pools[agent], agentId: agent, instance: `${agent}-it`, egressUrl: stubs[agent].url, leaseSeconds: 30,
         batchSize: 20, deliveryTimeoutMs: 10000, telemetry });

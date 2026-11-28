@@ -32,6 +32,8 @@ const reader = `${prefix}|reader`;
 const other = `${prefix}|south`;
 const admin = new Pool({ connectionString: adminUrl, max: 1 });
 const pool = createDatabasePool(runtimeUrl, 4);
+// Case storage in fixture mode runs as the restricted aegis_fixture role (migration 020), applied at connection start.
+const fixturePool = new Pool({ connectionString: adminUrl, max: 4, options: '-c role=aegis_fixture' });
 let app: ReturnType<typeof createApp>;
 let analysisProvider: AnalysisProvider;
 let key: Awaited<ReturnType<typeof generateKeyPair>>;
@@ -71,8 +73,8 @@ beforeAll(async () => {
   await membership(operator, north.tenantId, 'operator');
   await membership(reader, north.tenantId, 'reader');
   await membership(other, south.tenantId, 'operator');
-  northId = (await new CaseRepository(pool, north, () => {}).create('SYNTHETIC-LOGIN-001')).id;
-  southId = (await new CaseRepository(pool, south, () => {}).create('SYNTHETIC-BILLING-002')).id;
+  northId = (await new CaseRepository(fixturePool, north, () => {}).create('SYNTHETIC-LOGIN-001')).id;
+  southId = (await new CaseRepository(fixturePool, south, () => {}).create('SYNTHETIC-BILLING-002')).id;
   key = await generateKeyPair('RS256');
   analysisProvider = { analyze: vi.fn(async (stored) => analysisFor(stored.id)) };
   app = createApp({ authConfig: { issuer, audience, databaseUrl: runtimeUrl },
@@ -84,7 +86,7 @@ beforeEach(() => { errorLog?.mockClear(); successLog?.mockClear(); if (analysisP
 afterAll(async () => {
   if (app) await app.close();
   try { await admin.query('DELETE FROM aegis.memberships WHERE issuer = $1 AND subject LIKE $2', [issuer, `${prefix}|%`]); }
-  finally { await Promise.all([pool.end(), admin.end()]); errorLog?.mockRestore(); successLog?.mockRestore(); }
+  finally { await Promise.all([fixturePool.end(), pool.end(), admin.end()]); errorLog?.mockRestore(); successLog?.mockRestore(); }
 });
 
 describe('authenticated HTTP with real PostgreSQL membership authorization', () => {
@@ -144,7 +146,7 @@ describe('authenticated HTTP with real PostgreSQL membership authorization', () 
     expect(created.statusCode).toBe(201); const id = created.json().id as string;
     const updated = await app.inject({ method: 'PATCH', url: `${casePath(north.tenantId, id)}/status`, headers: { authorization }, payload: { status: 'resolved' } });
     expect(updated.statusCode).toBe(200); expect(updated.json()).toMatchObject({ id, status: 'resolved', tenant_id: north.tenantId });
-    expect(await new CaseRepository(pool, north, () => {}).audit(id)).toMatchObject([
+    expect(await new CaseRepository(fixturePool, north, () => {}).audit(id)).toMatchObject([
       { action: 'case.created', new_status: 'open' }, { action: 'case.updated', previous_status: 'open', new_status: 'resolved' },
     ]);
   });
@@ -265,7 +267,7 @@ describe('authenticated HTTP with real PostgreSQL membership authorization', () 
     const update = await app.inject({ method: 'PATCH', url: `${casePath(north.tenantId, southId)}/status`, headers: { authorization }, payload: { status: 'resolved' } });
     expect(read.statusCode).toBe(404); expect(update.statusCode).toBe(404);
     expect(read.json()).toEqual({ error: 'Case not found.' });
-    expect((await new CaseRepository(pool, south, () => {}).read(southId)).status).toBe('open');
+    expect((await new CaseRepository(fixturePool, south, () => {}).read(southId)).status).toBe('open');
   });
 
   it('does not accept tenant authorization from headers, query parameters or request bodies', async () => {

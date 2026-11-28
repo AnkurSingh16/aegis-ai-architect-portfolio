@@ -104,6 +104,14 @@ export interface AgentExecutionStore {
     Promise<Result<{ fencingToken: number; attempts: number; recovered: boolean; agentId: string }, ClaimRefusal>>;
   renew(fence: Fence, leaseSeconds: number): Promise<Result<{ leaseSeconds: number }, WriteRefusal>>;
   release(fence: Fence, nextStatus: 'pending' | 'failed' | 'succeeded' | 'cancelled', reason: string): Promise<Result<{ status: string }, WriteRefusal>>;
+  /** Orchestrator only. Finalises a requested cancellation under the row lock: see the implementation for the rules. */
+  finaliseCancellation(tenantId: string, executionId: string, actorInstance: string): Promise<Result<{ applied: boolean }, 'not_found'>>;
+  /**
+   * Records one failed reconciliation attempt in its own transaction (migration 025). Applies only while the cancellation is still
+   * pending, so it can never overwrite a terminal execution. Returns recorded = false when the row is no longer pending.
+   */
+  recordCancellationFailure(tenantId: string, executionId: string, failureClass: CancellationFailureClass, expectedGeneration: string):
+    Promise<{ recorded: boolean; attempts: number }>;
   recordDelegation(fence: Fence, input: { parentSeq: number | null; to: string; requestedScopes: readonly string[] }):
     Promise<Result<{ seq: number; depth: number }, WriteRefusal>>;
   issueGrant(fence: Fence, input: { chainSeq: number; kind: 'request' | 'result'; action: string; argumentsDigest: string;
@@ -117,7 +125,7 @@ export interface AgentExecutionStore {
   receiveEnvelope(input: { tenantId: string; executionId: string; recipient: string; sender: string; envelope: unknown }):
     Promise<Result<{ grantId: string }, string>>;
   requestCancel(tenantId: string, executionId: string, actorDigest: string, reason: string):
-    Promise<Result<{ state: 'cancelled' | 'cancel_requested' }, 'not_found' | 'terminal'>>;
+    Promise<Result<{ state: 'cancel_requested' | 'already_requested' }, 'not_found' | 'terminal'>>;
   snapshot(tenantId: string, executionId: string): Promise<ExecutionSnapshot | null>;
   delegations(tenantId: string, executionId: string): Promise<Array<{ seq: number; parentSeq: number | null; depth: number;
     from: string; to: string; chainDigest: string }>>;
@@ -150,6 +158,9 @@ const EXEC_COLUMNS = `e.execution_id, e.tenant_id, e.principal_ref, e.principal_
   (e.lease_expires_at > clock_timestamp()) AS lease_live, clock_timestamp() AS db_now`;
 
 const TERMINAL = ['succeeded', 'failed', 'cancelled'];
+/** Sanitised classes persisted for a failed cancellation attempt (migration 025). No free text is stored. */
+export const CANCELLATION_FAILURE_CLASSES = ['transient', 'systemic', 'execution_refused'] as const;
+export type CancellationFailureClass = (typeof CANCELLATION_FAILURE_CLASSES)[number];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const assertUuid = (value: string, label: string): void => {
   if (!UUID.test(value)) throw new RangeError(`${label} must be a UUID`);
@@ -173,12 +184,14 @@ export function createAgentExecutionStore(runTenant: TenantRunner, hooks: Execut
     claim: observed('claim', hooks, built.claim, (r) => ({ started: r.ok && !r.value.recovered && r.value.attempts === 1,
       terminal: !r.ok && (r.reason === 'retries_exhausted' || r.reason === 'cancel_requested'), recovered: r.ok && r.value.recovered, reason: r.ok ? null : r.reason, executionId: null })),
     renew: observed('renew', hooks, built.renew, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
+    finaliseCancellation: built.finaliseCancellation,
+    recordCancellationFailure: built.recordCancellationFailure,
     release: observed('release', hooks, built.release, (r, args) => ({ started: false, terminal: r.ok && TERMINAL.includes(args[1]), recovered: false, reason: null, executionId: null })),
     recordDelegation: observed('delegate', hooks, built.recordDelegation, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     issueGrant: observed('grant', hooks, built.issueGrant, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     consumeEnvelope: observed('consume', hooks, built.consumeEnvelope, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     receiveEnvelope: observed('consume', hooks, built.receiveEnvelope, (r, args) => ({ started: false, terminal: false, recovered: false, reason: r.ok ? null : r.reason, executionId: String(args[0].executionId) })),
-    requestCancel: observed('cancel', hooks, built.requestCancel, (r, args) => ({ started: false, terminal: r.ok && r.value.state === 'cancelled', recovered: false, reason: null, executionId: String(args[1]) })),
+    requestCancel: observed('cancel', hooks, built.requestCancel, (r, args) => ({ started: false, terminal: false, recovered: false, reason: null, executionId: String(args[1]) })),
     snapshot: built.snapshot,
     delegations: built.delegations,
     grants: built.grants,
@@ -486,7 +499,7 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
           delegationSeq: null, grantId: null });
         return { ok: true, value: { status: nextStatus } };
       }, 'release', (r) => ({ eventType: 'fenced_write_refused', outcome: 'refused', reason: r, actorAgent: fence.agentId,
-        actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: null }), true);
+        actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: null }), nextStatus === 'cancelled');
     },
 
     async recordDelegation(fence, input) {
@@ -596,6 +609,11 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         // Addressing is checked before authorisation so a message for another agent is refused by name, not by grant lookup.
         if (structure.envelope.to !== recipient) return refuseAt('wrong_recipient');
         if (structure.envelope.from !== sender) return refuseAt('sender_mismatch');
+        // A request received after cancellation is refused under the row lock. The receiver holds no right to change execution state:
+        // the cancellation is finalised only by the orchestrator (finaliseCancellation, driven by the orchestrator's reconciliation).
+        // Migration 023's trigger refuses the grant consumption in the database as a backstop; this refusal is the normal path.
+        // Results in flight are consumed and discarded downstream, as documented in migration 023.
+        if (row.cancel_requested && structure.envelope.kind === 'request') return refuseAt('cancel_requested');
         const consumed = await consumeDecision(client, row, tenantId, executionId,
           { agentId: recipient, instance: null, fencingToken: Number(row.fencing_token) }, envelope);
         if (!consumed.ok) {
@@ -609,6 +627,71 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
       });
     },
 
+    /**
+     * Orchestrator-owned finalisation of a requested cancellation, in one transaction under the execution row lock. It is the only
+     * place where a cancellation becomes terminal without a result from another agent. Rules:
+     * - a terminal execution is left as it is (a committed result or failure wins); nothing is applied twice;
+     * - a live lease is invalidated: the lease is cleared and the fencing token advanced, so the holder's later fenced writes are
+     *   refused as stale, whether or not its attempt is still running;
+     * - open grants are revoked, so no request grant can be consumed after this commit;
+     * - the stage moves to cancelled (the database refuses completion after cancellation).
+     */
+    async finaliseCancellation(tenantId, executionId, actorInstance) {
+      assertUuid(tenantId, 'tenantId');
+      assertUuid(executionId, 'executionId');
+      return runTenant(tenantId, async (client) => {
+        const locked = await lockAndFence(client, tenantId, executionId, null);
+        if (!locked.ok) { await beforeCommit('cancel_finalise:not_found'); return { ok: false as const, reason: 'not_found' as const }; }
+        const row = locked.row;
+        if (TERMINAL.includes(row.status) || !row.cancel_requested) {
+          await beforeCommit('cancel_finalise:skipped');
+          return { ok: true as const, value: { applied: false } };
+        }
+        await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', lease_agent_id = NULL, lease_instance = NULL,
+            lease_expires_at = NULL, fencing_token = fencing_token + 1, version = version + 1, updated_at = clock_timestamp(),
+            cancellation_next_attempt_at = NULL,
+            workflow_stage = CASE WHEN workflow_stage IN ('completed', 'insufficient_evidence', 'failed', 'cancelled') THEN workflow_stage ELSE 'cancelled' END
+          WHERE execution_id = $1`, [executionId]);
+        await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
+          WHERE execution_id = $1 AND status = 'open'`, [executionId]);
+        await audit(client, tenantId, executionId, { eventType: 'cancelled', outcome: 'accepted', reason: 'cancel_requested',
+          actorAgent: 'orchestrator', actorInstance, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
+        await beforeCommit('cancel_finalise:applied');
+        return { ok: true as const, value: { applied: true } };
+      });
+    },
+
+    async recordCancellationFailure(tenantId, executionId, failureClass, expectedGeneration) {
+      assertUuid(tenantId, 'tenantId');
+      assertUuid(executionId, 'executionId');
+      if (!CANCELLATION_FAILURE_CLASSES.includes(failureClass)) throw new RangeError('unknown cancellation failure class');
+      // The generation is a bigint carried as a decimal string: it is never converted to a JavaScript number.
+      // At most 18 digits: always within the bigint range, so no value reaches the database that PostgreSQL would reject for size.
+      if (!/^(0|[1-9][0-9]{0,17})$/.test(expectedGeneration)) throw new RangeError('expectedGeneration');
+      // Backoff in database time: 1 s doubling per attempt, capped at 60 s. The attempt count saturates at 1000 (its CHECK) and is used
+      // only for that backoff. The generation is never capped: it is the scheduling identity, and every schedule write advances it.
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<{ cancellation_attempts: number }>(
+          `UPDATE aegis.agent_executions SET cancellation_generation = cancellation_generation + 1,
+              cancellation_attempts = LEAST(cancellation_attempts + 1, 1000),
+              cancellation_last_attempt_at = clock_timestamp(), cancellation_failure_class = $3,
+              cancellation_next_attempt_at = clock_timestamp()
+                + LEAST(interval '60 seconds', interval '1 second' * power(2, LEAST(cancellation_attempts, 6)))
+            WHERE tenant_id = $1 AND execution_id = $2 AND cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')
+              AND cancellation_generation = $4::bigint
+            RETURNING cancellation_attempts`,
+          [tenantId, executionId, failureClass, expectedGeneration]);
+        const row = result.rows[0];
+        await beforeCommit(`cancel_failure:${row ? 'recorded' : 'not_pending'}`);
+        return row ? { recorded: true, attempts: row.cancellation_attempts } : { recorded: false, attempts: 0 };
+      });
+    },
+
+    /**
+     * Records a cancellation request and nothing else. It never changes status, revokes grants or releases a lease: the orchestrator
+     * finalises (finaliseCancellation), with or without a live lease. The same semantics as the gateway's requestCancellation. A repeated
+     * request is idempotent and writes no second event.
+     */
     async requestCancel(tenantId, executionId, actorDigest, reason) {
       assertUuid(tenantId, 'tenantId');
       assertUuid(executionId, 'executionId');
@@ -618,24 +701,14 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         if (!locked.ok) { await beforeCommit('cancel:not_found'); return { ok: false as const, reason: 'not_found' as const }; }
         const row = locked.row;
         if (TERMINAL.includes(row.status)) { await beforeCommit('cancel:terminal'); return { ok: false as const, reason: 'terminal' as const }; }
-        if (row.lease_live) {
-          // A running attempt honours the request at its next fenced write.
-          await client.query(`UPDATE aegis.agent_executions SET cancel_requested = true, cancel_reason = COALESCE(cancel_reason, $2),
-              version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`, [executionId, reason]);
-          await audit(client, tenantId, executionId, { eventType: 'cancel_requested', outcome: 'accepted', reason: 'lease_held',
-            actorAgent: null, actorInstance: actorDigest, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
-          await beforeCommit('cancel:requested');
-          return { ok: true as const, value: { state: 'cancel_requested' as const } };
-        }
-        await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', cancel_requested = true,
-            cancel_reason = COALESCE(cancel_reason, $2), version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`,
-        [executionId, reason]);
-        await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
-          WHERE execution_id = $1 AND status = 'open'`, [executionId]);
-        await audit(client, tenantId, executionId, { eventType: 'cancelled', outcome: 'accepted', reason: 'operator_request',
-          actorAgent: null, actorInstance: actorDigest, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
-        await beforeCommit('cancel:cancelled');
-        return { ok: true as const, value: { state: 'cancelled' as const } };
+        if (row.cancel_requested) { await beforeCommit('cancel:already_requested'); return { ok: true as const, value: { state: 'already_requested' as const } }; }
+        await client.query(`UPDATE aegis.agent_executions SET cancel_requested = true, cancel_reason = COALESCE(cancel_reason, $2),
+            version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`, [executionId, reason]);
+        await audit(client, tenantId, executionId, { eventType: 'cancel_requested', outcome: 'accepted',
+          reason: row.lease_live ? 'lease_held' : 'requested', actorAgent: null, actorInstance: actorDigest,
+          fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
+        await beforeCommit('cancel:requested');
+        return { ok: true as const, value: { state: 'cancel_requested' as const } };
       });
     },
 

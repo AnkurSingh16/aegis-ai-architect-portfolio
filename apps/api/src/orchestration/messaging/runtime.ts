@@ -6,6 +6,8 @@ import { dispatchOnce, sampleBacklog } from './dispatcher.js';
 import { receiveMessage } from './inbox.js';
 import { verifyAgentRole, withMessagingContext } from './context.js';
 import { startInvestigationInTx } from './handlers.js';
+import { readCancellationBacklog, reconcileCancellations } from './cancellation.js';
+import { verifyCancellationAuthority } from './cancellation-authority.js';
 import { createMessagingTelemetry } from './telemetry.js';
 import { MAX_BODY_BYTES } from './wire.js';
 
@@ -74,6 +76,16 @@ async function main(): Promise<void> {
   assertAgentId(agentId);
   const pool = createDatabasePool(env.DATABASE_URL ?? '', 6);
   await verifyAgentRole(pool, agentId);
+  if (agentId === 'orchestrator') {
+    // Fail fast: the orchestrator does not accept or reconcile work unless its privileged cancellation functions are as designed.
+    try {
+      await verifyCancellationAuthority(pool);
+    } catch (error) {
+      log('cancellation_authority_refused', { failed: (error as { failed?: string[] }).failed ?? [] });
+      await pool.end();
+      process.exit(1);
+    }
+  }
 
   const spiffeId = await fetchIdentity();
   const registered = await pool.query<{ agent_id: string }>(
@@ -145,6 +157,31 @@ async function main(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, dispatchIntervalMs));
     }
   };
+  // Orchestrator-owned cancellation: finalises requested cancellations that no reply will ever finalise. Bounded per cycle, and idempotent:
+  // a finalised execution is terminal, so it is not rediscovered. A crash loses nothing: the request flag is committed in the database.
+  // A halted or failed cycle backs off exponentially (capped at 30 s), so an unavailable database or a broken configuration does not spin.
+  // Every 30 s the orchestrator logs aggregate backlog figures (counts and ages only, no identifiers).
+  const cancellationLoop = async () => {
+    let delay = dispatchIntervalMs;
+    let cycles = 0;
+    while (!stopping && agentId === 'orchestrator') {
+      try {
+        const summary = await reconcileCancellations(pool, hooks, { instance, limit: 10 });
+        delay = summary.halted ? Math.min(30000, Math.max(1000, delay * 2)) : dispatchIntervalMs;
+        if (summary.applied > 0 || summary.transient > 0 || summary.deferred > 0 || summary.refused > 0 || summary.systemic > 0 || summary.unrecorded > 0) {
+          log('cancellation_reconciled', { ...summary });
+        }
+      } catch (error) {
+        delay = Math.min(30000, Math.max(1000, delay * 2));
+        log('cancellation_error', { error: error instanceof Error ? error.name : 'error' });
+      }
+      cycles += 1;
+      if (cycles % Math.max(1, Math.round(30000 / Math.max(1, dispatchIntervalMs))) === 0) {
+        try { log('cancellation_backlog', { ...(await readCancellationBacklog(pool)) }); } catch { /* telemetry never stops reconciliation */ }
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  };
   const sampleLoop = async () => {
     while (!stopping) {
       try { await sampleBacklog(pool, agentId, telemetry); } catch { /* sampling never stops dispatch */ }
@@ -154,6 +191,7 @@ async function main(): Promise<void> {
   void dispatchLoop();
   void sampleLoop();
   void intakeLoop();
+  void cancellationLoop();
 
   const shutdown = () => {
     stopping = true;
