@@ -22,8 +22,9 @@ here (see `SECURITY-TENANT-BOUNDARIES.md`, section 6).
 
 `requestCancellation` (production route `POST .../investigations/:id/cancel`) does the following:
 
-1. Verifies the membership role and loads the execution. A row that belongs to another principal, or to another tenant, returns
-   `not_found` and changes nothing.
+1. Verifies the caller's membership role in the tenant named in the URL. Without membership it is refused as `forbidden` (HTTP 403) before
+   the execution is read. With membership it loads the execution. A row that belongs to another principal, or to another tenant, returns
+   `not_found` (HTTP 404) and changes nothing.
 2. If the execution is already terminal, returns `{ accepted: false, state: 'terminal' }`.
 3. Runs one conditional UPDATE, bound to the verified principal, the tenant, `NOT cancel_requested`, and a non-terminal status. It sets
    the flag and the reason only.
@@ -39,7 +40,14 @@ here (see `SECURITY-TENANT-BOUNDARIES.md`, section 6).
 | First request by the originating principal | `{ "accepted": true, "state": "cancel_requested" }` |
 | Repeat while the request stands | `{ "accepted": true, "state": "already_requested" }` (no second event) |
 | Execution already finished (including after a cancellation was finalised, or a completion that committed first) | `{ "accepted": false, "state": "terminal" }` |
-| Another principal, another tenant, or an unknown execution | HTTP 404 with an identical body in each case |
+| Missing or invalid token, or token expired | HTTP 401 `{ "error": "unauthenticated" }` (set before any gateway work) |
+| Token valid, but without the `read:cases` scope | HTTP 403 `{ "error": "forbidden" }` |
+| Caller has **no membership** in the tenant named in the URL (whatever the execution identifier) | HTTP 403 `{ "error": "forbidden" }`, identical for a real and an unknown identifier |
+| Caller **has membership** in the tenant, but the execution belongs to another tenant, to another principal, or does not exist | HTTP 404 `{ "error": "not_found" }`, identical in every case, so existence is not disclosed |
+
+Membership is checked before the execution is looked up. A caller therefore receives 403 when it is not a member of the tenant at all,
+and 404 when it is a member but the execution is not theirs. Both refusals change nothing: no flag, no event, no state. Authentication
+(401) and scope (403) are checked before the gateway is reached.
 
 `state` is the additive field of Phase A.1. It is the gateway's own result, and no consumer in this repository read the earlier
 `{ accepted: true }`-only body. The principal and tenant are always taken from the verified token and the route; the body carries only
@@ -294,8 +302,10 @@ PostgreSQL integration tests run in CI on the final commit. Counts are in the PR
     owner with SELECT but without UPDATE for locking, a BYPASSRLS owner without role-map access, an AFTER trigger under the required name,
     and a required trigger attached to a different function.
 - `auth/investigation-routes.integration.test.ts`: the public contract above: first request, duplicate, another principal (404, identical to
-  unknown), cross-tenant (404), request after cancellation finalised (terminal), request after a completion committed first (terminal, and
-  the succeeded execution is not overwritten).
+  unknown), no membership in the tenant (403, identical for real and unknown identifiers), member naming another tenant's execution (404,
+  identical to unknown), request after cancellation finalised (terminal), request after a completion committed first (terminal, and
+  the succeeded execution is not overwritten), and the 403/404 distinction: no membership in the tenant returns 403 for a real and an unknown
+  identifier alike; membership in the tenant with another tenant's execution returns 404, identical to unknown.
 - `investigation/gateway.test.ts`: request, idempotent repeat, lost race to terminal, principal refusal, finished executions.
 
 Tests inject faults only through `ReconcileOptions.injectFault`, a test seam the runtime never passes. Backoff is exercised with a

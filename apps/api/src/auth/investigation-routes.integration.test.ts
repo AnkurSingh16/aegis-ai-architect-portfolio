@@ -19,6 +19,8 @@ const principals: Record<string, VerifiedPrincipal> = {
   noscope: { issuer: TEST_ISSUER, subject: 'api-reader', scopes: new Set(['observe:metrics']) },
   stranger: { issuer: TEST_ISSUER, subject: 'api-stranger', scopes: new Set(['read:cases']) },
   other: { issuer: TEST_ISSUER, subject: 'api-other', scopes: new Set(['read:cases']) },
+  // Isolated: reader membership in both tenants is granted by the test that uses it. The NORTH-only reader above is unchanged.
+  dual: { issuer: TEST_ISSUER, subject: 'api-dual', scopes: new Set(['read:cases']) },
 };
 const verify = async (authorization: string | undefined): Promise<VerifiedPrincipal> => {
   if (!authorization) throw new AuthorizationError(401);
@@ -159,13 +161,47 @@ describe('authenticated investigation API', () => {
     expect(row.rows[0].cancel_requested).toBe(false);
   });
 
-  it('a request addressed to another tenant is refused with the same 404 and changes nothing in either tenant', async () => {
+  // Membership is checked before the execution is looked up, so the three refusals are distinct by design:
+  //   A. no membership in the requested tenant    -> 403 { error: 'forbidden' }, whatever the execution identifier;
+  //   B. membership in the requested tenant, but the execution belongs to another tenant -> 404 { error: 'not_found' }, as for unknown;
+  //   C. membership in the tenant, another principal -> 404 { error: 'not_found' }, as for unknown.
+  // Case B uses a dedicated principal with reader membership in both tenants. The NORTH-only reader is never changed.
+  const cancelEventCount = async (executionId: string) => Number((await h.adminPool.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM aegis.agent_execution_events WHERE execution_id = $1 AND event_type IN ('cancel_requested', 'cancelled')`,
+    [executionId])).rows[0].n);
+  const flagOf = async (executionId: string) => (await h.adminPool.query<{ cancel_requested: boolean; status: string }>(
+    'SELECT cancel_requested, status FROM aegis.agent_executions WHERE execution_id = $1', [executionId])).rows[0];
+
+  it('A: a caller with no membership in the requested tenant gets 403 for a real and an unknown execution, and nothing changes', async () => {
     const created = JSON.parse((await post('reader', NORTH, { question: 'Which policy document?' })).body) as { executionId: string };
-    const crossTenant = await cancel('reader', SOUTH, created.executionId);
-    expect(crossTenant.statusCode).toBe(404);
-    expect(crossTenant.body).toBe((await cancel('reader', SOUTH, uuid())).body);
-    const row = await h.adminPool.query<{ cancel_requested: boolean }>('SELECT cancel_requested FROM aegis.agent_executions WHERE execution_id = $1', [created.executionId]);
-    expect(row.rows[0].cancel_requested).toBe(false);
+    const before = await flagOf(created.executionId);
+    const real = await cancel('reader', SOUTH, created.executionId);
+    const unknown = await cancel('reader', SOUTH, uuid());
+    expect(real.statusCode).toBe(403);
+    expect(JSON.parse(real.body)).toEqual({ error: 'forbidden' });
+    expect(real.body).toBe(unknown.body);
+    expect(await flagOf(created.executionId)).toEqual(before);
+    expect(await cancelEventCount(created.executionId)).toBe(0);
+  });
+
+  it('B: a member of the requested tenant who names another tenant\'s execution gets 404, identical to an unknown execution, with no change', async () => {
+    // Isolated fixture: the dual principal is a reader in both tenants.
+    for (const tenant of [NORTH, SOUTH]) {
+      await h.adminPool.query(`INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, 'api-dual', $2, 'reader') ON CONFLICT DO NOTHING`,
+        [TEST_ISSUER, tenant]);
+    }
+    const created = JSON.parse((await post('reader', NORTH, { question: 'Which policy document?' })).body) as { executionId: string };
+    const before = await flagOf(created.executionId);
+    const foreign = await cancel('dual', SOUTH, created.executionId);
+    const unknown = await cancel('dual', SOUTH, uuid());
+    expect(foreign.statusCode).toBe(404);
+    expect(JSON.parse(foreign.body)).toEqual({ error: 'not_found' });
+    expect(foreign.body).toBe(unknown.body);
+    expect(await flagOf(created.executionId)).toEqual(before);
+    expect(await cancelEventCount(created.executionId)).toBe(0);
+    // The same principal can still cancel its own execution in its own tenant (the refusal is about the resource, not the principal).
+    const own = await cancel('dual', NORTH, created.executionId);
+    expect(own.statusCode).toBe(404);
   });
 
   it('a request after the execution is cancelled returns terminal and does not alter the cancelled execution', async () => {
