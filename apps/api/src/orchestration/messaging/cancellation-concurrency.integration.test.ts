@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createDatabasePool } from '../../storage/database.js';
 import { createAgentExecutionStore, joinTransaction, type Fence } from '../persistence/execution-store.js';
@@ -7,7 +7,8 @@ import type { TenantQueryable } from '../../security/tool-approval-store.js';
 import { readCancellationBacklog, reconcileCancellations, type ReconcileOptions } from './cancellation.js';
 import { CancellationAuthorityError, verifyCancellationAuthority } from './cancellation-authority.js';
 import { withMessagingContext } from './context.js';
-import { createHarness, closeHarness, readerPrincipal, roleUrl, startInvestigation, SPIFFE, NORTH, SOUTH, type Harness } from './testing/support.js';
+import { createHarness, closeHarness, readerPrincipal, roleUrl, startInvestigation, SPIFFE, NORTH, SOUTH, type Harness,
+  isolateCancellationBacklog, pendingCancellationCount } from './testing/support.js';
 
 // Phase A on real PostgreSQL. Every checked-out connection is released in a finally block; every barrier is released or aborted on every
 // path; every started operation is settled before a test ends. Lock contention is observed by identified backend PID (the blocker is the
@@ -18,6 +19,10 @@ let h: Harness;
 const extraPools: Pool[] = [];
 
 beforeAll(async () => { h = await createHarness(); });
+// Fixture lifecycle. Every test starts from an empty cancellation backlog and leaves one behind. Isolation uses only the production
+// reconciler and test-only scheduling (see isolateCancellationBacklog); a test that fails an assertion is cleaned up the same way.
+beforeEach(async () => { await isolateCancellationBacklog(h); });
+afterEach(async () => { await isolateCancellationBacklog(h); });
 afterAll(async () => {
   for (const p of extraPools) await p.end().catch(() => undefined);
   if (h) await closeHarness(h);
@@ -229,13 +234,17 @@ async function pendingCancellation(tenant = NORTH, leased = false): Promise<{ ex
   return { executionId, fence };
 }
 
-/** Drains every due cancellation (no faults) until none is due. Bounded. Keeps each scenario's starting point clean. */
-async function drainDue(): Promise<void> {
-  for (let i = 0; i < 30; i += 1) {
-    if ((await reconcile()).candidates === 0) return;
-  }
-  throw new Error('drain not bounded');
-}
+/** Establishes an empty backlog (see isolateCancellationBacklog). Kept as the scenario's explicit starting point. */
+const drainDue = (): Promise<void> => isolateCancellationBacklog(h);
+/**
+ * Holds a cancellation out of discovery for the rest of the scenario, by its persisted eligibility time. Used so that a scenario's
+ * sequence of cycles does not depend on how much real time its backoff has consumed. The afterEach isolation restores it.
+ */
+const makeIneligible = (executionId: string) => h.adminPool.query(
+  `UPDATE aegis.agent_executions SET cancellation_next_attempt_at = clock_timestamp() + interval '1 hour' WHERE execution_id = $1`, [executionId]);
+/** Whether the persisted next attempt lies in the future of the database clock: the backoff the production code recorded. */
+const isScheduledInFuture = async (executionId: string): Promise<boolean> => (await h.adminPool.query<{ future: boolean }>(
+  `SELECT (cancellation_next_attempt_at > clock_timestamp()) AS future FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0].future;
 /** Makes a failed cancellation due again without waiting for its backoff. Test-only persisted timestamp. */
 const makeDue = (executionId: string) => h.adminPool.query(
   `UPDATE aegis.agent_executions SET cancellation_next_attempt_at = clock_timestamp() - interval '1 second' WHERE execution_id = $1`, [executionId]);
@@ -498,6 +507,25 @@ describe('A5 two-session races on the execution row lock, gateway and orchestrat
   }, 90000);
 });
 
+describe('fixture isolation regression', () => {
+  it('a cancellation deferred by a prior scenario is cleared by isolation and cannot change the next exact count', async () => {
+    // The leak: a transient failure is recorded, so the cancellation is deferred and still pending when this test would end.
+    const leaked = await pendingCancellation();
+    expect(await reconcile({ injectFault: (phase, _t, id) => (phase === 'finalise' && id === leaked.executionId ? new Error('synthetic transient fault') : undefined) }))
+      .toMatchObject({ candidates: 1, transient: 1 });
+    expect(await isScheduledInFuture(leaked.executionId)).toBe(true);
+    expect(await pendingCancellationCount(h)).toBe(1);
+    // The isolation every test runs first clears it through the production reconciler, and nothing is left deferred.
+    await isolateCancellationBacklog(h);
+    expect(await pendingCancellationCount(h)).toBe(0);
+    expect(await state(leaked.executionId)).toMatchObject({ status: 'cancelled', next_at: null });
+    // The next scenario's exact count sees only its own cancellation.
+    const fresh = await pendingCancellation();
+    expect(await reconcile()).toMatchObject({ candidates: 1, applied: 1 });
+    expect(await state(fresh.executionId)).toMatchObject({ status: 'cancelled' });
+  }, 60000);
+});
+
 describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () => {
   it('A6.1 a poisoned cancellation ahead of a healthy one is rescheduled, and the healthy one completes in the next cycle', async () => {
     await drainDue();
@@ -508,7 +536,9 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
     expect(await reconcile({ limit: 1, injectFault: fault })).toMatchObject({ candidates: 1, transient: 1, applied: 0 });
     const afterFirst = await state(poisoned.executionId);
     expect(afterFirst).toMatchObject({ attempts_cancel: 1, failure_class: 'transient' });
-    expect(afterFirst.next_at!.getTime()).toBeGreaterThan(Date.now() - 1000);
+    expect(await isScheduledInFuture(poisoned.executionId)).toBe(true);
+    // The rescheduled cancellation is held out explicitly, so the next cycle must select the healthy one, whatever the wall clock is.
+    await makeIneligible(poisoned.executionId);
     expect(await reconcile({ limit: 1, injectFault: fault })).toMatchObject({ candidates: 1, applied: 1 });
     expect((await state(healthy.executionId)).status).toBe('cancelled');
     expect((await reconcile({ limit: 1, injectFault: fault })).candidates).toBe(0);
@@ -527,6 +557,8 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
     while ((await state(healthy)).status !== 'cancelled' && cycles < 10) {
       cycles += 1;
       await reconcile({ limit: 2, injectFault: fault });
+      // A poisoned cancellation that has just failed is held out, so each cycle moves on to the next candidates (no wall-clock dependence).
+      for (const id of poisoned) if ((await state(id)).attempts_cancel > 0) await makeIneligible(id);
     }
     expect(cycles).toBeLessThanOrEqual(Math.ceil(5 / 2) + 1);
     expect((await state(healthy)).status).toBe('cancelled');
@@ -539,6 +571,8 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
       phase === 'finalise' && id === executionId ? new Error('synthetic transient fault') : undefined;
     await reconcile({ injectFault: fault });
     expect((await state(executionId)).attempts_cancel).toBe(1);
+    expect(await isScheduledInFuture(executionId)).toBe(true);
+    await makeIneligible(executionId);
     expect((await reconcile({ injectFault: fault })).candidates).toBe(0);
     await makeDue(executionId);
     await reconcile({ injectFault: fault });
@@ -586,6 +620,8 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
     const fault = (phase: 'finalise' | 'record', _t: string, id: string) =>
       phase === 'finalise' && id === executionId ? new Error('synthetic transient fault') : undefined;
     await reconcile({ injectFault: fault });
+    expect(await isScheduledInFuture(executionId)).toBe(true);
+    await makeIneligible(executionId);
     const restarted = createDatabasePool(roleUrl('orchestrator'), 2);
     extraPools.push(restarted);
     try {

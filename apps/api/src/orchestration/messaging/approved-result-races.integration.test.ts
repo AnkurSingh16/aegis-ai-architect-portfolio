@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { ingestSyntheticCatalog } from '../../documents/ingestion.js';
 import { requestCancellation } from '../../investigation/gateway.js';
@@ -9,7 +9,7 @@ import { receiveMessage, type ReceiveResult } from './inbox.js';
 import { withMessagingContext } from './context.js';
 import { createMessagingTelemetry } from './telemetry.js';
 import { createHarness, closeHarness, readerPrincipal, startInvestigation, startStubEgress, wireOf, SPIFFE, NORTH, QUESTION, type AgentName,
-  type Harness, type StubEgress } from './testing/support.js';
+  type Harness, type StubEgress, isolateCancellationBacklog } from './testing/support.js';
 
 /*
  * Approved-result finalisation races (Phase A.2 item 9.2, completed in A.3). The reviewer's approval travels the production path: the
@@ -38,9 +38,12 @@ beforeAll(async () => {
 });
 
 /** Failure-path cleanup: open every gate, then settle every started operation within a bound. No test leaves work unresolved. */
+// Fixture lifecycle: every test starts and ends with an empty cancellation backlog, so exact reconciliation counts are meaningful.
+beforeEach(async () => { await isolateCancellationBacklog(h); });
 afterEach(async () => {
   for (const gate of openGates.splice(0)) gate.open();
   await bounded(Promise.allSettled(inFlight.splice(0)), 'settle in-flight operations', 20000).catch(() => undefined);
+  await isolateCancellationBacklog(h);
 });
 afterAll(async () => {
   for (const s of Object.values(stubs ?? {})) await s.close();

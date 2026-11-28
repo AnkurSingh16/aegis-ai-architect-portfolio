@@ -311,6 +311,25 @@ PostgreSQL integration tests run in CI on the final commit. Counts are in the PR
 Tests inject faults only through `ReconcileOptions.injectFault`, a test seam the runtime never passes. Backoff is exercised with a
 persisted, test-only timestamp, not waiting.
 
+**Fixture isolation (Phase A.5).** The integration suites share one PostgreSQL database and run serially. A cancellation left deferred by
+one test is still pending, and becomes eligible as the database clock advances, so it can be discovered by a later test's exact count. The
+earlier suites therefore established their starting point with a drain that assumed an empty backlog, which was not guaranteed.
+
+- `isolateCancellationBacklog` (in `testing/support.ts`) establishes an empty backlog. It makes every pending cancellation due and finalises
+  it with the production reconciler, with no fault injection, until none remain. It is bounded (40 rounds), and if a cancellation still
+  cannot be finalised the step fails with the identifiers and schedules of the rows that remain. It deletes nothing and writes no terminal
+  state itself.
+- It runs before and after every test in the concurrency, production-race and approved-result suites. A test that fails an assertion is
+  cleaned up the same way.
+- Within a scenario, a cancellation that must stay out of discovery is held out by its persisted eligibility time (`makeIneligible`, one
+  hour ahead). Nothing depends on the wall clock: the backoff that production records is asserted against the database clock
+  (`isScheduledInFuture`), and the next cycle's candidates are then fixed by the test.
+- Regression: `fixture isolation regression` leaves a deferred cancellation, shows it pending, runs isolation, and then checks that the next
+  exact count sees only its own cancellation.
+
+Exact reconciliation counts are asserted only after isolation. A test concerned with one execution asserts its invariants on that execution;
+the aggregate backlog (`readCancellationBacklog`) is asserted as a delta from a baseline.
+
 ## 12. Residual risks and unsupported guarantees
 
 - **Not implemented:** a full crash matrix covering every instruction boundary. The crash test covers one representative boundary

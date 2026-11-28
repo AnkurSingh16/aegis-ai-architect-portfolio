@@ -1,10 +1,11 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { requestCancellation } from '../../investigation/gateway.js';
 import type { TenantQueryable } from '../../security/tool-approval-store.js';
 import { reconcileCancellations } from './cancellation.js';
 import { receiveMessage } from './inbox.js';
 import { withMessagingContext } from './context.js';
-import { createHarness, closeHarness, readerPrincipal, roleUrl, spawnMessagingWorker, startInvestigation, wireOf, SPIFFE, NORTH, type Harness } from './testing/support.js';
+import { createHarness, closeHarness, readerPrincipal, roleUrl, spawnMessagingWorker, startInvestigation, wireOf, SPIFFE, NORTH, type Harness,
+  isolateCancellationBacklog } from './testing/support.js';
 
 /*
  * Production-path races for cancellation (Phase A.2, items 9.1 and 9.3). Every request goes through the production functions: the
@@ -21,9 +22,11 @@ const inFlight: Array<Promise<unknown>> = [];
 
 beforeAll(async () => { h = await createHarness(); });
 /** Failure-path cleanup: a failed assertion must not leave a gate closed or an operation unresolved. Every gate opens; every operation settles. */
+beforeEach(async () => { await isolateCancellationBacklog(h); });
 afterEach(async () => {
   for (const gate of openGates.splice(0)) gate.open();
   await bounded(Promise.allSettled(inFlight.splice(0)), 'settle in-flight operations', 20000).catch(() => undefined);
+  await isolateCancellationBacklog(h);
 });
 afterAll(async () => {
   if (h) await closeHarness(h);
@@ -92,12 +95,8 @@ const requestGrantStatus = async (executionId: string) => (await h.adminPool.que
   `SELECT status FROM aegis.agent_grants WHERE execution_id = $1 AND kind = 'request' AND to_agent = 'triage'`, [executionId])).rows[0].status;
 
 const reconcile = () => reconcileCancellations(h.pools.orchestrator, hooks, { instance: 'phase-a-races', limit: 50, lockTimeoutMs: 15000 });
-async function drainDue(): Promise<void> {
-  for (let i = 0; i < 30; i += 1) {
-    if ((await reconcile()).candidates === 0) return;
-  }
-  throw new Error('drain not bounded');
-}
+/** Establishes an empty cancellation backlog (see isolateCancellationBacklog). */
+const drainDue = (): Promise<void> => isolateCancellationBacklog(h);
 
 /**
  * The production gateway request. `reached` and `proceed` pause inside its transaction, after the flag write and before COMMIT, so a
