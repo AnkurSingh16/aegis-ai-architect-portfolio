@@ -31,13 +31,14 @@ const gateway = createDatabasePool(roleUrl('gateway'), 2);
 let northCaseId: string;
 let southCaseId: string;
 
-async function insertCase(tenant: string, label: string): Promise<string> {
+/** Inserts one synthetic case. The identifier must be one of the three values allowed by migration 001 (no uniqueness on it). */
+async function insertCase(tenant: string, syntheticCaseId: 'SYNTHETIC-LOGIN-001' | 'SYNTHETIC-BILLING-002'): Promise<string> {
   const client = await admin.connect();
   try {
     await client.query('BEGIN');
     await client.query("SELECT set_config('aegis.tenant_id', $1, true)", [tenant]);
     const id = (await client.query<{ id: string }>(
-      'INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2) RETURNING id', [tenant, `${label}-${suffix}`])).rows[0].id;
+      'INSERT INTO aegis.support_cases (tenant_id, synthetic_case_id) VALUES ($1, $2) RETURNING id', [tenant, syntheticCaseId])).rows[0].id;
     await client.query('COMMIT');
     return id;
   } catch (error) {
@@ -53,8 +54,8 @@ beforeAll(async () => {
   // NORTH has one member (the victim). SOUTH has a member, but not the NORTH member. The attacker has no membership anywhere.
   await admin.query(`INSERT INTO aegis.memberships (issuer, subject, tenant_id, role) VALUES ($1, $2, $3, 'reader'), ($1, $4, $5, 'reader')`,
     [issuer, northMember, north.tenantId, southMember, south.tenantId]);
-  northCaseId = await insertCase(north.tenantId, 'SYNTHETIC-F3-NORTH');
-  southCaseId = await insertCase(south.tenantId, 'SYNTHETIC-F3-SOUTH');
+  northCaseId = await insertCase(north.tenantId, 'SYNTHETIC-LOGIN-001');
+  southCaseId = await insertCase(south.tenantId, 'SYNTHETIC-BILLING-002');
 });
 
 afterAll(async () => {
