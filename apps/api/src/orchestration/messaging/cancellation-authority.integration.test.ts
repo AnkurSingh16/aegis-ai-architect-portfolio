@@ -90,6 +90,40 @@ describe('migration 025 and cancellation authority validation on disposable data
     expect(versions.rows[0].version).toBe('026_cancellation_scheduling_generation.sql');
   }, 120000);
 
+  it('upgrade from the 025 baseline with retry state: attempts, schedule and history are preserved, and the generation starts at zero', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    const baseline = await directoryUpTo('025_cancellation_retry_and_fairness.sql');
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword, baseline)).toBe(25); // 001-025 on a fresh database
+    const tenant = '10000000-0000-4000-8000-000000000001';
+    await db.pool.query(`INSERT INTO aegis.tenants (id, name) VALUES ($1, 'Synthetic North') ON CONFLICT (id) DO NOTHING`, [tenant]);
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const inserted = await db.pool.query<{ execution_id: string }>(
+      `INSERT INTO aegis.agent_executions (tenant_id, idempotency_key, principal_ref, principal_scopes, root_agent, status, max_depth,
+         max_delegations, max_steps, max_attempts, attempts, cancel_requested, cancel_reason, cancel_requested_at, updated_at,
+         cancellation_attempts, cancellation_next_attempt_at, cancellation_last_attempt_at, cancellation_failure_class)
+       VALUES ($1, 'upgrade-025-retry', repeat('b', 64), '{}', 'orchestrator', 'running', 4, 4, 50, 3, 1, true, 'user_request',
+         clock_timestamp() - interval '2 hours', clock_timestamp(), 2, $2, clock_timestamp() - interval '1 minute', 'transient')
+       RETURNING execution_id`, [tenant, future]);
+    const executionId = inserted.rows[0].execution_id;
+    const before = (await db.pool.query<{ attempts: number; next: Date; last: Date }>(
+      `SELECT cancellation_attempts AS attempts, cancellation_next_attempt_at AS next, cancellation_last_attempt_at AS last
+         FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0];
+
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(1); // 026 only
+    const after = (await db.pool.query<{ attempts: number; next: Date; last: Date; generation: string; failure: string | null }>(
+      `SELECT cancellation_attempts AS attempts, cancellation_next_attempt_at AS next, cancellation_last_attempt_at AS last,
+              cancellation_generation::text AS generation, cancellation_failure_class AS failure
+         FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0];
+    expect(after.attempts).toBe(before.attempts);
+    expect(after.next.getTime()).toBe(before.next.getTime());
+    expect(after.last.getTime()).toBe(before.last.getTime());
+    expect(after.failure).toBe('transient');
+    expect(after.generation).toBe('0');
+    expect(await checkCancellationAuthority(db.pool, { identity: false })).toEqual(expect.arrayContaining([expect.objectContaining({ ok: true })]));
+    expect((await checkCancellationAuthority(db.pool, { identity: false })).filter((c) => !c.ok)).toEqual([]);
+  }, 120000);
+
   it('the validation refuses each negative configuration, names the failed check, and passes again once reverted', async () => {
     const db = await freshDatabase();
     pools.push(db.pool);

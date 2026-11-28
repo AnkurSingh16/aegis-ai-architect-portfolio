@@ -1,6 +1,6 @@
 # Cancellation: request, finalisation, retry, fairness and recovery
 
-Status: Phase A, A.1 and A.2 of the P8 security hardening (PR #83, migrations 024, 025 and 026). The implementation and tests are described here as
+Status: Phase A, A.1, A.2 and A.3 of the P8 security hardening (PR #83, migrations 024, 025 and 026). The implementation and tests are described here as
 they are in the branch. Results are reported per commit in the PR, not in this document. Open findings F2, F3, F4 and F7 are not addressed
 here (see `SECURITY-TENANT-BOUNDARIES.md`, section 6).
 
@@ -32,8 +32,19 @@ here (see `SECURITY-TENANT-BOUNDARIES.md`, section 6).
 5. If the UPDATE changed nothing, re-reads the committed row. Terminal means `{ accepted: false, state: 'terminal' }`; otherwise
    `{ accepted: true, state: 'already_requested' }`. No second event is written.
 
-The response distinguishes **requested** (`cancel_requested`, `already_requested`) from **finalised** (the orchestrator later moves the
-execution to `cancelled`). The browser text should say so; see section 10.
+**Public response contract** (`POST .../investigations/:executionId/cancel`, HTTP 200 on a decision):
+
+| Situation | Body |
+|---|---|
+| First request by the originating principal | `{ "accepted": true, "state": "cancel_requested" }` |
+| Repeat while the request stands | `{ "accepted": true, "state": "already_requested" }` (no second event) |
+| Execution already finished (including after a cancellation was finalised, or a completion that committed first) | `{ "accepted": false, "state": "terminal" }` |
+| Another principal, another tenant, or an unknown execution | HTTP 404 with an identical body in each case |
+
+`state` is the additive field of Phase A.1. It is the gateway's own result, and no consumer in this repository read the earlier
+`{ accepted: true }`-only body. The principal and tenant are always taken from the verified token and the route; the body carries only
+`reason`. The response distinguishes **requested** (`cancel_requested`, `already_requested`) from **finalised** (the orchestrator later
+moves the execution to `cancelled`). The browser text should say so; see section 10.
 
 Defect fixed in this phase. The store method `requestCancel` used to change status and revoke grants directly when no lease was held. The
 gateway role has no such privilege, so the request failed with SQLSTATE 42501 (`permission denied for table agent_executions`). The
@@ -206,6 +217,16 @@ Defects fixed in Phase A.2:
 
 Migrations 001 to 024 are unchanged. Migration 025 is **not** amended in this phase. Migration 026 is additive and applies after it.
 
+**Supported upgrade paths (tested):** fresh installation through 026; upgrade from 024 (applies 025 and 026, with a pending cancellation
+scheduled for immediate eligibility); upgrade from the 025 baseline with retry state (attempts, schedule and last-attempt time are kept,
+the failure class is kept, and the generation starts at 0).
+
+**Unknown historical state.** Migration 025 was revised twice inside the unmerged draft (the earliest revision lacked `SKIP LOCKED`, and
+the current one has it). Migrations are applied by name with no checksum recorded, so the runner cannot detect a database that applied an
+earlier revision of 025. The supported position is: no persistent database is known to have applied any draft 025, and `aegis_local` has
+not been migrated. A deployment found to have applied an earlier draft must be inspected before it is upgraded. Its 025 body is not
+re-run, and no revision is silently bypassed.
+
 - Migration 025 was pushed to the unmerged draft in two revisions. No persistent database can be shown to have applied only one of them,
   so the safe rule is that a further change is a new migration.
 - Migration 026 adds `cancellation_generation`, its non-negative CHECK, the replacement discovery function (same signature, extended return
@@ -236,7 +257,8 @@ PostgreSQL integration tests run in CI on the final commit. Counts are in the PR
   - A5.2 completion wins: the gateway request waits on the completion's PID and reports `terminal`;
   - A5.3a consumption first (trigger-level, direct SQL): the gateway request waits on the consumer's PID and is finalised afterwards;
   - A5.3b cancellation first: consumption is refused with 42501, the grant stays open until reconciliation, then is revoked;
-  - A5.4 competing reconcilers (gated, genuine row-lock contention): one applied, one skipped, one cancelled event, no revival;
+  - A5.4 competing reconcilers: both discover one candidate; one reconciler holds the row lock before commit; the other is observed queued
+    directly behind that holder's PID; exactly one applies, one skips, one cancelled event, no open grant, generation unchanged, no revival;
   - A5.5 opposing lock order (participant login on the consuming side): exactly one 40P01, the other side's outcome matches the victim,
     then recovery;
   - A6.1 to A6.14: poisoned-first, batch saturation, backoff, recovery, interruption between finalisation and recording, restart with a
@@ -244,6 +266,14 @@ PostgreSQL integration tests run in CI on the final commit. Counts are in the PR
     stale, concurrent at 999 and at 1000, backoff after saturation, continued retries), the generation format, participant refusal,
     cross-tenant isolation, and backlog visibility;
   - connection lifecycle: a held lock does not hold pool connections, and an interrupted contention scenario is cleaned up.
+- `approved-result-races.integration.test.ts` (section 12, item 9.2):
+  - 12.1 cancellation wins: the reviewer's approved result, delivered to the production receive path, queues behind a cancellation that
+    holds the execution lock; after the cancellation commits, the claim refuses, the result is recorded as processed without completing,
+    no investigation result persists, the fencing token is unchanged, grants are revoked, one cancelled event exists, and a duplicate
+    delivery is a duplicate;
+  - 12.2 approved completion wins: the approved result persists its answer and citations under the held lock (paused at `release:accepted`);
+    the gateway queues behind it and then reports terminal; the answer and citations are unchanged after repeated cancellation and
+    reconciliation; no cancelled or cancel-requested event is written.
 - `cancellation-production-races.integration.test.ts` (production path; scope and limits in section 12):
   - 9.1a cancellation commits first: the participant receive is refused with `cancel_requested`, the request grant stays open, and
     reconciliation finalises;
@@ -263,6 +293,9 @@ PostgreSQL integration tests run in CI on the final commit. Counts are in the PR
     function, overloaded signature, dropped trigger, disabled trigger, superuser runtime identity, runtime role membership, a BYPASSRLS
     owner with SELECT but without UPDATE for locking, a BYPASSRLS owner without role-map access, an AFTER trigger under the required name,
     and a required trigger attached to a different function.
+- `auth/investigation-routes.integration.test.ts`: the public contract above: first request, duplicate, another principal (404, identical to
+  unknown), cross-tenant (404), request after cancellation finalised (terminal), request after a completion committed first (terminal, and
+  the succeeded execution is not overwritten).
 - `investigation/gateway.test.ts`: request, idempotent repeat, lost race to terminal, principal refusal, finished executions.
 
 Tests inject faults only through `ReconcileOptions.injectFault`, a test seam the runtime never passes. Backoff is exercised with a
@@ -270,10 +303,11 @@ persisted, test-only timestamp, not waiting.
 
 ## 12. Residual risks and unsupported guarantees
 
-- **Not implemented in this phase:** the approved-result finalisation race (reviewer approval persistence against cancellation, both
-  orderings, with reviewer authority and fencing checks). The generic `release` tests do not exercise that path. A full crash matrix covering
-  every instruction boundary; the crash test covers one representative boundary (`cancel_finalise:applied`) and one SIGKILL. Crashes
-  inside the receive path are not tested by subprocess. Restart with a fresh pool remains a separate in-process test.
+- **Not implemented:** a full crash matrix covering every instruction boundary. The crash test covers one representative boundary
+  (`cancel_finalise:applied`) and one SIGKILL. Crashes inside the receive path are not tested by subprocess. Restart with a fresh pool
+  remains a separate in-process test. Full matrix is deferred to later production qualification.
+- **Approved-result race (9.2):** covered by two orderings on the production path (section 11). Its remaining limit is that the reviewer
+  delivery is driven by the test through `receiveMessage`, not by the reviewer's own dispatcher and network path.
 - **Participant consumption path.** The production-path races (section 11) use the participant login through `receiveMessage` at the
   `receive:accepted` commit boundary and at the lock wait. They do not cover a crash inside that path.
 - **Narrowing the owner** to a dedicated NOLOGIN role remains a deployment qualification item, not an accepted risk.

@@ -47,6 +47,11 @@ export const CANCELLATION_TRIGGERS = [
 const TG_ROW = 1, TG_BEFORE = 2, TG_UPDATE = 16;
 
 const PINNED_SEARCH_PATH = 'search_path=pg_catalog, aegis';
+/*
+ * Overload policy. A required name may have exactly one function in schema aegis (`:no_overloads`). An overload with the same name would
+ * be unexpected privilege-bearing code next to the audited one, so it is refused, not merely ignored. Identity checks are exact by OID,
+ * so an overload cannot substitute for a required signature even if it were present. Unrelated functions are not inspected.
+ */
 
 export class CancellationAuthorityError extends Error {
   constructor(readonly failed: readonly string[]) {
@@ -60,10 +65,16 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
   const add = (name: string, ok: boolean) => checks.push({ name, ok });
   for (const req of CANCELLATION_FUNCTIONS) {
     const prefix = req.proname;
+    // Exact identity: the required signature resolves to one OID with to_regprocedure, which returns NULL (no row) when that signature is
+    // absent, whatever overloads of the same name exist. Every later check (owner, definer rights, search_path, ACL) uses that OID.
+    const overloads = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'aegis' AND p.proname = $1`,
+      [req.proname]);
+    add(`${prefix}:no_overloads`, overloads.rows[0].n <= 1);
     const fn = await pool.query<{ prosecdef: boolean; proconfig: string[] | null; owner_reads_rows: boolean; owner: string }>(
       `SELECT p.prosecdef, p.proconfig, (owner.rolsuper OR owner.rolbypassrls) AS owner_reads_rows, owner.rolname AS owner
-         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles owner ON owner.oid = p.proowner
-        WHERE n.nspname = 'aegis' AND p.proname = $1`, [req.proname]);
+         FROM pg_proc p JOIN pg_roles owner ON owner.oid = p.proowner
+        WHERE p.oid = to_regprocedure($1)`, [req.signature]);
     const row = fn.rows[0];
     add(`${prefix}:present`, fn.rows.length === 1);
     if (!row) continue;
@@ -94,7 +105,7 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
          LEFT JOIN pg_roles g ON g.oid = a.grantee
-        WHERE n.nspname = 'aegis' AND p.proname = $1 AND a.privilege_type = 'EXECUTE'`, [req.proname]);
+        WHERE p.oid = to_regprocedure($1) AND a.privilege_type = 'EXECUTE'`, [req.signature]);
     const allowed = new Set([row.owner, ...req.executableBy]);
     const grantees = acl.rows.map((r) => r.grantee);
     add(`${prefix}:no_public_execute`, !grantees.includes('PUBLIC'));
@@ -103,14 +114,17 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
   }
   for (const trigger of CANCELLATION_TRIGGERS) {
     // pg_trigger: attachment to the intended relation and function, and enabled for the session's replication role (tgenabled = 'O').
-    const found = await pool.query<{ rel: string; proc: string; enabled: string; tgtype: number }>(
-      `SELECT c.relname AS rel, p.proname AS proc, t.tgenabled::text AS enabled, t.tgtype::int AS tgtype
+    const found = await pool.query<{ rel: string; proc: string; enabled: string; tgtype: number; exact_function: boolean }>(
+      `SELECT c.relname AS rel, p.proname AS proc, t.tgenabled::text AS enabled, t.tgtype::int AS tgtype,
+              (t.tgfoid = to_regprocedure($2)) AS exact_function
          FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
          JOIN pg_proc p ON p.oid = t.tgfoid
-        WHERE n.nspname = 'aegis' AND NOT t.tgisinternal AND t.tgname = $1`, [trigger.name]);
+        WHERE n.nspname = 'aegis' AND NOT t.tgisinternal AND t.tgname = $1`, [trigger.name, `aegis.${trigger.proc}()`]);
     const row = found.rows[0];
     add(`trigger:${trigger.name}:present`, found.rows.length === 1);
     add(`trigger:${trigger.name}:attached`, !!row && row.rel === trigger.relation && row.proc === trigger.proc);
+    // The function identity is the exact schema-qualified signature, resolved to its OID, not a name match.
+    add(`trigger:${trigger.name}:function_identity`, !!row && row.exact_function === true);
     add(`trigger:${trigger.name}:enabled`, !!row && row.enabled === 'O');
     // Event configuration: row-level, BEFORE, UPDATE. Without this an AFTER trigger with the right name would pass the other checks.
     const want = TG_ROW | TG_BEFORE | TG_UPDATE;

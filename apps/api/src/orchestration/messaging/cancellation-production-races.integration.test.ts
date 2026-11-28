@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { requestCancellation } from '../../investigation/gateway.js';
 import type { TenantQueryable } from '../../security/tool-approval-store.js';
 import { reconcileCancellations } from './cancellation.js';
@@ -17,12 +17,23 @@ import { createHarness, closeHarness, readerPrincipal, roleUrl, spawnMessagingWo
 const hooks = {};
 let h: Harness;
 const openGates: Array<{ open: () => void }> = [];
+const inFlight: Array<Promise<unknown>> = [];
 
 beforeAll(async () => { h = await createHarness(); });
+/** Failure-path cleanup: a failed assertion must not leave a gate closed or an operation unresolved. Every gate opens; every operation settles. */
+afterEach(async () => {
+  for (const gate of openGates.splice(0)) gate.open();
+  await bounded(Promise.allSettled(inFlight.splice(0)), 'settle in-flight operations', 20000).catch(() => undefined);
+});
 afterAll(async () => {
-  for (const gate of openGates) gate.open();
   if (h) await closeHarness(h);
 });
+/** Registers an operation for cleanup. Its rejection is observed at once; the caller still awaits the original promise. */
+function track<T>(promise: Promise<T>): Promise<T> {
+  promise.catch(() => undefined);
+  inFlight.push(promise);
+  return promise;
+}
 
 function barrier() {
   let resolve!: () => void;
@@ -73,8 +84,12 @@ const events = async (executionId: string, eventType: string) => Number((await h
   'SELECT count(*)::text AS n FROM aegis.agent_execution_events WHERE execution_id = $1 AND event_type = $2', [executionId, eventType])).rows[0].n);
 const openGrants = async (executionId: string) => Number((await h.adminPool.query<{ n: string }>(
   `SELECT count(*)::text AS n FROM aegis.agent_grants WHERE execution_id = $1 AND status = 'open'`, [executionId])).rows[0].n);
+/**
+ * The request grant the triage login consumes: the request addressed to triage for this execution. Selected by its addressee, not by
+ * timestamp order, because a started execution holds more than one grant.
+ */
 const requestGrantStatus = async (executionId: string) => (await h.adminPool.query<{ status: string }>(
-  `SELECT status FROM aegis.agent_grants WHERE execution_id = $1 AND kind = 'request' ORDER BY created_at LIMIT 1`, [executionId])).rows[0].status;
+  `SELECT status FROM aegis.agent_grants WHERE execution_id = $1 AND kind = 'request' AND to_agent = 'triage'`, [executionId])).rows[0].status;
 
 const reconcile = () => reconcileCancellations(h.pools.orchestrator, hooks, { instance: 'phase-a-races', limit: 50, lockTimeoutMs: 15000 });
 async function drainDue(): Promise<void> {
@@ -148,9 +163,9 @@ describe('9.1 production-path grant-consumption races (participant login, produc
     const body = await wireOf(h, started.requestMessageId);
     const reached = signal<number>();
     const proceed = barrier();
-    const cancelling = gatewayRequest(started.executionId, { reached: reached.fire, proceed: proceed.promise });
+    const cancelling = track(gatewayRequest(started.executionId, { reached: reached.fire, proceed: proceed.promise }));
     const gatewayPid = await bounded(reached.promise, 'gateway holds the execution row lock');
-    const receiving = deliverRequestToTriage(started.requestMessageId, body);
+    const receiving = track(deliverRequestToTriage(started.requestMessageId, body));
     await until(() => blockedBy(gatewayPid, 'aegis.agent_'), 'receive queued behind the gateway');
     proceed.open();
     expect(await bounded(cancelling, 'gateway commit')).toMatchObject({ accepted: true, state: 'cancel_requested' });
@@ -167,14 +182,14 @@ describe('9.1 production-path grant-consumption races (participant login, produc
     const body = await wireOf(h, started.requestMessageId);
     const consumed = signal();
     const proceed = barrier();
-    const consuming = deliverRequestToTriage(started.requestMessageId, body, {
+    const consuming = track(deliverRequestToTriage(started.requestMessageId, body, {
       beforeCommit: async (label) => {
         // 'receive:accepted' is emitted after the request grant is consumed (and its trigger share lock is held), before COMMIT.
         if (label === 'receive:accepted') { consumed.fire(); await proceed.promise; }
       },
-    });
+    }));
     await bounded(consumed.promise, 'consumption holds its locks before commit');
-    const cancelling = gatewayRequest(started.executionId);
+    const cancelling = track(gatewayRequest(started.executionId));
     await until(() => blockedByIdleTransaction('aegis.agent_'), 'cancellation queued behind the open consumption');
     proceed.open();
     expect(await bounded(consuming, 'consumption commit')).toMatchObject({ status: 'processed' });

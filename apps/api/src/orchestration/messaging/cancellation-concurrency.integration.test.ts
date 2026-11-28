@@ -56,7 +56,9 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => { const t 
  */
 class Scenario {
   private readonly started: Array<Promise<unknown>> = [];
-  private readonly clients: Array<{ client: PoolClient; pid: number; released: boolean }> = [];
+  private readonly clients: Array<{ client: PoolClient; pid: number; released: boolean; terminated: boolean; onError: (e: Error) => void }> = [];
+  /** Errors from sessions the test did not terminate. Reported at close, so an unexpected PostgreSQL error stays visible. */
+  private readonly unexpected: Error[] = [];
   private readonly barriers: Array<{ abort: (e: Error) => void }> = [];
   start<T>(promise: Promise<T>): Promise<T> {
     // Observe the rejection at once, so a failure that is awaited later is never an unhandled rejection. The caller still awaits `promise`.
@@ -67,7 +69,10 @@ class Scenario {
   async client(pool: Pool): Promise<PoolClient> {
     const client = await pool.connect();
     const pid = Number((await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid', [])).rows[0].pid);
-    this.clients.push({ client, pid, released: false });
+    // A checked-out session can emit 'error' when the server ends it. The listener is scoped to this entry and removed on release.
+    const entry = { client, pid, released: false, terminated: false, onError: (e: Error) => { if (!entry.terminated) this.unexpected.push(e); } };
+    client.on('error', entry.onError);
+    this.clients.push(entry);
     return client;
   }
   track<B extends { abort: (e: Error) => void }>(b: B): B { this.barriers.push(b); return b; }
@@ -76,8 +81,10 @@ class Scenario {
     const settled = Promise.allSettled(this.started);
     const graceful = await Promise.race([settled.then(() => true), delay(1500).then(() => false)]);
     if (!graceful) {
-      for (const { pid } of this.clients) {
-        await bounded(h.adminPool.query('SELECT pg_terminate_backend($1)', [pid]), `terminate session ${pid}`, 5000).catch(() => undefined);
+      for (const entry of this.clients) {
+        // Only sessions the test owns are terminated. Each is marked first, so its expected termination error is not counted as unexpected.
+        entry.terminated = true;
+        await bounded(h.adminPool.query('SELECT pg_terminate_backend($1)', [entry.pid]), `terminate session ${entry.pid}`, 5000).catch(() => undefined);
       }
     }
     try {
@@ -86,11 +93,16 @@ class Scenario {
       for (const entry of this.clients) {
         if (entry.released) continue;
         entry.released = true;
-        let broken = false;
-        try { await entry.client.query('ROLLBACK'); } catch { broken = true; }
+        let broken = entry.terminated;
+        if (!broken) {
+          try { await entry.client.query('ROLLBACK'); } catch { broken = true; }
+        }
+        entry.client.removeListener('error', entry.onError);
+        // A broken or terminated session is destroyed, never returned to the pool. Each client is released exactly once.
         entry.client.release(broken ? true : undefined);
       }
     }
+    if (this.unexpected.length > 0) throw new Error(`unexpected session error: ${this.unexpected[0].message}`);
   }
 }
 
@@ -126,6 +138,36 @@ async function waitBlockedBy(blockerPid: number, pattern: string): Promise<numbe
   throw new Error(`no session blocked by pid ${blockerPid} matching ${pattern}`);
 }
 
+/** A point-in-time view of this database's sessions, attached to any wait failure so the lock state is recorded, not guessed. */
+async function lockSnapshot(): Promise<string> {
+  const rows = await h.adminPool.query<{ pid: number; state: string; wait: string | null; blocked_by: string; query: string }>(
+    `SELECT a.pid, a.state, a.wait_event_type AS wait, array_to_string(pg_blocking_pids(a.pid), ',') AS blocked_by, left(a.query, 90) AS query
+       FROM pg_stat_activity a WHERE a.datname = current_database() AND a.pid <> pg_backend_pid() ORDER BY a.pid`, []);
+  return rows.rows.map((r) => `pid=${r.pid} state=${r.state} wait=${r.wait ?? '-'} blocked_by=[${r.blocked_by}] q=${JSON.stringify(r.query)}`).join('\n');
+}
+/**
+ * Waits until a session is queued on a lock on `pattern` whose blocker is idle inside an open transaction (the holder). Observes the
+ * direct blocking PIDs of each waiter, so a chain of waiters is recognised by its holder, not by a guessed count.
+ */
+async function waitForQueuedBehindHolder(pattern: string): Promise<{ waiting: number; holderPid: number | null }> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const rows = await h.adminPool.query<{ holder: number }>(
+      `SELECT DISTINCT b.pid AS holder FROM pg_stat_activity w
+         CROSS JOIN LATERAL unnest(pg_blocking_pids(w.pid)) AS blocker(pid)
+         JOIN pg_stat_activity b ON b.pid = blocker.pid
+        WHERE w.datname = current_database() AND w.wait_event_type = 'Lock' AND w.query ILIKE $1 AND b.state = 'idle in transaction'`,
+      [`%${pattern}%`]);
+    if (rows.rows.length > 0) {
+      const waiting = Number((await h.adminPool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM pg_stat_activity w WHERE w.datname = current_database() AND w.wait_event_type = 'Lock' AND w.query ILIKE $1`,
+        [`%${pattern}%`])).rows[0].n);
+      return { waiting, holderPid: rows.rows[0].holder };
+    }
+    await delay(25);
+  }
+  throw new Error(`no session queued behind an idle-in-transaction holder on ${pattern}. Snapshot:\n${await lockSnapshot()}`);
+}
+
 const pidOf = async (client: TenantQueryable): Promise<number> =>
   Number((await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid', [])).rows[0].pid);
 
@@ -138,8 +180,11 @@ const events = async (executionId: string, eventType: string) => Number((await h
   'SELECT count(*)::text AS n FROM aegis.agent_execution_events WHERE execution_id = $1 AND event_type = $2', [executionId, eventType])).rows[0].n);
 const openGrants = async (executionId: string) => Number((await h.adminPool.query<{ n: string }>(
   `SELECT count(*)::text AS n FROM aegis.agent_grants WHERE execution_id = $1 AND status = 'open'`, [executionId])).rows[0].n);
+/** The request grant addressed to triage: the grant that the delivered triage request consumes. A leased execution also holds other open grants. */
 const requestGrant = async (executionId: string) => (await h.adminPool.query<{ grant_id: string }>(
-  `SELECT grant_id FROM aegis.agent_grants WHERE execution_id = $1 AND kind = 'request' AND status = 'open' LIMIT 1`, [executionId])).rows[0];
+  `SELECT grant_id FROM aegis.agent_grants WHERE execution_id = $1 AND kind = 'request' AND to_agent = 'triage' AND status = 'open'`, [executionId])).rows[0];
+const grantStatusOf = async (grantId: string) => (await h.adminPool.query<{ status: string }>(
+  'SELECT status FROM aegis.agent_grants WHERE grant_id = $1', [grantId])).rows[0].status;
 
 /** The scheduling generation, as text: it is a bigint and is never converted to a JavaScript number. */
 const generationOf = async (executionId: string): Promise<string> => (await h.adminPool.query<{ g: string }>(
@@ -316,56 +361,73 @@ describe('A5 two-session races on the execution row lock, gateway and orchestrat
         await consumer.query('ROLLBACK');
       }
       expect(code).toBe('42501');
-      // The refusal does not itself revoke anything. The grant stays open until the orchestrator finalises.
-      expect(await openGrants(executionId)).toBe(1);
+      // The refusal consumes nothing and revokes nothing. The specific request grant stays open until the orchestrator finalises. The
+      // aggregate is derived from the lifecycle: the leased execution holds this request grant and its result grant, both open.
+      expect(await grantStatusOf(grant.grant_id)).toBe('open');
+      expect(await openGrants(executionId)).toBeGreaterThanOrEqual(1);
       await reconcile();
+      expect(await grantStatusOf(grant.grant_id)).toBe('revoked');
       expect(await openGrants(executionId)).toBe(0);
-      expect((await h.adminPool.query<{ status: string }>('SELECT status FROM aegis.agent_grants WHERE grant_id = $1', [grant.grant_id])).rows[0].status)
-        .toBe('revoked');
+      expect(await state(executionId)).toMatchObject({ status: 'cancelled', lease_agent_id: null });
+      expect(await events(executionId, 'cancelled')).toBe(1);
     } finally {
       await s.close();
     }
   }, 60000);
 
-  it('A5.4 competing reconcilers: both discover one eligible candidate, queue on its row lock, and produce exactly one terminal transition', async () => {
+  it('A5.4 competing reconcilers: both discover one candidate; one holds its row lock before commit; the other queues behind that exact PID; exactly one applies', async () => {
     await drainDue();
     const s = new Scenario();
     const second = createDatabasePool(roleUrl('orchestrator'), 2);
     extraPools.push(second);
     try {
       const { executionId } = await pendingCancellation();
-      // SKIP LOCKED means a reconciler never queues during DISCOVERY, so contention is created at FINALISATION. The gate sits after
-      // discovery and before the row lock: both reconcilers are known to hold the same candidate before either can finalise.
+      // Gate 1, after discovery and before the row lock: both reconcilers are known to hold the same candidate.
       let arrivals = 0;
       const bothDiscovered = signal();
-      const gate = s.track(barrier());
-      const holdAfterDiscovery = async (phase: 'finalise' | 'record') => {
-        if (phase !== 'finalise') return undefined;
-        arrivals += 1;
-        if (arrivals === 2) bothDiscovered.fire();
-        await gate.promise;
+      const discoveryGate = s.track(barrier());
+      const afterDiscovery = async (phase: 'finalise' | 'record') => {
+        if (phase === 'finalise') {
+          arrivals += 1;
+          if (arrivals === 2) bothDiscovered.fire();
+          await discoveryGate.promise;
+        }
         return undefined;
       };
-      const first = s.start(reconcile({ instance: 'instance-1', injectFault: holdAfterDiscovery }, h.pools.orchestrator));
-      const other = s.start(reconcile({ instance: 'instance-2', injectFault: holdAfterDiscovery }, second));
+      // Gate 2, at the commit boundary of whichever reconciler takes the row lock first. That reconciler holds the lock, uncommitted.
+      let holderClaimed = false;
+      const holderPaused = signal();
+      const commitGate = s.track(barrier());
+      const holdingHooks = {
+        beforeCommit: async (label: string) => {
+          if (label === 'cancel_finalise:applied' && !holderClaimed) {
+            holderClaimed = true;
+            holderPaused.fire();
+            await commitGate.promise;
+          }
+        },
+      };
+      const first = s.start(reconcileCancellations(h.pools.orchestrator, holdingHooks,
+        { instance: 'instance-1', limit: 50, lockTimeoutMs: 15000, injectFault: afterDiscovery }));
+      const other = s.start(reconcileCancellations(second, holdingHooks,
+        { instance: 'instance-2', limit: 50, lockTimeoutMs: 15000, injectFault: afterDiscovery }));
       await bounded(bothDiscovered.promise, 'both reconcilers discovered the candidate');
-      // Hold the row lock from a third session, then release the gate: both finalisations now queue behind it, genuinely.
-      const blocker = await s.client(h.adminPool);
-      await blocker.query('BEGIN');
-      await blocker.query('SELECT 1 FROM aegis.agent_executions WHERE execution_id = $1 FOR UPDATE', [executionId]);
-      const blockerPid = await pidOf(blocker);
-      gate.open();
-      expect(await waitingOn(blockerPid, 'agent_executions', 2)).toBe(2);
-      await blocker.query('COMMIT');
+      discoveryGate.open();
+      await bounded(holderPaused.promise, 'one reconciler holds the execution row lock before commit');
+      // The loser must be queued directly behind the holder: the blocking PID of its wait is the idle-in-transaction holder.
+      const queued = await waitForQueuedBehindHolder('aegis.agent_executions');
+      expect(queued.waiting).toBeGreaterThanOrEqual(1);
+      commitGate.open();
       const [a, b] = await Promise.all([bounded(first, 'reconciler 1'), bounded(other, 'reconciler 2')]);
-      // Both saw the candidate; exactly one applied the transition and the other found it already terminal and skipped it.
       expect([a.candidates, b.candidates]).toEqual([1, 1]);
       expect(a.applied + b.applied).toBe(1);
       expect(a.skipped + b.skipped).toBe(1);
       expect(a.systemic + b.systemic + a.unrecorded + b.unrecorded + a.transient + b.transient + a.deferred + b.deferred).toBe(0);
       expect(await events(executionId, 'cancelled')).toBe(1);
       expect(await state(executionId)).toMatchObject({ status: 'cancelled', lease_agent_id: null, attempts_cancel: 0, next_at: null, failure_class: null });
-      // No revival: a further cycle finds nothing due and leaves the terminal state unchanged.
+      expect(await generationOf(executionId)).toBe('0');
+      expect(await openGrants(executionId)).toBe(0);
+      // No revival: a further cycle finds nothing due and leaves the terminal state and its single event unchanged.
       expect((await reconcile()).candidates).toBe(0);
       expect(await state(executionId)).toMatchObject({ status: 'cancelled' });
       expect(await events(executionId, 'cancelled')).toBe(1);
@@ -646,7 +708,11 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
 
   it('A6.11 concurrent failures at attempt 999 and at saturated attempt 1000: one wins per generation, the count stays at 1000, and retries continue', async () => {
     await drainDue();
+    // The backlog is shared across tenants and may hold deferred work from other tests. Its assertions use deltas from a baseline taken
+    // before this test creates anything, and the execution is anchored to this test.
+    const baseline = await readCancellationBacklog(h.pools.orchestrator);
     const { executionId } = await pendingCancellation();
+    try {
     const record = (expectedGeneration: string) => withMessagingContext(h.pools.orchestrator, { tenantId: NORTH }, (client) =>
       createAgentExecutionStore(joinTransaction(client, NORTH), hooks).recordCancellationFailure(NORTH, executionId, 'transient', expectedGeneration));
     // Concurrency at 999: two reconcilers hold the same generation 5. The row lock serialises them; the second re-evaluates and is refused.
@@ -665,7 +731,10 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
     expect(after.next_at!.getTime() - after.last_at!.getTime()).toBeGreaterThan(59000);
     expect(after.next_at!.getTime() - after.last_at!.getTime()).toBeLessThanOrEqual(61000);
     // No silent abandonment: a saturated cancellation stays visible in the backlog and is retried on each due cycle.
-    expect(await readCancellationBacklog(h.pools.orchestrator)).toMatchObject({ pending: 1, failing: 1, maxAttempts: 1000 });
+    const during = await readCancellationBacklog(h.pools.orchestrator);
+    expect(during.pending - baseline.pending).toBe(1);
+    expect(during.failing - baseline.failing).toBe(1);
+    expect(during.maxAttempts).toBeGreaterThanOrEqual(1000);
     await makeDue(executionId);
     expect(await record('7')).toMatchObject({ recorded: true, attempts: 1000 });
     expect(await generationOf(executionId)).toBe('8');
@@ -674,6 +743,12 @@ describe('A6 starvation, backoff, recovery and restart on real PostgreSQL', () =
     expect((await reconcile()).candidates).toBe(1);
     expect(await state(executionId)).toMatchObject({ status: 'cancelled' });
     expect(await events(executionId, 'cancelled')).toBe(1);
+    } finally {
+      // A failed assertion must not leave this test's cancellation pending for later tests: finalise it if it is still pending.
+      await h.adminPool.query(`UPDATE aegis.agent_executions SET cancellation_next_attempt_at = clock_timestamp() - interval '1 second'
+        WHERE execution_id = $1 AND cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')`, [executionId]).catch(() => undefined);
+      await reconcile().catch(() => undefined);
+    }
   }, 60000);
 
   it('A6.11b a generation that is not a canonical bigint is refused before it reaches the database', async () => {

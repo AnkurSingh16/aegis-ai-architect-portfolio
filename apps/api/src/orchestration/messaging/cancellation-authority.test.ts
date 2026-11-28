@@ -20,7 +20,9 @@ interface Fixture {
   identitySchema: boolean;
   identityRoleMap: boolean;
   acl: Record<string, string[]>;
-  triggers: Record<string, { rel: string; proc: string; enabled: string; tgtype: number } | undefined>;
+  triggers: Record<string, { rel: string; proc: string; enabled: string; tgtype: number; exact_function: boolean } | undefined>;
+  /** Number of functions named like each required function in schema aegis (an overload makes this greater than 1). */
+  overloads: Record<string, number>;
   memberships: number;
   canExecute: boolean;
   identity: { rolsuper: boolean; rolbypassrls: boolean; role_name: string | null };
@@ -46,9 +48,10 @@ function healthy(): Fixture {
     identitySchema: true,
     identityRoleMap: true,
     triggers: {
-      agent_execution_record_cancellation_request: { rel: 'agent_executions', proc: 'record_cancellation_request', enabled: 'O', tgtype: ROW_BEFORE_UPDATE },
-      agent_grant_refuse_consume_after_cancel: { rel: 'agent_grants', proc: 'refuse_request_consumption_after_cancel', enabled: 'O', tgtype: ROW_BEFORE_UPDATE },
+      agent_execution_record_cancellation_request: { rel: 'agent_executions', proc: 'record_cancellation_request', enabled: 'O', tgtype: ROW_BEFORE_UPDATE, exact_function: true },
+      agent_grant_refuse_consume_after_cancel: { rel: 'agent_grants', proc: 'refuse_request_consumption_after_cancel', enabled: 'O', tgtype: ROW_BEFORE_UPDATE, exact_function: true },
     },
+    overloads: {},
     memberships: 0,
     canExecute: true,
     identity: { rolsuper: false, rolbypassrls: false, role_name: 'orchestrator' },
@@ -56,9 +59,14 @@ function healthy(): Fixture {
 }
 
 function fakePool(fixture: Fixture): Pool {
+  // Real semantics: a signature resolves to one OID or to nothing; lookups by name never stand in for it.
+  const nameOf = (signature: string) => signature.replace(/^aegis\./, '').replace(/\(.*$/, '');
   const query = vi.fn(async (text: string, params: unknown[] = []) => {
+    if (text.includes('AS n FROM pg_proc p JOIN pg_namespace')) {
+      return { rows: [{ n: fixture.overloads[params[0] as string] ?? 1 }] };
+    }
     if (text.includes('owner.rolname AS owner')) {
-      const fn = fixture.functions[params[0] as string];
+      const fn = fixture.functions[nameOf(params[0] as string)];
       return { rows: fn ? [fn] : [] };
     }
     if (text.includes('map_ok')) return { rows: [{ schema_ok: fixture.identitySchema, map_ok: fixture.identityRoleMap }] };
@@ -67,7 +75,7 @@ function fakePool(fixture: Fixture): Pool {
     if (text.includes('has_schema_privilege($1::regrole')) return { rows: [{ ok: fixture.ownerSchema }] };
     if (text.includes('has_any_column_privilege')) return { rows: [{ ok: fixture.ownerUpdates }] };
     if (text.includes('aclexplode')) {
-      const grantees = fixture.acl[params[0] as string] ?? [];
+      const grantees = fixture.acl[nameOf(params[0] as string)] ?? [];
       return { rows: grantees.map((grantee) => ({ grantee, privilege: 'EXECUTE' })) };
     }
     if (text.includes('NOT t.tgisinternal')) {
@@ -149,11 +157,11 @@ describe('checkCancellationAuthority', () => {
 
   it('rejects a trigger that is attached to the wrong relation or function, or is disabled', async () => {
     const wrong = healthy();
-    wrong.triggers.agent_execution_record_cancellation_request = { rel: 'agent_grants', proc: 'record_cancellation_request', enabled: 'O', tgtype: ROW_BEFORE_UPDATE };
+    wrong.triggers.agent_execution_record_cancellation_request = { rel: 'agent_grants', proc: 'record_cancellation_request', enabled: 'O', tgtype: ROW_BEFORE_UPDATE, exact_function: true };
     expect(await failing(wrong)).toContain('trigger:agent_execution_record_cancellation_request:attached');
 
     const disabled = healthy();
-    disabled.triggers.agent_grant_refuse_consume_after_cancel = { rel: 'agent_grants', proc: 'refuse_request_consumption_after_cancel', enabled: 'D', tgtype: ROW_BEFORE_UPDATE };
+    disabled.triggers.agent_grant_refuse_consume_after_cancel = { rel: 'agent_grants', proc: 'refuse_request_consumption_after_cancel', enabled: 'D', tgtype: ROW_BEFORE_UPDATE, exact_function: true };
     expect(await failing(disabled)).toContain('trigger:agent_grant_refuse_consume_after_cancel:enabled');
 
     const absent = healthy();
@@ -214,8 +222,26 @@ describe('checkCancellationAuthority', () => {
 
   it('rejects a trigger whose event configuration is not a row-level BEFORE UPDATE trigger', async () => {
     const afterTrigger = healthy();
-    afterTrigger.triggers.agent_execution_record_cancellation_request = { rel: 'agent_executions', proc: 'record_cancellation_request', enabled: 'O', tgtype: 17 };
+    afterTrigger.triggers.agent_execution_record_cancellation_request = { rel: 'agent_executions', proc: 'record_cancellation_request', enabled: 'O', tgtype: 17, exact_function: true };
     expect(await failing(afterTrigger)).toContain('trigger:agent_execution_record_cancellation_request:event_config');
+  });
+
+  it('a same-named overload is refused by name, and cannot stand in for the required signature', async () => {
+    const shadow = healthy();
+    shadow.overloads.orchestrator_due_cancellations = 2;
+    expect(await failing(shadow)).toContain('orchestrator_due_cancellations:no_overloads');
+  });
+
+  it('a trigger whose function is not the exact required identity fails the function identity check', async () => {
+    const wrongIdentity = healthy();
+    wrongIdentity.triggers.agent_grant_refuse_consume_after_cancel = { ...wrongIdentity.triggers.agent_grant_refuse_consume_after_cancel!, exact_function: false };
+    expect(await failing(wrongIdentity)).toEqual(['trigger:agent_grant_refuse_consume_after_cancel:function_identity']);
+  });
+
+  it('a missing signature is reported as absent, with no unrelated cast error', async () => {
+    const absent = healthy();
+    absent.functions.orchestrator_due_cancellations = undefined;
+    expect(await failing(absent)).toContain('orchestrator_due_cancellations:present');
   });
 
   it('omits identity checks when the caller does not supply an identity', async () => {
