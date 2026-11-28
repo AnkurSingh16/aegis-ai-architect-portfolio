@@ -10,6 +10,12 @@ import { createHmac } from 'node:crypto';
 // B1.3 verifier on real PostgreSQL. Runtime logins are the actual aegis_app and other workload roles. The verification key is RANDOM,
 // generated per run, and provisioned only into this disposable CI database. No production or persistent secret is used.
 // Every refusal asserted here is the generic database refusal. The tests also check that no refusal leaks key material.
+//
+// Negative tests come in two kinds, and the kind decides the helper:
+//  - FIELD-SPECIFIC: the token is built for the transaction the test is in, exactly one condition is changed, and the denied statement is
+//    run inside a savepoint on the SAME checked-out client (refuseIn). A positive control on that same transaction (acceptIn) shows that
+//    the unchanged assertion is accepted, so the refusal is attributable to the one condition under test.
+//  - CROSS-TRANSACTION / CROSS-CONNECTION: intentionally replays a token in another transaction (refusal). These are kept on purpose.
 
 const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
 const runtimeUrl = process.env.TEST_DATABASE_URL;
@@ -21,6 +27,7 @@ const KEY_ID = 'ci-verifier-1';
 const AUDIENCE = 'aegis-ci-database';
 const KEY = randomBytes(32);
 const TENANT = '10000000-0000-4000-8000-000000000001';
+const OTHER_TENANT = '20000000-0000-4000-8000-000000000001';
 const admin = new Pool({ connectionString: adminUrl, max: 2 });
 const app = createDatabasePool(runtimeUrl, 4);
 const gateway = createDatabasePool(roleUrl('gateway'), 2);
@@ -71,15 +78,48 @@ function legit(bind: { txid: string; pid: number; now: number }, login: string, 
 }
 const sign = (f: AssertionFields) => signAssertion(f, KEY);
 
+/**
+ * Changes exactly one field of a VALID token: the payload bytes are edited in place with a same-length replacement, and the MAC is kept.
+ * Throws if the target is absent or the length would change, so a tamper test cannot silently pass without tampering.
+ */
+function tamper(token: string, from: string, to: string): string {
+  const [version, payloadHex, mac] = token.split('.');
+  if (Buffer.byteLength(to, 'utf8') !== Buffer.byteLength(from, 'utf8')) throw new Error('tamper replacement must keep the field length');
+  const bytes = Buffer.from(payloadHex, 'hex');
+  const at = bytes.indexOf(Buffer.from(from, 'utf8'));
+  if (at < 0) throw new Error(`tamper target not found in payload: ${from}`);
+  Buffer.from(to, 'utf8').copy(bytes, at);
+  return `${version}.${bytes.toString('hex')}.${mac}`;
+}
+
 /** Calls the verifier as the runtime login; resolves to the claims, or rejects with the database error. */
 async function verify(pool: Pool, token: string) {
   return session(pool, async (client) => (await client.query(
     'SELECT issuer, subject, tenant_id, scope_ceiling, purpose, assertion_id, expires_at FROM aegis_authority.verify_assertion($1)', [token])).rows);
 }
 const DENIED = 'authority assertion refused';
+const refused = { message: DENIED, code: '42501' };
+/** Cross-transaction refusal: verifies the token in a NEW transaction. Used only for the intentional replay tests. */
 async function refusal(pool: Pool, token: string): Promise<{ message: string; code?: string }> {
   try { await verify(pool, token); } catch (error) { return { message: (error as Error).message, code: (error as { code?: string }).code }; }
   throw new Error('expected the verifier to refuse, but it accepted');
+}
+/** Refuses a token INSIDE the caller's open transaction. A savepoint contains the denied statement so the transaction survives. */
+async function refuseIn(client: PoolClient, token: string): Promise<{ message: string; code?: string }> {
+  await client.query('SAVEPOINT verify_probe');
+  try {
+    await client.query('SELECT 1 FROM aegis_authority.verify_assertion($1)', [token]);
+  } catch (error) {
+    await client.query('ROLLBACK TO SAVEPOINT verify_probe');
+    await client.query('RELEASE SAVEPOINT verify_probe');
+    return { message: (error as Error).message, code: (error as { code?: string }).code };
+  }
+  await client.query('RELEASE SAVEPOINT verify_probe');
+  throw new Error('expected the verifier to refuse, but it accepted');
+}
+/** Positive control inside the same open transaction: the unchanged assertion must be accepted here. */
+async function acceptIn(client: PoolClient, token: string): Promise<void> {
+  expect((await client.query('SELECT 1 FROM aegis_authority.verify_assertion($1)', [token])).rowCount).toBe(1);
 }
 
 describe('verifier: positive bindings on the actual session, transaction and backend', () => {
@@ -118,109 +158,244 @@ describe('verifier: positive bindings on the actual session, transaction and bac
   });
 });
 
-describe('verifier: refusals (each generic, each with the real runtime login)', () => {
-  it('refuses a wrong MAC, a modified principal, tenant or purpose (payload changed, MAC kept)', async () => {
+describe('verifier: field-specific refusals inside the ORIGINAL transaction (one condition changed, savepoint, positive control)', () => {
+  it('refuses a wrong MAC with the payload unchanged', async () => {
     await session(app, async (client, bind) => {
-      const token = sign(legit(bind, 'aegis_app'));
-      const [v, payload, mac] = token.split('.');
+      const valid = sign(legit(bind, 'aegis_app'));
+      const [version, payload, mac] = valid.split('.');
       const flip = (hex: string) => hex.slice(0, -1) + (hex.endsWith('0') ? '1' : '0');
-      const cases = [`${v}.${payload}.${flip(mac)}`];
-      for (const needle of [Buffer.from('synthetic|reader-1').toString('hex'), Buffer.from('case_read').toString('hex')]) {
-        cases.push(`${v}.${payload.replace(needle, Buffer.from('synthetic|other-x').toString('hex').slice(0, needle.length))}.${mac}`);
-      }
-      for (const bad of cases) {
-        await expect(refusal(app, bad)).resolves.toEqual({ message: DENIED, code: '42501' });
-      }
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, `${version}.${payload}.${flip(mac)}`)).toEqual(refused);
+      await acceptIn(client, valid);
     });
   });
 
-  it('refuses a wrong key identifier (missing key) and a key past its expiry, as one generic refusal', async () => {
+  it('refuses a tampered principal: only the subject changes, the MAC is kept', async () => {
     await session(app, async (client, bind) => {
-      await expect(refusal(app, sign(legit(bind, 'aegis_app', { keyId: 'no-such-key' })))).resolves.toEqual({ message: DENIED, code: '42501' });
+      const valid = sign(legit(bind, 'aegis_app'));
+      const tampered = tamper(valid, 'synthetic|reader-1', 'synthetic|reader-2');
+      expect(tampered).not.toBe(valid);
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, tampered)).toEqual(refused);
+      await acceptIn(client, valid);
     });
+  });
+
+  it('refuses a tampered tenant: only the tenant identifier changes, the MAC is kept', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      const tampered = tamper(valid, TENANT, OTHER_TENANT);
+      expect(tampered).not.toBe(valid);
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, tampered)).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses a tampered purpose: only the purpose changes, the MAC is kept', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      const tampered = tamper(valid, 'case_read', 'case_writ');
+      expect(tampered).not.toBe(valid);
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, tampered)).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses an unknown key identifier, with the rest of the assertion valid', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_app', { keyId: 'no-such-key' })))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses every assertion while the key is expired, and accepts again once it is restored (positive control before and after)', async () => {
+    await session(app, async (client, bind) => { await acceptIn(client, sign(legit(bind, 'aegis_app'))); });
     await admin.query(`UPDATE aegis_authority.keys SET not_after = clock_timestamp() - interval '1 second' WHERE key_id = $1`, [KEY_ID]);
     try {
       await session(app, async (client, bind) => {
-        await expect(refusal(app, sign(legit(bind, 'aegis_app')))).resolves.toEqual({ message: DENIED, code: '42501' });
+        expect(await refuseIn(client, sign(legit(bind, 'aegis_app')))).toEqual(refused);
       });
     } finally {
       await admin.query(`UPDATE aegis_authority.keys SET not_after = NULL WHERE key_id = $1`, [KEY_ID]);
     }
+    await session(app, async (client, bind) => { await acceptIn(client, sign(legit(bind, 'aegis_app'))); });
   });
 
-  it('refuses when the database has no key provisioned at all, and when its configuration is missing (fail closed)', async () => {
+  it('refuses when the database has no key provisioned at all (fail closed), and accepts again once restored', async () => {
+    await session(app, async (client, bind) => { await acceptIn(client, sign(legit(bind, 'aegis_app'))); });
     const saved = (await admin.query<{ key_material: Buffer }>('SELECT key_material FROM aegis_authority.keys WHERE key_id = $1', [KEY_ID])).rows[0];
     await admin.query('DELETE FROM aegis_authority.keys WHERE key_id = $1', [KEY_ID]);
     try {
       await session(app, async (client, bind) => {
-        await expect(refusal(app, sign(legit(bind, 'aegis_app')))).resolves.toEqual({ message: DENIED, code: '42501' });
+        expect(await refuseIn(client, sign(legit(bind, 'aegis_app')))).toEqual(refused);
       });
     } finally {
       await admin.query('INSERT INTO aegis_authority.keys (key_id, key_material) VALUES ($1, $2)', [KEY_ID, saved.key_material]);
     }
+    await session(app, async (client, bind) => { await acceptIn(client, sign(legit(bind, 'aegis_app'))); });
+  });
+
+  it('refuses when the verifier configuration is missing (fail closed), and accepts again once restored', async () => {
+    await session(app, async (client, bind) => { await acceptIn(client, sign(legit(bind, 'aegis_app'))); });
     const config = (await admin.query('SELECT audience, max_clock_skew_seconds FROM aegis_authority.config')).rows[0];
     await admin.query('DELETE FROM aegis_authority.config');
     try {
       await session(app, async (client, bind) => {
-        await expect(refusal(app, sign(legit(bind, 'aegis_app')))).resolves.toEqual({ message: DENIED, code: '42501' });
+        expect(await refuseIn(client, sign(legit(bind, 'aegis_app')))).toEqual(refused);
       });
     } finally {
       await admin.query('INSERT INTO aegis_authority.config (singleton, audience, max_clock_skew_seconds) VALUES (true, $1, $2)',
         [config.audience, config.max_clock_skew_seconds]);
     }
+    await session(app, async (client, bind) => { await acceptIn(client, sign(legit(bind, 'aegis_app'))); });
   });
 
-  it('refuses a wrong audience, a wrong runtime login, a wrong transaction identifier and a wrong backend PID', async () => {
+  it('refuses a wrong audience, with every other field valid', async () => {
     await session(app, async (client, bind) => {
-      const refused = { message: DENIED, code: '42501' };
-      await expect(refusal(app, sign(legit(bind, 'aegis_app', { audience: 'some-other-database' })))).resolves.toEqual(refused);
-      await expect(refusal(app, sign(legit(bind, 'aegis_gateway')))).resolves.toEqual(refused);
-      await expect(refusal(app, sign(legit(bind, 'aegis_app', { transactionId: String(BigInt(bind.txid) + 1n) })))).resolves.toEqual(refused);
-      await expect(refusal(app, sign(legit(bind, 'aegis_app', { backendPid: bind.pid + 1 })))).resolves.toEqual(refused);
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_app', { audience: 'some-other-database' })))).toEqual(refused);
+      await acceptIn(client, valid);
     });
   });
 
-  it('refuses an expired assertion and a future-issued assertion outside the clock allowance, by database time', async () => {
+  it('refuses a wrong runtime login: the assertion names aegis_gateway but is presented by aegis_app', async () => {
     await session(app, async (client, bind) => {
-      const refused = { message: DENIED, code: '42501' };
-      await expect(refusal(app, sign(legit(bind, 'aegis_app', { issuedAt: bind.now - 120, expiresAt: bind.now - 60 })))).resolves.toEqual(refused);
-      await expect(refusal(app, sign(legit(bind, 'aegis_app', { issuedAt: bind.now + 60, expiresAt: bind.now + 120 })))).resolves.toEqual(refused);
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_gateway')))).toEqual(refused);
+      await acceptIn(client, valid);
     });
   });
 
-  it('refuses an excessive lifetime, even when correctly signed (the signer refuses it, so the payload is built directly)', async () => {
+  it('refuses a wrong transaction identifier, with every other binding (backend, login, clock) valid', async () => {
     await session(app, async (client, bind) => {
-      const f = legit(bind, 'aegis_app', { expiresAt: bind.now + 301 });
-      const token = signBytes(encodePayload(fieldValues(f)));
-      await expect(refusal(app, token)).resolves.toEqual({ message: DENIED, code: '42501' });
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_app', { transactionId: String(BigInt(bind.txid) + 1n) })))).toEqual(refused);
+      await acceptIn(client, valid);
     });
   });
 
-  it('refuses malformed encodings, an unsupported version, non-canonical or duplicate scopes, invalid UTF-8, and oversized tokens', async () => {
+  it('refuses a wrong backend PID, with every other binding (transaction, login, clock) valid', async () => {
     await session(app, async (client, bind) => {
-      const refused = { message: DENIED, code: '42501' };
-      const values = fieldValues(legit(bind, 'aegis_app'));
-      // Leading zero in a length prefix (the same bytes otherwise valid).
-      await expect(refusal(app, signBytes(Buffer.from('02:ab', 'ascii')))).resolves.toEqual(refused);
-      // Unsupported version.
-      await expect(refusal(app, sign(legit(bind, 'aegis_app')).replace('aegis-auth-v1.', 'aegis-auth-v2.'))).resolves.toEqual(refused);
-      // Scopes out of order and duplicated.
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_app', { backendPid: bind.pid + 1 })))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses an expired assertion, with every other field valid', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_app', { issuedAt: bind.now - 120, expiresAt: bind.now - 60 })))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses a future-issued assertion outside the clock allowance, with every other field valid', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, sign(legit(bind, 'aegis_app', { issuedAt: bind.now + 60, expiresAt: bind.now + 120 })))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses an excessive lifetime (301 seconds), even when correctly signed; the payload is built directly because the signer refuses it', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, signBytes(encodePayload(fieldValues(legit(bind, 'aegis_app', { expiresAt: bind.now + 301 })))))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses a non-canonical length prefix (leading zero), with the otherwise valid payload correctly signed', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      const canonical = encodePayload(fieldValues(legit(bind, 'aegis_app')));
+      expect(canonical.subarray(0, 3).toString('ascii')).toBe('13:');
+      expect(await refuseIn(client, signBytes(Buffer.concat([Buffer.from('0', 'ascii'), canonical])))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses an unsupported version token, with the payload and MAC otherwise unchanged', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, valid.replace('aegis-auth-v1.', 'aegis-auth-v2.'))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses scopes that are out of canonical order, with the payload correctly signed', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app', { scopeCeiling: ['read:cases', 'write:cases'] }));
+      await acceptIn(client, valid);
+      const values = fieldValues(legit(bind, 'aegis_app', { scopeCeiling: ['read:cases', 'write:cases'] }));
       const unsorted = values.map((v, i) => (i === 5 ? 'write:cases,read:cases' : v));
-      await expect(refusal(app, signBytes(encodePayload(unsorted)))).resolves.toEqual(refused);
-      const duplicated = values.map((v, i) => (i === 5 ? 'read:cases,read:cases' : v));
-      await expect(refusal(app, signBytes(encodePayload(duplicated)))).resolves.toEqual(refused);
-      // Invalid UTF-8 in a field: one 0xff byte, length-prefixed, correctly signed.
-      const bad = Buffer.concat([Buffer.from('1:'), Buffer.from([0xff])]);
-      await expect(refusal(app, signBytes(bad))).resolves.toEqual(refused);
-      // Oversized token.
-      await expect(refusal(app, 'aegis-auth-v1.' + '00'.repeat(2049) + '.' + '00'.repeat(32))).resolves.toEqual(refused);
+      expect(await refuseIn(client, signBytes(encodePayload(unsorted)))).toEqual(refused);
+      await acceptIn(client, valid);
     });
   });
 
-  it('refuses a non-allowlisted purpose, even when correctly signed', async () => {
+  it('refuses a duplicated scope, with the payload correctly signed', async () => {
     await session(app, async (client, bind) => {
-      const refused = { message: DENIED, code: '42501' };
-      await expect(refusal(app, signBytes(encodePayload(fieldValues(legit(bind, 'aegis_app', { purpose: 'delete_everything' as never })))))).resolves.toEqual(refused);
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      const duplicated = fieldValues(legit(bind, 'aegis_app')).map((v, i) => (i === 5 ? 'read:cases,read:cases' : v));
+      expect(await refuseIn(client, signBytes(encodePayload(duplicated)))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses a scope outside the allowlist, with the payload correctly signed', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      const outside = fieldValues(legit(bind, 'aegis_app')).map((v, i) => (i === 5 ? 'admin:all' : v));
+      expect(await refuseIn(client, signBytes(encodePayload(outside)))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses invalid UTF-8 in one field of an otherwise valid fourteen-field payload, correctly signed', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      const payload = encodePayload(fieldValues(legit(bind, 'aegis_app')));
+      const at = payload.indexOf(Buffer.from('aegis-auth-v1', 'ascii'));
+      expect(at).toBeGreaterThanOrEqual(0);
+      payload[at + 12] = 0xff; // the final byte of the first field becomes an invalid UTF-8 byte; the length prefix is unchanged
+      expect(await refuseIn(client, signBytes(payload))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses an oversized token, before any authentication is attempted', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, 'aegis-auth-v1.' + '00'.repeat(2049) + '.' + '00'.repeat(32))).toEqual(refused);
+      await acceptIn(client, valid);
+    });
+  });
+
+  it('refuses a non-allowlisted purpose, correctly signed, with every other field valid', async () => {
+    await session(app, async (client, bind) => {
+      const valid = sign(legit(bind, 'aegis_app'));
+      await acceptIn(client, valid);
+      expect(await refuseIn(client, signBytes(encodePayload(fieldValues(legit(bind, 'aegis_app', { purpose: 'delete_everything' as never })))))).toEqual(refused);
+      await acceptIn(client, valid);
     });
   });
 });
@@ -229,7 +404,7 @@ describe('verifier: replay and binding across commit, rollback, connections, rol
   it('reuse after commit is refused in a later transaction', async () => {
     let token = '';
     await session(app, async (client, bind) => { token = sign(legit(bind, 'aegis_app')); });
-    await expect(refusal(app, token)).resolves.toEqual({ message: DENIED, code: '42501' });
+    await expect(refusal(app, token)).resolves.toEqual(refused);
   });
 
   it('reuse after rollback is refused in a later transaction', async () => {
@@ -242,7 +417,7 @@ describe('verifier: replay and binding across commit, rollback, connections, rol
       token = sign(legit({ txid: bind.txid, pid: bind.pid, now: Number(bind.now) }, 'aegis_app'));
       await client.query('ROLLBACK');
     } finally { client.release(); }
-    await expect(refusal(app, token)).resolves.toEqual({ message: DENIED, code: '42501' });
+    await expect(refusal(app, token)).resolves.toEqual(refused);
   });
 
   it('concurrent cross-connection replay: a second connection cannot use an assertion while the first transaction is open', async () => {
@@ -283,7 +458,7 @@ describe('verifier: replay and binding across commit, rollback, connections, rol
       token = sign(legit({ txid: bind.txid, pid: bind.pid, now: Number(bind.now) }, 'aegis_app'));
       await client.query('ROLLBACK');
     } finally { client.release(true); }
-    await expect(refusal(app, token)).resolves.toEqual({ message: DENIED, code: '42501' });
+    await expect(refusal(app, token)).resolves.toEqual(refused);
   });
 });
 
@@ -336,7 +511,7 @@ describe('verifier: runtime privilege boundary (real runtime login, no administr
     const messages = new Set<string>();
     await session(app, async (client, bind) => {
       for (const token of [sign(legit(bind, 'aegis_app', { keyId: 'no-such' })), 'aegis-auth-v1.00.00', 'x']) {
-        messages.add((await refusal(app, token)).message);
+        messages.add((await refuseIn(client, token)).message);
       }
     });
     expect([...messages]).toEqual([DENIED]);
