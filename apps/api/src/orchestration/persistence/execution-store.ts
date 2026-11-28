@@ -106,6 +106,12 @@ export interface AgentExecutionStore {
   release(fence: Fence, nextStatus: 'pending' | 'failed' | 'succeeded' | 'cancelled', reason: string): Promise<Result<{ status: string }, WriteRefusal>>;
   /** Orchestrator only. Finalises a requested cancellation under the row lock: see the implementation for the rules. */
   finaliseCancellation(tenantId: string, executionId: string, actorInstance: string): Promise<Result<{ applied: boolean }, 'not_found'>>;
+  /**
+   * Records one failed reconciliation attempt in its own transaction (migration 025). Applies only while the cancellation is still
+   * pending, so it can never overwrite a terminal execution. Returns recorded = false when the row is no longer pending.
+   */
+  recordCancellationFailure(tenantId: string, executionId: string, failureClass: CancellationFailureClass):
+    Promise<{ recorded: boolean; attempts: number }>;
   recordDelegation(fence: Fence, input: { parentSeq: number | null; to: string; requestedScopes: readonly string[] }):
     Promise<Result<{ seq: number; depth: number }, WriteRefusal>>;
   issueGrant(fence: Fence, input: { chainSeq: number; kind: 'request' | 'result'; action: string; argumentsDigest: string;
@@ -152,6 +158,9 @@ const EXEC_COLUMNS = `e.execution_id, e.tenant_id, e.principal_ref, e.principal_
   (e.lease_expires_at > clock_timestamp()) AS lease_live, clock_timestamp() AS db_now`;
 
 const TERMINAL = ['succeeded', 'failed', 'cancelled'];
+/** Sanitised classes persisted for a failed cancellation attempt (migration 025). No free text is stored. */
+export const CANCELLATION_FAILURE_CLASSES = ['transient', 'systemic', 'execution_refused'] as const;
+export type CancellationFailureClass = (typeof CANCELLATION_FAILURE_CLASSES)[number];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const assertUuid = (value: string, label: string): void => {
   if (!UUID.test(value)) throw new RangeError(`${label} must be a UUID`);
@@ -176,6 +185,7 @@ export function createAgentExecutionStore(runTenant: TenantRunner, hooks: Execut
       terminal: !r.ok && (r.reason === 'retries_exhausted' || r.reason === 'cancel_requested'), recovered: r.ok && r.value.recovered, reason: r.ok ? null : r.reason, executionId: null })),
     renew: observed('renew', hooks, built.renew, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     finaliseCancellation: built.finaliseCancellation,
+    recordCancellationFailure: built.recordCancellationFailure,
     release: observed('release', hooks, built.release, (r, args) => ({ started: false, terminal: r.ok && TERMINAL.includes(args[1]), recovered: false, reason: null, executionId: null })),
     recordDelegation: observed('delegate', hooks, built.recordDelegation, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     issueGrant: observed('grant', hooks, built.issueGrant, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
@@ -489,7 +499,7 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
           delegationSeq: null, grantId: null });
         return { ok: true, value: { status: nextStatus } };
       }, 'release', (r) => ({ eventType: 'fenced_write_refused', outcome: 'refused', reason: r, actorAgent: fence.agentId,
-        actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: null }), true);
+        actorInstance: fence.instance, fencingToken: fence.fencingToken, delegationSeq: null, grantId: null }), nextStatus === 'cancelled');
     },
 
     async recordDelegation(fence, input) {
@@ -639,6 +649,7 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         }
         await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', lease_agent_id = NULL, lease_instance = NULL,
             lease_expires_at = NULL, fencing_token = fencing_token + 1, version = version + 1, updated_at = clock_timestamp(),
+            cancellation_next_attempt_at = NULL,
             workflow_stage = CASE WHEN workflow_stage IN ('completed', 'insufficient_evidence', 'failed', 'cancelled') THEN workflow_stage ELSE 'cancelled' END
           WHERE execution_id = $1`, [executionId]);
         await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
@@ -647,6 +658,26 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
           actorAgent: 'orchestrator', actorInstance, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
         await beforeCommit('cancel_finalise:applied');
         return { ok: true as const, value: { applied: true } };
+      });
+    },
+
+    async recordCancellationFailure(tenantId, executionId, failureClass) {
+      assertUuid(tenantId, 'tenantId');
+      assertUuid(executionId, 'executionId');
+      if (!CANCELLATION_FAILURE_CLASSES.includes(failureClass)) throw new RangeError('unknown cancellation failure class');
+      // Backoff in database time: 1 s doubling per attempt, capped at 60 s. Attempts saturate at 1000 (the table CHECK).
+      return runTenant(tenantId, async (client) => {
+        const result = await client.query<{ cancellation_attempts: number }>(
+          `UPDATE aegis.agent_executions SET cancellation_attempts = LEAST(cancellation_attempts + 1, 1000),
+              cancellation_last_attempt_at = clock_timestamp(), cancellation_failure_class = $3,
+              cancellation_next_attempt_at = clock_timestamp()
+                + LEAST(interval '60 seconds', interval '1 second' * power(2, LEAST(cancellation_attempts, 6)))
+            WHERE tenant_id = $1 AND execution_id = $2 AND cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')
+            RETURNING cancellation_attempts`,
+          [tenantId, executionId, failureClass]);
+        const row = result.rows[0];
+        await beforeCommit(`cancel_failure:${row ? 'recorded' : 'not_pending'}`);
+        return row ? { recorded: true, attempts: row.cancellation_attempts } : { recorded: false, attempts: 0 };
       });
     },
 

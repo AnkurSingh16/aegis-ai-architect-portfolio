@@ -161,7 +161,7 @@ describe('F. no participant can update execution status, revoke grants, or disco
     await asAgent('triage', NORTH, (c) => c.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
       WHERE execution_id = $1`, [started.executionId])).catch(() => undefined);
     expect(await count(`SELECT count(*)::text AS n FROM aegis.agent_grants WHERE execution_id = $1 AND status = 'open'`, [started.executionId])).toBeGreaterThan(0);
-    await expect(asAgent('triage', NORTH, (c) => c.query('SELECT * FROM aegis.orchestrator_pending_cancellations(10)', [])))
+    await expect(asAgent('triage', NORTH, (c) => c.query('SELECT * FROM aegis.orchestrator_due_cancellations(10)', [])))
       .rejects.toThrow(/permission denied/);
     expect((await state(started.executionId)).status).toBe('pending');
   });

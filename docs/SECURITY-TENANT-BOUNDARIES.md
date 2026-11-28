@@ -46,9 +46,12 @@ used in earlier P8 notes, which overstated the guarantee.
 - Orchestrator intake (`aegis.orchestrator_intake`, migration 019) is `SECURITY DEFINER` and returns submitted executions for every tenant. It
   checks the caller's identity with `session_user` and is executable only by `aegis_orchestrator`. It is the only cross-tenant read on the
   intake path. It is not a general bypass.
-- Orchestrator cancellation discovery (`aegis.orchestrator_pending_cancellations`, migration 024) returns the (tenant, execution)
-  identifiers of pending cancellations across tenants. It is executable only by `aegis_orchestrator`, takes no tenant or principal
-  argument, and returns nothing to any other role. Finalisation then runs in the tenant's own transaction under the row lock.
+- Orchestrator cancellation discovery (`aegis.orchestrator_due_cancellations`, migrations 024 and 025) returns the (tenant, execution,
+  attempts) identifiers of cancellations that are due for reconciliation, across tenants. It is executable only by `aegis_orchestrator`,
+  takes no tenant or principal argument, caps results at 50, and returns nothing to any other role. Finalisation then runs in the
+  tenant's own transaction under the row lock.
+- Orchestrator cancellation backlog (`aegis.orchestrator_cancellation_backlog`, migration 025) returns aggregate counts and the oldest
+  request age across tenants, with no identifiers. Executable only by `aegis_orchestrator`.
 - The ingestion role and the synthetic catalog trigger (migration 004) accept owner, superuser and BYPASSRLS sessions. These are
   administrator sessions and are not reachable from application logins.
 
@@ -56,8 +59,12 @@ used in earlier P8 notes, which overstated the guarantee.
 1. Tenant selection by a participant process is application-trusted (section 3). Follow-up: derive the tenant from a database-checked grant
    inside the policy, so a participant login cannot choose another tenant's execution.
 2. Outbox dispatch is cross-tenant (section 4). Follow-up: tenant-scoped dispatch.
-3. The owner of the `SECURITY DEFINER` functions must have BYPASSRLS or explicit policies. The consumption trigger (023, replaced in 024) and the orchestrator discovery function (024) depend on the same assumption. Local stacks run as a superuser. Follow-up: startup
-   assertion (F-02 in the review record).
+3. The owner of the `SECURITY DEFINER` functions must have BYPASSRLS or superuser, because they read `agent_executions` across tenants. The
+   consumption trigger (023, replaced in 024 and 025) and the discovery and backlog functions (024, 025) depend on it. Phase A adds a
+   startup validation (`verifyCancellationAuthority`, orchestrator only) that fails closed when the owner cannot see rows, when a function
+   is missing, when PUBLIC or an unexpected role holds EXECUTE, when the search_path is not pinned, or when the runtime identity is a
+   superuser or BYPASSRLS. Local stacks run the owner as a superuser, so the validation passes there. Narrowing the owner to a dedicated
+   NOLOGIN role with only the required table privileges is not implemented; it needs a provisioning decision (F-02 in the review record).
 4. Participant read of the outbox and inbox across tenants is part of item 2.
 5. No human security audit has been performed. This document is an engineering statement to be reviewed independently.
 
