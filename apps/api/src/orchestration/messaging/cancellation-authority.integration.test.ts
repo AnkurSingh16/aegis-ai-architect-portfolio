@@ -57,7 +57,7 @@ describe('migration 025 and cancellation authority validation on disposable data
   it('fresh install reaches 025 and the privileged functions pass the catalog validation', async () => {
     const db = await freshDatabase();
     pools.push(db.pool);
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(26); // 001-026 on a fresh database
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(27); // 001-027 on a fresh database
     const checks = await checkCancellationAuthority(db.pool, { identity: false });
     expect(checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([]);
     expect(checks.map((c) => c.name)).toContain('orchestrator_due_cancellations:owner_reads_rows');
@@ -77,7 +77,7 @@ describe('migration 025 and cancellation authority validation on disposable data
        VALUES ($1, 'upgrade-024-pending', repeat('a', 64), '{}', 'orchestrator', 'running', 4, 4, 50, 3, 1, true, 'user_request',
          clock_timestamp() - interval '1 hour') RETURNING execution_id`, [tenant]);
     const executionId = inserted.rows[0].execution_id;
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(2); // 025 and 026
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(3); // 025, 026 and 027
     const row = (await db.pool.query<{ cancel_requested_at: Date | null; next: Date | null; attempts: number; generation: string }>(
       `SELECT cancel_requested_at, cancellation_next_attempt_at AS next, cancellation_attempts AS attempts,
                 cancellation_generation::text AS generation FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0];
@@ -87,7 +87,7 @@ describe('migration 025 and cancellation authority validation on disposable data
     expect(row.attempts).toBe(0);
     expect(row.generation).toBe('0');
     const versions = await db.pool.query<{ version: string }>('SELECT version FROM aegis_migrations.versions ORDER BY version DESC LIMIT 1');
-    expect(versions.rows[0].version).toBe('026_cancellation_scheduling_generation.sql');
+    expect(versions.rows[0].version).toBe('027_cryptographic_authority_foundation.sql');
   }, 120000);
 
   it('upgrade from the 025 baseline with retry state: attempts, schedule and history are preserved, and the generation starts at zero', async () => {
@@ -110,7 +110,7 @@ describe('migration 025 and cancellation authority validation on disposable data
       `SELECT cancellation_attempts AS attempts, cancellation_next_attempt_at AS next, cancellation_last_attempt_at AS last
          FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0];
 
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(1); // 026 only
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(2); // 026 and 027
     const after = (await db.pool.query<{ attempts: number; next: Date; last: Date; generation: string; failure: string | null }>(
       `SELECT cancellation_attempts AS attempts, cancellation_next_attempt_at AS next, cancellation_last_attempt_at AS last,
               cancellation_generation::text AS generation, cancellation_failure_class AS failure
