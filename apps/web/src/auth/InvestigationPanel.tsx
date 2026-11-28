@@ -137,7 +137,7 @@ export default function InvestigationPanel() {
         {view && <>
           <p>Status: <strong>{stageLabel(view.stage)}</strong></p>
           {!isTerminalStage(view.stage) && !view.cancelRequested && <button className="auth-button secondary" onClick={() => void cancel()}>Cancel</button>}
-          {view.cancelRequested && !isTerminalStage(view.stage) && <p>Cancellation requested. It takes effect at the next step.</p>}
+          {view.cancelRequested && !isTerminalStage(view.stage) && <p>Cancellation requested. The orchestrator will finalise it; the investigation shows as cancelled once it does.</p>}
           {view.result?.verdict === 'answered' && <section aria-labelledby="answer-heading">
             <h3 id="answer-heading">Answer (reviewer approved)</h3>
             <p>{view.result.answer}</p>

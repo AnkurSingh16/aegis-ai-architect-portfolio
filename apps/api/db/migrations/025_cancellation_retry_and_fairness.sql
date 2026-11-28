@@ -78,7 +78,10 @@ BEGIN
 END;
 $$;
 
--- 4. Fair, bounded, orchestrator-only discovery. Replaces the 024 function, which ordered by updated_at and so let a failing execution keep
+-- 4. Fair, bounded, orchestrator-only, lock-aware discovery. FOR UPDATE SKIP LOCKED skips an execution that another transaction holds at the
+-- moment of discovery, so a sustained lock on one execution (or on a full batch of them) cannot occupy the batch and starve healthy
+-- cancellations behind it. A skipped execution is discovered again once it is unlocked; its schedule is unchanged, so it is not lost.
+-- The lock taken here is released at the end of the discovery statement; the finalisation takes its own lock. Replaces the 024 function, which ordered by updated_at and so let a failing execution keep
 -- its place in front of later candidates. Ineligible rows (next attempt in the future) are not returned at all.
 DROP FUNCTION aegis.orchestrator_pending_cancellations(integer);
 
@@ -92,6 +95,7 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, aegis AS $$
      AND EXISTS (SELECT 1 FROM aegis.agent_database_roles m WHERE m.role_name = session_user AND m.agent_id = 'orchestrator')
    ORDER BY e.cancellation_next_attempt_at, e.execution_id
    LIMIT GREATEST(1, LEAST(p_limit, 50))
+   FOR UPDATE SKIP LOCKED
 $$;
 REVOKE ALL ON FUNCTION aegis.orchestrator_due_cancellations(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION aegis.orchestrator_due_cancellations(integer) TO aegis_orchestrator;

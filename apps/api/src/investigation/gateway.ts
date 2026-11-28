@@ -124,8 +124,16 @@ export async function readInvestigation(run: TenantRunner, principal: Principal,
   });
 }
 
+/**
+ * The gateway records a cancellation request. It never finalises a cancellation: the orchestrator does (migrations 024 and 025), with or
+ * without a live lease. The gateway's database role may set cancel_requested and nothing else on the execution (migration 018).
+ *
+ * The request is one conditional UPDATE bound to the verified principal, the tenant, and a non-terminal, not-yet-requested row. Under
+ * READ COMMITTED a concurrent finalisation makes the UPDATE match nothing, and the re-read then reports the committed terminal state.
+ * The request event is written only by the transition that set the flag, so repeated requests are idempotent.
+ */
 export async function requestCancellation(run: TenantRunner, principal: Principal, input: { tenantId: string; executionId: string; reason: string }):
-  Promise<{ accepted: boolean }> {
+  Promise<{ accepted: boolean; state: 'cancel_requested' | 'already_requested' | 'terminal' }> {
   requireRead(principal);
   if (!UUID.test(input.tenantId) || !UUID.test(input.executionId)) throw new GatewayError('invalid_request');
   if (!/^[a-z_]{1,40}$/.test(input.reason)) throw new GatewayError('invalid_request');
@@ -135,11 +143,23 @@ export async function requestCancellation(run: TenantRunner, principal: Principa
     const owned = (await client.query<{ principal_ref: string; status: string }>(
       'SELECT principal_ref, status FROM aegis.agent_executions WHERE execution_id = $1 AND tenant_id = $2', [input.executionId, input.tenantId])).rows[0];
     if (!owned || owned.principal_ref !== digest) throw new GatewayError('not_found');
-    if (['succeeded', 'failed', 'cancelled'].includes(owned.status)) return { accepted: false };
-    // The orchestrator applies the cancellation at its next decision for this execution (see the P4 claim and fenced writes).
-    await client.query(`UPDATE aegis.agent_executions SET cancel_requested = true, cancel_reason = COALESCE(cancel_reason, $3),
-        version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1 AND tenant_id = $2`,
-      [input.executionId, input.tenantId, input.reason]);
-    return { accepted: true };
+    if (['succeeded', 'failed', 'cancelled'].includes(owned.status)) return { accepted: false, state: 'terminal' as const };
+    const transitioned = await client.query<{ execution_id: string }>(
+      `UPDATE aegis.agent_executions SET cancel_requested = true, cancel_reason = COALESCE(cancel_reason, $3),
+          version = version + 1, updated_at = clock_timestamp()
+        WHERE execution_id = $1 AND tenant_id = $2 AND principal_ref = $4 AND NOT cancel_requested
+          AND status NOT IN ('succeeded', 'failed', 'cancelled')
+        RETURNING execution_id`,
+      [input.executionId, input.tenantId, input.reason, digest]);
+    if (transitioned.rows.length === 1) {
+      await client.query(`INSERT INTO aegis.agent_execution_events (tenant_id, execution_id, event_type, outcome, reason, actor_agent,
+          actor_instance) VALUES ($1, $2, 'cancel_requested', 'accepted', 'requested', NULL, $3)`, [input.tenantId, input.executionId, digest]);
+      return { accepted: true, state: 'cancel_requested' as const };
+    }
+    // Nothing changed: either a request already exists, or the execution became terminal under a concurrent write. Re-read the committed row.
+    const now = (await client.query<{ status: string }>(
+      'SELECT status FROM aegis.agent_executions WHERE execution_id = $1 AND tenant_id = $2', [input.executionId, input.tenantId])).rows[0];
+    if (!now || ['succeeded', 'failed', 'cancelled'].includes(now.status)) return { accepted: false, state: 'terminal' as const };
+    return { accepted: true, state: 'already_requested' as const };
   });
 }

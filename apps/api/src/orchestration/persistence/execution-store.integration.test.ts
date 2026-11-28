@@ -341,7 +341,7 @@ describe('leases, fencing, cancellation and retries', () => {
       .toEqual({ ok: false, reason: 'terminal' });
   });
 
-  it('a cancellation with no lease holder takes effect immediately and revokes open grants', async () => {
+  it('a cancellation with no lease holder is recorded by the request and finalised only by the orchestrator, which revokes open grants', async () => {
     const executionId = await newExecution();
     const fence = await claimAsOrchestrator(executionId);
     const envelope = await (async () => {
@@ -351,7 +351,10 @@ describe('leases, fencing, cancellation and retries', () => {
       return envelopeFor({ executionId, tenantId: tenantA, principal, from: 'orchestrator', to: 'triage', chain: rootToTriage(), action: 'triage.classify', args });
     })();
     await store.release(fence, 'pending', 'worker_stopped');
-    expect(await store.requestCancel(tenantA, executionId, 'operator-digest', 'operator request')).toEqual({ ok: true, value: { state: 'cancelled' } });
+    expect(await store.requestCancel(tenantA, executionId, 'operator-digest', 'operator request')).toEqual({ ok: true, value: { state: 'cancel_requested' } });
+    expect((await store.snapshot(tenantA, executionId))?.status).toBe('pending');
+    expect(await store.finaliseCancellation(tenantA, executionId, 'orchestrator-test')).toEqual({ ok: true, value: { applied: true } });
+    expect((await store.snapshot(tenantA, executionId))?.status).toBe('cancelled');
     expect((await store.grants(tenantA, executionId)).every((g) => g.status === 'revoked')).toBe(true);
     expect(await store.consumeEnvelope(fence, envelope)).toEqual({ ok: false, reason: 'stale_fence' });
   });

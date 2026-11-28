@@ -133,3 +133,64 @@ describe('migration 025 and cancellation authority validation on disposable data
     expect((error as CancellationAuthorityError).failed).toContain('orchestrator_cancellation_backlog:present');
   }, 120000);
 });
+
+describe('startup authority: effective privileges, trigger attachment, role membership', () => {
+  it('a BYPASSRLS owner without the table privilege fails: BYPASSRLS is not proof of effective access', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    const plainBypass = `aegis_p8_bypass_only_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    roles.push(plainBypass);
+    await admin.query(`CREATE ROLE ${plainBypass} NOLOGIN BYPASSRLS`);
+    const original = (await db.pool.query<{ owner: string }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner FROM pg_proc p WHERE p.oid = 'aegis.orchestrator_due_cancellations(integer)'::regprocedure`)).rows[0].owner;
+    await db.pool.query(`ALTER FUNCTION aegis.orchestrator_due_cancellations(integer) OWNER TO ${plainBypass}`);
+    const failed = (await checkCancellationAuthority(db.pool, { identity: false })).filter((c) => !c.ok).map((c) => c.name);
+    expect(failed).toContain('orchestrator_due_cancellations:owner_selects_executions');
+    expect(failed).not.toContain('orchestrator_due_cancellations:owner_reads_rows');
+    await db.pool.query(`ALTER FUNCTION aegis.orchestrator_due_cancellations(integer) OWNER TO "${original}"`);
+  }, 120000);
+
+  it('a dropped cancellation enforcement trigger fails validation by name', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    await db.pool.query('DROP TRIGGER agent_grant_refuse_consume_after_cancel ON aegis.agent_grants');
+    const failed = (await checkCancellationAuthority(db.pool, { identity: false })).filter((c) => !c.ok).map((c) => c.name);
+    expect(failed).toContain('trigger:agent_grant_refuse_consume_after_cancel:present');
+  }, 120000);
+
+  it('a disabled cancellation trigger fails validation: it is attached but not enabled', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    await db.pool.query('ALTER TABLE aegis.agent_executions DISABLE TRIGGER agent_execution_record_cancellation_request');
+    const failed = (await checkCancellationAuthority(db.pool, { identity: false })).filter((c) => !c.ok).map((c) => c.name);
+    expect(failed).toContain('trigger:agent_execution_record_cancellation_request:enabled');
+    expect(failed).not.toContain('trigger:agent_execution_record_cancellation_request:attached');
+  }, 120000);
+
+  it('a missing required signature fails validation even when a function of the same name exists with another signature', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    await db.pool.query('DROP FUNCTION aegis.orchestrator_due_cancellations(integer)');
+    await db.pool.query(`CREATE FUNCTION aegis.orchestrator_due_cancellations(p text) RETURNS integer LANGUAGE sql AS 'SELECT 1'`);
+    const failed = (await checkCancellationAuthority(db.pool, { identity: false })).filter((c) => !c.ok).map((c) => c.name);
+    expect(failed).toContain('orchestrator_due_cancellations:present');
+  }, 120000);
+
+  it('a role membership on the runtime identity fails validation, so role assumption is not possible through inheritance', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    const who = (await db.pool.query<{ u: string }>('SELECT session_user AS u')).rows[0].u;
+    await db.pool.query(`GRANT aegis_triage TO "${who}"`);
+    try {
+      const failed = (await checkCancellationAuthority(db.pool, { identity: true })).filter((c) => !c.ok).map((c) => c.name);
+      expect(failed).toContain('runtime_identity:no_role_membership');
+    } finally {
+      await db.pool.query(`REVOKE aegis_triage FROM "${who}"`);
+    }
+  }, 120000);
+});

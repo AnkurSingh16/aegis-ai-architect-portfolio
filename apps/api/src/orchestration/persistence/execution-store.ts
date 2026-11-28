@@ -110,7 +110,7 @@ export interface AgentExecutionStore {
    * Records one failed reconciliation attempt in its own transaction (migration 025). Applies only while the cancellation is still
    * pending, so it can never overwrite a terminal execution. Returns recorded = false when the row is no longer pending.
    */
-  recordCancellationFailure(tenantId: string, executionId: string, failureClass: CancellationFailureClass):
+  recordCancellationFailure(tenantId: string, executionId: string, failureClass: CancellationFailureClass, expectedAttempts: number):
     Promise<{ recorded: boolean; attempts: number }>;
   recordDelegation(fence: Fence, input: { parentSeq: number | null; to: string; requestedScopes: readonly string[] }):
     Promise<Result<{ seq: number; depth: number }, WriteRefusal>>;
@@ -125,7 +125,7 @@ export interface AgentExecutionStore {
   receiveEnvelope(input: { tenantId: string; executionId: string; recipient: string; sender: string; envelope: unknown }):
     Promise<Result<{ grantId: string }, string>>;
   requestCancel(tenantId: string, executionId: string, actorDigest: string, reason: string):
-    Promise<Result<{ state: 'cancelled' | 'cancel_requested' }, 'not_found' | 'terminal'>>;
+    Promise<Result<{ state: 'cancel_requested' | 'already_requested' }, 'not_found' | 'terminal'>>;
   snapshot(tenantId: string, executionId: string): Promise<ExecutionSnapshot | null>;
   delegations(tenantId: string, executionId: string): Promise<Array<{ seq: number; parentSeq: number | null; depth: number;
     from: string; to: string; chainDigest: string }>>;
@@ -191,7 +191,7 @@ export function createAgentExecutionStore(runTenant: TenantRunner, hooks: Execut
     issueGrant: observed('grant', hooks, built.issueGrant, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     consumeEnvelope: observed('consume', hooks, built.consumeEnvelope, () => ({ started: false, terminal: false, recovered: false, reason: null, executionId: null })),
     receiveEnvelope: observed('consume', hooks, built.receiveEnvelope, (r, args) => ({ started: false, terminal: false, recovered: false, reason: r.ok ? null : r.reason, executionId: String(args[0].executionId) })),
-    requestCancel: observed('cancel', hooks, built.requestCancel, (r, args) => ({ started: false, terminal: r.ok && r.value.state === 'cancelled', recovered: false, reason: null, executionId: String(args[1]) })),
+    requestCancel: observed('cancel', hooks, built.requestCancel, (r, args) => ({ started: false, terminal: false, recovered: false, reason: null, executionId: String(args[1]) })),
     snapshot: built.snapshot,
     delegations: built.delegations,
     grants: built.grants,
@@ -661,10 +661,11 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
       });
     },
 
-    async recordCancellationFailure(tenantId, executionId, failureClass) {
+    async recordCancellationFailure(tenantId, executionId, failureClass, expectedAttempts) {
       assertUuid(tenantId, 'tenantId');
       assertUuid(executionId, 'executionId');
       if (!CANCELLATION_FAILURE_CLASSES.includes(failureClass)) throw new RangeError('unknown cancellation failure class');
+      if (!Number.isInteger(expectedAttempts) || expectedAttempts < 0 || expectedAttempts > 1000) throw new RangeError('expectedAttempts');
       // Backoff in database time: 1 s doubling per attempt, capped at 60 s. Attempts saturate at 1000 (the table CHECK).
       return runTenant(tenantId, async (client) => {
         const result = await client.query<{ cancellation_attempts: number }>(
@@ -673,14 +674,20 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
               cancellation_next_attempt_at = clock_timestamp()
                 + LEAST(interval '60 seconds', interval '1 second' * power(2, LEAST(cancellation_attempts, 6)))
             WHERE tenant_id = $1 AND execution_id = $2 AND cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')
+              AND cancellation_attempts = $4
             RETURNING cancellation_attempts`,
-          [tenantId, executionId, failureClass]);
+          [tenantId, executionId, failureClass, expectedAttempts]);
         const row = result.rows[0];
         await beforeCommit(`cancel_failure:${row ? 'recorded' : 'not_pending'}`);
         return row ? { recorded: true, attempts: row.cancellation_attempts } : { recorded: false, attempts: 0 };
       });
     },
 
+    /**
+     * Records a cancellation request and nothing else. It never changes status, revokes grants or releases a lease: the orchestrator
+     * finalises (finaliseCancellation), with or without a live lease. The same semantics as the gateway's requestCancellation. A repeated
+     * request is idempotent and writes no second event.
+     */
     async requestCancel(tenantId, executionId, actorDigest, reason) {
       assertUuid(tenantId, 'tenantId');
       assertUuid(executionId, 'executionId');
@@ -690,24 +697,14 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
         if (!locked.ok) { await beforeCommit('cancel:not_found'); return { ok: false as const, reason: 'not_found' as const }; }
         const row = locked.row;
         if (TERMINAL.includes(row.status)) { await beforeCommit('cancel:terminal'); return { ok: false as const, reason: 'terminal' as const }; }
-        if (row.lease_live) {
-          // A running attempt honours the request at its next fenced write.
-          await client.query(`UPDATE aegis.agent_executions SET cancel_requested = true, cancel_reason = COALESCE(cancel_reason, $2),
-              version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`, [executionId, reason]);
-          await audit(client, tenantId, executionId, { eventType: 'cancel_requested', outcome: 'accepted', reason: 'lease_held',
-            actorAgent: null, actorInstance: actorDigest, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
-          await beforeCommit('cancel:requested');
-          return { ok: true as const, value: { state: 'cancel_requested' as const } };
-        }
-        await client.query(`UPDATE aegis.agent_executions SET status = 'cancelled', cancel_requested = true,
-            cancel_reason = COALESCE(cancel_reason, $2), version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`,
-        [executionId, reason]);
-        await client.query(`UPDATE aegis.agent_grants SET status = 'revoked', revoked_at = clock_timestamp()
-          WHERE execution_id = $1 AND status = 'open'`, [executionId]);
-        await audit(client, tenantId, executionId, { eventType: 'cancelled', outcome: 'accepted', reason: 'operator_request',
-          actorAgent: null, actorInstance: actorDigest, fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
-        await beforeCommit('cancel:cancelled');
-        return { ok: true as const, value: { state: 'cancelled' as const } };
+        if (row.cancel_requested) { await beforeCommit('cancel:already_requested'); return { ok: true as const, value: { state: 'already_requested' as const } }; }
+        await client.query(`UPDATE aegis.agent_executions SET cancel_requested = true, cancel_reason = COALESCE(cancel_reason, $2),
+            version = version + 1, updated_at = clock_timestamp() WHERE execution_id = $1`, [executionId, reason]);
+        await audit(client, tenantId, executionId, { eventType: 'cancel_requested', outcome: 'accepted',
+          reason: row.lease_live ? 'lease_held' : 'requested', actorAgent: null, actorInstance: actorDigest,
+          fencingToken: Number(row.fencing_token), delegationSeq: null, grantId: null });
+        await beforeCommit('cancel:requested');
+        return { ok: true as const, value: { state: 'cancel_requested' as const } };
       });
     },
 

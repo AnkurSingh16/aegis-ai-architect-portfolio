@@ -193,10 +193,14 @@ describe('readInvestigation', () => {
 });
 
 describe('requestCancellation', () => {
-  const execution = (principalRef: string, status: string) => (sql: string) => (sql.includes('aegis.memberships')
-    ? { rows: [{ role: 'reader' }], rowCount: 1 }
-    : sql.includes('SELECT principal_ref, status') ? { rows: [{ principal_ref: principalRef, status }], rowCount: 1 }
-      : { rows: [], rowCount: 1 });
+  // transitions: whether the conditional UPDATE matches (a request is recorded now). rereadStatus: the committed status on re-read.
+  const execution = (principalRef: string, status: string, transitions = true, rereadStatus = status) => (sql: string) =>
+    (sql.includes('aegis.memberships') ? { rows: [{ role: 'reader' }], rowCount: 1 }
+      : sql.includes('SELECT principal_ref, status') ? { rows: [{ principal_ref: principalRef, status }], rowCount: 1 }
+        : sql.startsWith('UPDATE aegis.agent_executions SET cancel_requested')
+          ? { rows: transitions ? [{ execution_id: EXECUTION }] : [], rowCount: transitions ? 1 : 0 }
+          : sql.includes('SELECT status FROM aegis.agent_executions') ? { rows: [{ status: rereadStatus }], rowCount: 1 }
+            : { rows: [], rowCount: 1 });
 
   it('rejects reasons outside the allowed vocabulary', async () => {
     const script = scriptedRunner(execution(digestOf(owner), 'running'));
@@ -217,17 +221,35 @@ describe('requestCancellation', () => {
     for (const status of ['succeeded', 'failed', 'cancelled']) {
       const script = scriptedRunner(execution(digestOf(owner), status));
       expect(await requestCancellation(script.run, owner, { tenantId: NORTH, executionId: EXECUTION, reason: 'user_cancelled' }))
-        .toEqual({ accepted: false });
+        .toEqual({ accepted: false, state: 'terminal' });
       expect(script.calls.some((c) => c.sql.startsWith('UPDATE'))).toBe(false);
     }
   });
 
-  it('records the cancellation request for the owner of a running execution', async () => {
+  it('records the cancellation request for the owner of a running execution, with one audit event', async () => {
     const script = scriptedRunner(execution(digestOf(owner), 'running'));
     expect(await requestCancellation(script.run, owner, { tenantId: NORTH, executionId: EXECUTION, reason: 'user_cancelled' }))
-      .toEqual({ accepted: true });
+      .toEqual({ accepted: true, state: 'cancel_requested' });
     const update = script.calls.find((c) => c.sql.startsWith('UPDATE aegis.agent_executions'));
     expect(update?.sql).toContain('cancel_requested = true');
-    expect(update?.values).toEqual([EXECUTION, NORTH, 'user_cancelled']);
+    expect(update?.sql).toContain('principal_ref = $4');
+    expect(update?.values).toEqual([EXECUTION, NORTH, 'user_cancelled', digestOf(owner)]);
+    const event = script.calls.filter((c) => c.sql.includes('INSERT INTO aegis.agent_execution_events'));
+    expect(event).toHaveLength(1);
+    expect(event[0].values[2]).toBe(digestOf(owner));
+  });
+
+  it('a repeated request is idempotent: no second event, and the state reports it was already requested', async () => {
+    const script = scriptedRunner(execution(digestOf(owner), 'running', false));
+    expect(await requestCancellation(script.run, owner, { tenantId: NORTH, executionId: EXECUTION, reason: 'user_cancelled' }))
+      .toEqual({ accepted: true, state: 'already_requested' });
+    expect(script.calls.some((c) => c.sql.includes('INSERT INTO aegis.agent_execution_events'))).toBe(false);
+  });
+
+  it('a request that loses a race to finalisation reports the committed terminal state and writes nothing', async () => {
+    const script = scriptedRunner(execution(digestOf(owner), 'running', false, 'cancelled'));
+    expect(await requestCancellation(script.run, owner, { tenantId: NORTH, executionId: EXECUTION, reason: 'user_cancelled' }))
+      .toEqual({ accepted: false, state: 'terminal' });
+    expect(script.calls.some((c) => c.sql.includes('INSERT INTO aegis.agent_execution_events'))).toBe(false);
   });
 });

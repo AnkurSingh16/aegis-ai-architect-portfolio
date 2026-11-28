@@ -70,7 +70,7 @@ export async function reconcileCancellations(pool: Pool, hooks: ExecutionHooks, 
   const totals = { applied: 0, skipped: 0, refused: 0, transient: 0, deferred: 0, systemic: 0, unrecorded: 0 };
   let halted = false;
   for (const row of due.rows) {
-    const outcome = await attemptOne(pool, hooks, row.tenant_id, row.execution_id, options, lockMs, statementMs);
+    const outcome = await attemptOne(pool, hooks, row, options, lockMs, statementMs);
     totals[outcome] += 1;
     // Systemic faults and unrecordable failures stop the cycle. A deferred row (lock or statement timeout) does not: an unrelated
     // locked execution must not stall the cancellations behind it. It stays due and is retried at the next cycle.
@@ -81,8 +81,9 @@ export async function reconcileCancellations(pool: Pool, hooks: ExecutionHooks, 
 
 const TIMEOUT_CODES = new Set(['55P03', '57014']);
 
-async function attemptOne(pool: Pool, hooks: ExecutionHooks, tenantId: string, executionId: string, options: ReconcileOptions,
-  lockMs: number, statementMs: number): Promise<RowOutcome> {
+async function attemptOne(pool: Pool, hooks: ExecutionHooks, row: { tenant_id: string; execution_id: string; cancellation_attempts: number },
+  options: ReconcileOptions, lockMs: number, statementMs: number): Promise<RowOutcome> {
+  const { tenant_id: tenantId, execution_id: executionId } = row;
   let failure: CancellationFailureClass;
   try {
     const result = await withMessagingContext(pool, { tenantId }, async (client) => {
@@ -105,7 +106,7 @@ async function attemptOne(pool: Pool, hooks: ExecutionHooks, tenantId: string, e
     const recorded = await withMessagingContext(pool, { tenantId }, async (client) => {
       await client.query(`SET LOCAL lock_timeout = ${lockMs}`, []);
       await client.query(`SET LOCAL statement_timeout = ${statementMs}`, []);
-      return createAgentExecutionStore(joinTransaction(client, tenantId), hooks).recordCancellationFailure(tenantId, executionId, failure);
+      return createAgentExecutionStore(joinTransaction(client, tenantId), hooks).recordCancellationFailure(tenantId, executionId, failure, row.cancellation_attempts);
     });
     if (!recorded.recorded) return 'skipped';
   } catch (error) {

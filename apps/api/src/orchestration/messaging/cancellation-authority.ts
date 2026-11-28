@@ -35,6 +35,11 @@ export const CANCELLATION_FUNCTIONS: readonly FunctionRequirement[] = [
     ownerReadsRows: false, executableBy: [] },
 ];
 
+export const CANCELLATION_TRIGGERS = [
+  { name: 'agent_execution_record_cancellation_request', relation: 'agent_executions', proc: 'record_cancellation_request' },
+  { name: 'agent_grant_refuse_consume_after_cancel', relation: 'agent_grants', proc: 'refuse_request_consumption_after_cancel' },
+] as const;
+
 const PINNED_SEARCH_PATH = 'search_path=pg_catalog, aegis';
 
 export class CancellationAuthorityError extends Error {
@@ -59,6 +64,12 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
     add(`${prefix}:definer_rights`, row.prosecdef === req.definerRights);
     add(`${prefix}:search_path_pinned`, (row.proconfig ?? []).includes(PINNED_SEARCH_PATH));
     if (req.ownerReadsRows) add(`${prefix}:owner_reads_rows`, row.owner_reads_rows === true);
+    if (req.ownerReadsRows) {
+      // BYPASSRLS is not proof of access: the owner also needs the table privilege that the function's read relies on.
+      const priv = await pool.query<{ ok: boolean }>(
+        `SELECT has_table_privilege($1::regrole, 'aegis.agent_executions', 'SELECT') AS ok`, [row.owner]);
+      add(`${prefix}:owner_selects_executions`, priv.rows[0].ok === true);
+    }
     const acl = await pool.query<{ grantee: string; privilege: string }>(
       `SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE g.rolname END AS grantee, a.privilege_type AS privilege
          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -70,6 +81,27 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
     add(`${prefix}:no_public_execute`, !grantees.includes('PUBLIC'));
     add(`${prefix}:no_unexpected_execute`, grantees.every((g) => allowed.has(g)));
     for (const role of req.executableBy) add(`${prefix}:executable_by_${role}`, grantees.includes(role));
+  }
+  for (const trigger of CANCELLATION_TRIGGERS) {
+    // pg_trigger: attachment to the intended relation and function, and enabled for the session's replication role (tgenabled = 'O').
+    const found = await pool.query<{ rel: string; proc: string; enabled: string }>(
+      `SELECT c.relname AS rel, p.proname AS proc, t.tgenabled::text AS enabled
+         FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE n.nspname = 'aegis' AND NOT t.tgisinternal AND t.tgname = $1`, [trigger.name]);
+    const row = found.rows[0];
+    add(`trigger:${trigger.name}:present`, found.rows.length === 1);
+    add(`trigger:${trigger.name}:attached`, !!row && row.rel === trigger.relation && row.proc === trigger.proc);
+    add(`trigger:${trigger.name}:enabled`, !!row && row.enabled === 'O');
+  }
+  if (options.identity) {
+    const membership = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = session_user`, []);
+    add('runtime_identity:no_role_membership', membership.rows[0].n === 0);
+    for (const fn of CANCELLATION_FUNCTIONS.filter((f) => f.executableBy.length > 0)) {
+      const can = await pool.query<{ ok: boolean }>(`SELECT has_function_privilege(session_user, $1::regprocedure, 'EXECUTE') AS ok`, [fn.signature]);
+      add(`runtime_identity:can_execute:${fn.proname}`, can.rows[0].ok === true);
+    }
   }
   if (options.identity) {
     const who = await pool.query<{ rolsuper: boolean; rolbypassrls: boolean; role_name: string | null }>(
