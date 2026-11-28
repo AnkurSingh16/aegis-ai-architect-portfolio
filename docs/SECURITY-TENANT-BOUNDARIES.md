@@ -46,10 +46,10 @@ used in earlier P8 notes, which overstated the guarantee.
 - Orchestrator intake (`aegis.orchestrator_intake`, migration 019) is `SECURITY DEFINER` and returns submitted executions for every tenant. It
   checks the caller's identity with `session_user` and is executable only by `aegis_orchestrator`. It is the only cross-tenant read on the
   intake path. It is not a general bypass.
-- Orchestrator cancellation discovery (`aegis.orchestrator_due_cancellations`, migrations 024 and 025) returns the (tenant, execution,
-  attempts) identifiers of cancellations that are due for reconciliation, across tenants. It is executable only by `aegis_orchestrator`,
-  takes no tenant or principal argument, caps results at 50, and returns nothing to any other role. Finalisation then runs in the
-  tenant's own transaction under the row lock.
+- Orchestrator cancellation discovery (`aegis.orchestrator_due_cancellations`, migrations 024, 025 and 026) returns the (tenant, execution,
+  attempts, scheduling generation) identifiers of cancellations that are due for reconciliation, across tenants. It is executable only by
+  `aegis_orchestrator`, takes no tenant or principal argument, caps results at 50, skips rows locked by another transaction (`SKIP
+  LOCKED`), and returns nothing to any other role. Finalisation then runs in the tenant's own transaction under the row lock.
 - Orchestrator cancellation backlog (`aegis.orchestrator_cancellation_backlog`, migration 025) returns aggregate counts and the oldest
   request age across tenants, with no identifiers. Executable only by `aegis_orchestrator`.
 - The ingestion role and the synthetic catalog trigger (migration 004) accept owner, superuser and BYPASSRLS sessions. These are
@@ -63,8 +63,12 @@ used in earlier P8 notes, which overstated the guarantee.
    consumption trigger (023, replaced in 024 and 025) and the discovery and backlog functions (024, 025) depend on it. Phase A adds a
    startup validation (`verifyCancellationAuthority`, orchestrator only) that fails closed when the owner cannot see rows, when a function
    is missing, when PUBLIC or an unexpected role holds EXECUTE, when the search_path is not pinned, or when the runtime identity is a
-   superuser or BYPASSRLS. Local stacks run the owner as a superuser, so the validation passes there. Narrowing the owner to a dedicated
-   NOLOGIN role with only the required table privileges is not implemented; it needs a provisioning decision (F-02 in the review record).
+   superuser or BYPASSRLS. Phase A.2 extends it: the owner must also hold the privileges the functions' statements need (SELECT on
+   `agent_executions` and `agent_database_roles`, UPDATE on `agent_executions` for the `FOR UPDATE` discovery lock, schema usage on
+   `aegis`), both triggers must be row-level BEFORE UPDATE, and the runtime identity must have schema usage and role-map access. BYPASSRLS
+   alone is not treated as proof of access. Local stacks run the owner as a superuser, so the validation passes there. Narrowing the owner
+   to a dedicated NOLOGIN role with only the required table privileges is not implemented; it needs a provisioning decision (F-02 in the
+   review record). Open findings F2, F3, F4 and F7 are unchanged by this phase.
 4. Participant read of the outbox and inbox across tenants is part of item 2.
 5. No human security audit has been performed. This document is an engineering statement to be reviewed independently.
 

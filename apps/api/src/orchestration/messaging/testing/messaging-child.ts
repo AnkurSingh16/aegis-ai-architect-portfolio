@@ -8,9 +8,10 @@ import { receiveMessage } from '../inbox.js';
 import { startInvestigationInTx } from '../handlers.js';
 import { withMessagingContext } from '../context.js';
 import { createMessagingTelemetry } from '../telemetry.js';
+import { reconcileCancellations } from '../cancellation.js';
 
 interface ChildArgs {
-  readonly op: 'receive' | 'dispatch' | 'intake';
+  readonly op: 'receive' | 'dispatch' | 'intake' | 'cancel';
   readonly dbUrl: string;
   readonly startAt?: number;
   readonly pauseBeforeCommit?: string;
@@ -45,6 +46,12 @@ async function main(): Promise<void> {
     const result = await receiveMessage(pool, hooks, args.receive!);
     emit({ event: 'RESULT', result });
     if (args.pauseAfterCommit) { emit({ event: 'COMMITTED' }); await forever(); }
+    return;
+  }
+  if (args.op === 'cancel') {
+    // One orchestrator reconciliation cycle. A pauseBeforeCommit label holds it inside an uncommitted finalisation, for a deterministic kill.
+    const summary = await reconcileCancellations(pool, hooks, { instance: `child-${process.pid}`, limit: 10, lockTimeoutMs: 15000, statementTimeoutMs: 30000 });
+    emit({ event: 'RESULT', summary });
     return;
   }
   if (args.op === 'intake') {

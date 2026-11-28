@@ -57,7 +57,7 @@ describe('migration 025 and cancellation authority validation on disposable data
   it('fresh install reaches 025 and the privileged functions pass the catalog validation', async () => {
     const db = await freshDatabase();
     pools.push(db.pool);
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(25); // 001-025 on a fresh database
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(26); // 001-026 on a fresh database
     const checks = await checkCancellationAuthority(db.pool, { identity: false });
     expect(checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([]);
     expect(checks.map((c) => c.name)).toContain('orchestrator_due_cancellations:owner_reads_rows');
@@ -77,16 +77,17 @@ describe('migration 025 and cancellation authority validation on disposable data
        VALUES ($1, 'upgrade-024-pending', repeat('a', 64), '{}', 'orchestrator', 'running', 4, 4, 50, 3, 1, true, 'user_request',
          clock_timestamp() - interval '1 hour') RETURNING execution_id`, [tenant]);
     const executionId = inserted.rows[0].execution_id;
-    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(1);
-    const row = (await db.pool.query<{ cancel_requested_at: Date | null; next: Date | null; attempts: number }>(
-      `SELECT cancel_requested_at, cancellation_next_attempt_at AS next, cancellation_attempts AS attempts
-         FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0];
+    expect(await migrateDatabase(db.url, appPassword, ingestPassword)).toBe(2); // 025 and 026
+    const row = (await db.pool.query<{ cancel_requested_at: Date | null; next: Date | null; attempts: number; generation: string }>(
+      `SELECT cancel_requested_at, cancellation_next_attempt_at AS next, cancellation_attempts AS attempts,
+                cancellation_generation::text AS generation FROM aegis.agent_executions WHERE execution_id = $1`, [executionId])).rows[0];
     expect(row.cancel_requested_at).not.toBeNull();
     expect(row.next).not.toBeNull();
     expect(row.next!.getTime()).toBeLessThanOrEqual(Date.now());
     expect(row.attempts).toBe(0);
+    expect(row.generation).toBe('0');
     const versions = await db.pool.query<{ version: string }>('SELECT version FROM aegis_migrations.versions ORDER BY version DESC LIMIT 1');
-    expect(versions.rows[0].version).toBe('025_cancellation_retry_and_fairness.sql');
+    expect(versions.rows[0].version).toBe('026_cancellation_scheduling_generation.sql');
   }, 120000);
 
   it('the validation refuses each negative configuration, names the failed check, and passes again once reverted', async () => {
@@ -192,5 +193,70 @@ describe('startup authority: effective privileges, trigger attachment, role memb
     } finally {
       await db.pool.query(`REVOKE aegis_triage FROM "${who}"`);
     }
+  }, 120000);
+});
+
+describe('startup authority: unsupported privilege and trigger configurations on disposable databases', () => {
+  /** A BYPASSRLS owner with the named table privileges, and nothing else. Recorded for cleanup. */
+  async function ownerWith(db: { pool: Pool }, grants: string[]): Promise<string> {
+    const name = `aegis_p8_owner_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    roles.push(name);
+    await admin.query(`CREATE ROLE ${name} NOLOGIN BYPASSRLS`);
+    await db.pool.query(`GRANT USAGE ON SCHEMA aegis TO ${name}`);
+    for (const grant of grants) await db.pool.query(`GRANT ${grant} TO ${name}`);
+    return name;
+  }
+  const failedOf = async (db: { pool: Pool }) =>
+    (await checkCancellationAuthority(db.pool, { identity: false })).filter((c) => !c.ok).map((c) => c.name);
+
+  it('a BYPASSRLS owner with SELECT but without UPDATE fails the lock check, so FOR UPDATE discovery cannot run', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    const owner = await ownerWith(db, ['SELECT ON aegis.agent_executions', 'SELECT ON aegis.agent_database_roles']);
+    await db.pool.query(`ALTER FUNCTION aegis.orchestrator_due_cancellations(integer) OWNER TO ${owner}`);
+    const failed = await failedOf(db);
+    expect(failed).toContain('orchestrator_due_cancellations:owner_locks_executions');
+    expect(failed).not.toContain('orchestrator_due_cancellations:owner_selects_executions');
+    expect(failed).not.toContain('orchestrator_due_cancellations:owner_reads_role_map');
+  }, 120000);
+
+  it('a BYPASSRLS owner without access to the role-mapping table fails that check and no other', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    const owner = await ownerWith(db, ['SELECT, UPDATE ON aegis.agent_executions']);
+    await db.pool.query(`ALTER FUNCTION aegis.orchestrator_due_cancellations(integer) OWNER TO ${owner}`);
+    const failed = await failedOf(db);
+    expect(failed).toContain('orchestrator_due_cancellations:owner_reads_role_map');
+    expect(failed).not.toContain('orchestrator_due_cancellations:owner_locks_executions');
+    expect(failed).not.toContain('orchestrator_due_cancellations:owner_selects_executions');
+  }, 120000);
+
+  it('an AFTER UPDATE trigger under the required name fails the event-configuration check, though it is attached and enabled', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    await db.pool.query('DROP TRIGGER agent_execution_record_cancellation_request ON aegis.agent_executions');
+    await db.pool.query(`CREATE TRIGGER agent_execution_record_cancellation_request AFTER UPDATE OF cancel_requested ON aegis.agent_executions
+      FOR EACH ROW WHEN (NEW.cancel_requested AND NOT OLD.cancel_requested) EXECUTE FUNCTION aegis.record_cancellation_request()`);
+    const failed = await failedOf(db);
+    expect(failed).toContain('trigger:agent_execution_record_cancellation_request:event_config');
+    expect(failed).not.toContain('trigger:agent_execution_record_cancellation_request:attached');
+    expect(failed).not.toContain('trigger:agent_execution_record_cancellation_request:enabled');
+  }, 120000);
+
+  it('a required trigger attached to a different function fails the attachment check by name', async () => {
+    const db = await freshDatabase();
+    pools.push(db.pool);
+    await migrateDatabase(db.url, appPassword, ingestPassword);
+    await db.pool.query(`CREATE FUNCTION aegis.p8_unrelated_trigger() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, aegis AS $$
+      BEGIN RETURN NEW; END $$`);
+    await db.pool.query('DROP TRIGGER agent_grant_refuse_consume_after_cancel ON aegis.agent_grants');
+    await db.pool.query(`CREATE TRIGGER agent_grant_refuse_consume_after_cancel BEFORE UPDATE OF status ON aegis.agent_grants
+      FOR EACH ROW EXECUTE FUNCTION aegis.p8_unrelated_trigger()`);
+    const failed = await failedOf(db);
+    expect(failed).toContain('trigger:agent_grant_refuse_consume_after_cancel:attached');
+    expect(failed).not.toContain('trigger:agent_grant_refuse_consume_after_cancel:present');
   }, 120000);
 });

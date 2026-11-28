@@ -19,6 +19,14 @@ import { withMessagingContext } from './context.js';
  *   The cycle halts, so one broken configuration does not spin through the whole queue.
  * A cycle also halts when a failure cannot be recorded, because the database is then not making progress.
  */
+/** One discovered candidate. The generation is a decimal string: a bigint is never converted to a JavaScript number. */
+interface DueRow {
+  readonly tenant_id: string;
+  readonly execution_id: string;
+  readonly cancellation_attempts: number;
+  readonly cancellation_generation: string;
+}
+
 export interface ReconcileSummary {
   readonly candidates: number;
   readonly applied: number;
@@ -38,10 +46,11 @@ export interface ReconcileOptions {
   readonly lockTimeoutMs?: number;
   readonly statementTimeoutMs?: number;
   /**
-   * Test seam only: deterministic fault injection for the finalisation ('finalise') and failure-recording ('record') transactions.
-   * The runtime never passes it, and nothing environment-controlled reaches it.
+   * Test seam only: deterministic fault injection and gating for the finalisation ('finalise') and failure-recording ('record')
+   * transactions. It runs inside the transaction, after discovery and before the row lock is taken. It may await, so a test can hold
+   * two reconcilers at the same point. The runtime never passes it, and nothing environment-controlled reaches it.
    */
-  readonly injectFault?: (phase: 'finalise' | 'record', tenantId: string, executionId: string) => Error | undefined;
+  readonly injectFault?: (phase: 'finalise' | 'record', tenantId: string, executionId: string) => Error | undefined | Promise<Error | undefined>;
 }
 
 /** Documented retry policy (also stated in migration 025 and docs/SECURITY-TENANT-BOUNDARIES.md). */
@@ -65,8 +74,8 @@ export async function reconcileCancellations(pool: Pool, hooks: ExecutionHooks, 
   const limit = clampInt(options.limit ?? 10, 1, 50);
   const lockMs = clampInt(options.lockTimeoutMs ?? 2000, 100, 30000);
   const statementMs = clampInt(options.statementTimeoutMs ?? 5000, 100, 60000);
-  const due = await pool.query<{ tenant_id: string; execution_id: string; cancellation_attempts: number }>(
-    'SELECT tenant_id, execution_id, cancellation_attempts FROM aegis.orchestrator_due_cancellations($1)', [limit]);
+  const due = await pool.query<DueRow>(
+    'SELECT tenant_id, execution_id, cancellation_attempts, cancellation_generation::text AS cancellation_generation FROM aegis.orchestrator_due_cancellations($1)', [limit]);
   const totals = { applied: 0, skipped: 0, refused: 0, transient: 0, deferred: 0, systemic: 0, unrecorded: 0 };
   let halted = false;
   for (const row of due.rows) {
@@ -81,7 +90,7 @@ export async function reconcileCancellations(pool: Pool, hooks: ExecutionHooks, 
 
 const TIMEOUT_CODES = new Set(['55P03', '57014']);
 
-async function attemptOne(pool: Pool, hooks: ExecutionHooks, row: { tenant_id: string; execution_id: string; cancellation_attempts: number },
+async function attemptOne(pool: Pool, hooks: ExecutionHooks, row: DueRow,
   options: ReconcileOptions, lockMs: number, statementMs: number): Promise<RowOutcome> {
   const { tenant_id: tenantId, execution_id: executionId } = row;
   let failure: CancellationFailureClass;
@@ -89,7 +98,7 @@ async function attemptOne(pool: Pool, hooks: ExecutionHooks, row: { tenant_id: s
     const result = await withMessagingContext(pool, { tenantId }, async (client) => {
       await client.query(`SET LOCAL lock_timeout = ${lockMs}`, []);
       await client.query(`SET LOCAL statement_timeout = ${statementMs}`, []);
-      const injected = options.injectFault?.('finalise', tenantId, executionId);
+      const injected = await options.injectFault?.('finalise', tenantId, executionId);
       if (injected) throw injected;
       return createAgentExecutionStore(joinTransaction(client, tenantId), hooks).finaliseCancellation(tenantId, executionId, options.instance);
     });
@@ -100,13 +109,13 @@ async function attemptOne(pool: Pool, hooks: ExecutionHooks, row: { tenant_id: s
     failure = 'transient';
   }
   try {
-    const injected = options.injectFault?.('record', tenantId, executionId);
+    const injected = await options.injectFault?.('record', tenantId, executionId);
     if (injected) throw injected;
     // The record takes the same row lock, so it carries the same timeout: an unrelated lock must not stall the whole cycle.
     const recorded = await withMessagingContext(pool, { tenantId }, async (client) => {
       await client.query(`SET LOCAL lock_timeout = ${lockMs}`, []);
       await client.query(`SET LOCAL statement_timeout = ${statementMs}`, []);
-      return createAgentExecutionStore(joinTransaction(client, tenantId), hooks).recordCancellationFailure(tenantId, executionId, failure, row.cancellation_attempts);
+      return createAgentExecutionStore(joinTransaction(client, tenantId), hooks).recordCancellationFailure(tenantId, executionId, failure, row.cancellation_generation);
     });
     if (!recorded.recorded) return 'skipped';
   } catch (error) {

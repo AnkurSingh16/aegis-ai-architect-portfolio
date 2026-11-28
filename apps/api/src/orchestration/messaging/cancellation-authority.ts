@@ -22,23 +22,29 @@ interface FunctionRequirement {
   readonly ownerReadsRows: boolean;
   /** Roles, other than the owner, that may hold EXECUTE. Empty for trigger functions. */
   readonly executableBy: readonly string[];
+  /** The function locks rows with FOR UPDATE, which needs UPDATE privilege on the table for the owner. */
+  readonly locksForUpdate?: boolean;
+  /** The function reads aegis.agent_database_roles (the orchestrator-only check), which the owner must be able to SELECT. */
+  readonly readsRoleMap?: boolean;
 }
 
 export const CANCELLATION_FUNCTIONS: readonly FunctionRequirement[] = [
   { proname: 'orchestrator_due_cancellations', signature: 'aegis.orchestrator_due_cancellations(integer)', definerRights: true,
-    ownerReadsRows: true, executableBy: ['aegis_orchestrator'] },
+    ownerReadsRows: true, executableBy: ['aegis_orchestrator'], locksForUpdate: true, readsRoleMap: true },
   { proname: 'orchestrator_cancellation_backlog', signature: 'aegis.orchestrator_cancellation_backlog()', definerRights: true,
-    ownerReadsRows: true, executableBy: ['aegis_orchestrator'] },
+    ownerReadsRows: true, executableBy: ['aegis_orchestrator'], readsRoleMap: true },
   { proname: 'refuse_request_consumption_after_cancel', signature: 'aegis.refuse_request_consumption_after_cancel()', definerRights: true,
     ownerReadsRows: true, executableBy: [] },
   { proname: 'record_cancellation_request', signature: 'aegis.record_cancellation_request()', definerRights: false,
     ownerReadsRows: false, executableBy: [] },
 ];
 
+/** Every trigger must be a row-level BEFORE UPDATE trigger: an AFTER or statement-level trigger would not be able to refuse or stamp a row. */
 export const CANCELLATION_TRIGGERS = [
   { name: 'agent_execution_record_cancellation_request', relation: 'agent_executions', proc: 'record_cancellation_request' },
   { name: 'agent_grant_refuse_consume_after_cancel', relation: 'agent_grants', proc: 'refuse_request_consumption_after_cancel' },
 ] as const;
+const TG_ROW = 1, TG_BEFORE = 2, TG_UPDATE = 16;
 
 const PINNED_SEARCH_PATH = 'search_path=pg_catalog, aegis';
 
@@ -65,10 +71,23 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
     add(`${prefix}:search_path_pinned`, (row.proconfig ?? []).includes(PINNED_SEARCH_PATH));
     if (req.ownerReadsRows) add(`${prefix}:owner_reads_rows`, row.owner_reads_rows === true);
     if (req.ownerReadsRows) {
-      // BYPASSRLS is not proof of access: the owner also needs the table privilege that the function's read relies on.
+      // BYPASSRLS is not proof of access: the owner also needs the table privileges that the function's statements rely on.
       const priv = await pool.query<{ ok: boolean }>(
         `SELECT has_table_privilege($1::regrole, 'aegis.agent_executions', 'SELECT') AS ok`, [row.owner]);
       add(`${prefix}:owner_selects_executions`, priv.rows[0].ok === true);
+      const schema = await pool.query<{ ok: boolean }>(`SELECT has_schema_privilege($1::regrole, 'aegis', 'USAGE') AS ok`, [row.owner]);
+      add(`${prefix}:owner_schema_usage`, schema.rows[0].ok === true);
+    }
+    if (req.locksForUpdate) {
+      // FOR UPDATE needs UPDATE on at least one column. The owner needs it for the discovery lock, not only SELECT.
+      const upd = await pool.query<{ ok: boolean }>(
+        `SELECT has_any_column_privilege($1::regrole, 'aegis.agent_executions', 'UPDATE') AS ok`, [row.owner]);
+      add(`${prefix}:owner_locks_executions`, upd.rows[0].ok === true);
+    }
+    if (req.readsRoleMap) {
+      const map = await pool.query<{ ok: boolean }>(
+        `SELECT has_table_privilege($1::regrole, 'aegis.agent_database_roles', 'SELECT') AS ok`, [row.owner]);
+      add(`${prefix}:owner_reads_role_map`, map.rows[0].ok === true);
     }
     const acl = await pool.query<{ grantee: string; privilege: string }>(
       `SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE g.rolname END AS grantee, a.privilege_type AS privilege
@@ -84,8 +103,8 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
   }
   for (const trigger of CANCELLATION_TRIGGERS) {
     // pg_trigger: attachment to the intended relation and function, and enabled for the session's replication role (tgenabled = 'O').
-    const found = await pool.query<{ rel: string; proc: string; enabled: string }>(
-      `SELECT c.relname AS rel, p.proname AS proc, t.tgenabled::text AS enabled
+    const found = await pool.query<{ rel: string; proc: string; enabled: string; tgtype: number }>(
+      `SELECT c.relname AS rel, p.proname AS proc, t.tgenabled::text AS enabled, t.tgtype::int AS tgtype
          FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
          JOIN pg_proc p ON p.oid = t.tgfoid
         WHERE n.nspname = 'aegis' AND NOT t.tgisinternal AND t.tgname = $1`, [trigger.name]);
@@ -93,6 +112,9 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
     add(`trigger:${trigger.name}:present`, found.rows.length === 1);
     add(`trigger:${trigger.name}:attached`, !!row && row.rel === trigger.relation && row.proc === trigger.proc);
     add(`trigger:${trigger.name}:enabled`, !!row && row.enabled === 'O');
+    // Event configuration: row-level, BEFORE, UPDATE. Without this an AFTER trigger with the right name would pass the other checks.
+    const want = TG_ROW | TG_BEFORE | TG_UPDATE;
+    add(`trigger:${trigger.name}:event_config`, !!row && (row.tgtype & want) === want);
   }
   if (options.identity) {
     const membership = await pool.query<{ n: number }>(
@@ -109,6 +131,11 @@ export async function checkCancellationAuthority(pool: Pool, options: { identity
          FROM pg_roles r LEFT JOIN aegis.agent_database_roles m ON m.role_name = session_user
         WHERE r.rolname = session_user`, []);
     const me = who.rows[0];
+    const access = await pool.query<{ schema_ok: boolean; map_ok: boolean }>(
+      `SELECT has_schema_privilege(session_user, 'aegis', 'USAGE') AS schema_ok,
+              has_table_privilege(session_user, 'aegis.agent_database_roles', 'SELECT') AS map_ok`, []);
+    add('runtime_identity:schema_usage', access.rows[0].schema_ok === true);
+    add('runtime_identity:role_map_select', access.rows[0].map_ok === true);
     add('runtime_identity:not_superuser', me?.rolsuper === false);
     add('runtime_identity:not_bypassrls', me?.rolbypassrls === false);
     add('runtime_identity:orchestrator_role', me?.role_name === 'orchestrator');

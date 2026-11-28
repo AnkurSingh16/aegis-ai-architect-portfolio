@@ -110,7 +110,7 @@ export interface AgentExecutionStore {
    * Records one failed reconciliation attempt in its own transaction (migration 025). Applies only while the cancellation is still
    * pending, so it can never overwrite a terminal execution. Returns recorded = false when the row is no longer pending.
    */
-  recordCancellationFailure(tenantId: string, executionId: string, failureClass: CancellationFailureClass, expectedAttempts: number):
+  recordCancellationFailure(tenantId: string, executionId: string, failureClass: CancellationFailureClass, expectedGeneration: string):
     Promise<{ recorded: boolean; attempts: number }>;
   recordDelegation(fence: Fence, input: { parentSeq: number | null; to: string; requestedScopes: readonly string[] }):
     Promise<Result<{ seq: number; depth: number }, WriteRefusal>>;
@@ -661,22 +661,26 @@ function buildStore(runTenant: TenantRunner, hooks: ExecutionHooks): AgentExecut
       });
     },
 
-    async recordCancellationFailure(tenantId, executionId, failureClass, expectedAttempts) {
+    async recordCancellationFailure(tenantId, executionId, failureClass, expectedGeneration) {
       assertUuid(tenantId, 'tenantId');
       assertUuid(executionId, 'executionId');
       if (!CANCELLATION_FAILURE_CLASSES.includes(failureClass)) throw new RangeError('unknown cancellation failure class');
-      if (!Number.isInteger(expectedAttempts) || expectedAttempts < 0 || expectedAttempts > 1000) throw new RangeError('expectedAttempts');
-      // Backoff in database time: 1 s doubling per attempt, capped at 60 s. Attempts saturate at 1000 (the table CHECK).
+      // The generation is a bigint carried as a decimal string: it is never converted to a JavaScript number.
+      // At most 18 digits: always within the bigint range, so no value reaches the database that PostgreSQL would reject for size.
+      if (!/^(0|[1-9][0-9]{0,17})$/.test(expectedGeneration)) throw new RangeError('expectedGeneration');
+      // Backoff in database time: 1 s doubling per attempt, capped at 60 s. The attempt count saturates at 1000 (its CHECK) and is used
+      // only for that backoff. The generation is never capped: it is the scheduling identity, and every schedule write advances it.
       return runTenant(tenantId, async (client) => {
         const result = await client.query<{ cancellation_attempts: number }>(
-          `UPDATE aegis.agent_executions SET cancellation_attempts = LEAST(cancellation_attempts + 1, 1000),
+          `UPDATE aegis.agent_executions SET cancellation_generation = cancellation_generation + 1,
+              cancellation_attempts = LEAST(cancellation_attempts + 1, 1000),
               cancellation_last_attempt_at = clock_timestamp(), cancellation_failure_class = $3,
               cancellation_next_attempt_at = clock_timestamp()
                 + LEAST(interval '60 seconds', interval '1 second' * power(2, LEAST(cancellation_attempts, 6)))
             WHERE tenant_id = $1 AND execution_id = $2 AND cancel_requested AND status NOT IN ('succeeded', 'failed', 'cancelled')
-              AND cancellation_attempts = $4
+              AND cancellation_generation = $4::bigint
             RETURNING cancellation_attempts`,
-          [tenantId, executionId, failureClass, expectedAttempts]);
+          [tenantId, executionId, failureClass, expectedGeneration]);
         const row = result.rows[0];
         await beforeCommit(`cancel_failure:${row ? 'recorded' : 'not_pending'}`);
         return row ? { recorded: true, attempts: row.cancellation_attempts } : { recorded: false, attempts: 0 };

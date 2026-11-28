@@ -1,6 +1,6 @@
 # Cancellation: request, finalisation, retry, fairness and recovery
 
-Status: Phase A and A.1 of the P8 security hardening (PR #83, migrations 024 and 025). The implementation and tests are described here as
+Status: Phase A, A.1 and A.2 of the P8 security hardening (PR #83, migrations 024, 025 and 026). The implementation and tests are described here as
 they are in the branch. Results are reported per commit in the PR, not in this document. Open findings F2, F3, F4 and F7 are not addressed
 here (see `SECURITY-TENANT-BOUNDARIES.md`, section 6).
 
@@ -10,11 +10,12 @@ here (see `SECURITY-TENANT-BOUNDARIES.md`, section 6).
   (migration 018 grant and its `WITH CHECK (cancel_requested)` policy). It never sets a terminal status, revokes grants or releases a lease.
   Finalisation happens only in the orchestrator, with or without a live lease.
 - **Participants cannot finalise.** Triage, retrieval and reviewer can refuse a post-cancellation request but cannot change execution state.
-- **Retry state lives on `aegis.agent_executions`** (migration 025). The composite key `(tenant_id, execution_id)` already exists. Five columns:
-  `cancel_requested_at`, `cancellation_attempts`, `cancellation_next_attempt_at`, `cancellation_last_attempt_at`,
-  `cancellation_failure_class`. The failure class is one of `transient`, `systemic`, `execution_refused`. There is no free-text message.
+- **Retry state lives on `aegis.agent_executions`** (migrations 025 and 026). The composite key `(tenant_id, execution_id)` already exists.
+  Six columns: `cancel_requested_at`, `cancellation_attempts`, `cancellation_next_attempt_at`, `cancellation_last_attempt_at`,
+  `cancellation_failure_class`, and `cancellation_generation` (bigint, added by 026). The failure class is one of `transient`, `systemic`,
+  `execution_refused`. There is no free-text message.
 - **Database time** sets every persisted schedule.
-- **Only the orchestrator writes retry columns** (`GRANT UPDATE` on four of them). A trigger sets `cancel_requested_at` and the first
+- **Only the orchestrator writes retry columns** (`GRANT UPDATE` on five of them, including the generation). A trigger sets `cancel_requested_at` and the first
   eligibility time when `cancel_requested` first becomes true, so the gateway needs no privilege for it.
 
 ## 2. Gateway request
@@ -47,7 +48,7 @@ production route never reached that branch, because it uses `requestCancellation
 | Finalisation | `status = cancelled`, open grants revoked, audit (orchestrator) | `FOR UPDATE` on the execution row, after revalidating terminal state |
 | Holder completion (`release` with `succeeded`, `failed` or `pending`) | status | `FOR UPDATE`; refused as `cancel_requested` once the request is committed |
 | Request-grant consumption (any path) | `grant.status = consumed` | Trigger takes `FOR SHARE` on the execution row (migration 025), so it conflicts with every cancellation write |
-| Failure recording | retry columns (own transaction) | `FOR UPDATE` on the row, guarded by the scheduling generation (section 5) |
+| Failure recording | retry columns and generation (own transaction) | `FOR UPDATE` on the row, guarded by the scheduling generation (section 5) |
 
 The execution row is the single serialisation point for cancellation. The trigger's `FOR SHARE` makes direct SQL consumption wait for it.
 
@@ -79,22 +80,33 @@ everywhere, not to widen privileges. Direct SQL is an administrative path only.
 | First backoff | 1 s | SQL, in `recordCancellationFailure` |
 | Growth | doubles per stored attempt | SQL: `power(2, LEAST(attempts, 6))` |
 | Maximum backoff | 60 s | SQL: `LEAST(interval '60 seconds', …)` |
-| Stored attempts | saturate at 1000 | SQL `LEAST(attempts + 1, 1000)` and table CHECK |
+| Stored attempts | saturate at 1000 (operational history; drives the backoff only) | SQL `LEAST(attempts + 1, 1000)` and table CHECK |
+| Scheduling generation | bigint, never capped; advances on every schedule write | `cancellation_generation` (migration 026); carried as a decimal string in TypeScript |
 | Discovery batch | 10 per cycle (runtime), 50 maximum | runtime; SQL `LEAST(p_limit, 50)` |
 | Lock timeout | 2 s (100 ms to 30 s) | `lockTimeoutMs` |
 | Statement timeout | 5 s (100 ms to 60 s) | `statementTimeoutMs` |
 | Idle cycle delay | 200 ms | `AEGIS_DISPATCH_INTERVAL_MS` |
 | Halted or failed cycle delay | 1 s doubling to 30 s | runtime |
 
-**Scheduling generation.** The generation of a pending cancellation is its `cancellation_attempts` value at discovery. A failure is
-recorded only if the stored value still equals the generation the reconciler discovered. The update then increments the value and
-reschedules. This gives:
+**Scheduling generation (migration 026).** Each pending cancellation carries `cancellation_generation`, a bigint that starts at 0 and
+increments on every schedule write. It is separate from `cancellation_attempts`, which saturates at 1000 and only sets the backoff. A
+failure is recorded only while the stored generation still equals the value the reconciler read at discovery. The update then increments
+the generation, increments the (saturating) attempt count, and reschedules. Migration 025 used the attempt count as the guard, which
+could not distinguish writers once it saturated; that defect is corrected here. The semantics:
 
-- **Two reconcilers failing the same candidate:** the first records attempt 1; the second, holding generation 0, is skipped. Attempts
-  advance by one, not two.
-- **A stale failure after a newer schedule:** skipped. The newer `next_attempt_at` is not moved.
-- **A stale failure after a successful finalisation:** skipped, because the row is terminal and the update also requires pending state.
-- **Saturation:** the counter stops at 1000 and the interval stays at 60 s.
+- **Duplicate failures from one discovery generation:** the first records and advances the generation; the second is refused as stale
+  and changes nothing (test A6.10).
+- **Stale failure after a newer schedule:** refused, so the newer `next_attempt_at` is not moved (A6.10).
+- **Concurrent failures at attempt 999:** both reconcilers hold generation 5; the row lock serialises them, the second re-evaluates the
+  guard and is refused. Attempts reach 1000 once (A6.11).
+- **Concurrent failures at saturated attempt 1000:** both hold generation 6; one records, the count stays at 1000, and the generation
+  advances once (A6.11).
+- **Failure after a successful finalisation:** refused, because the row is terminal (A6.10).
+- **Backoff after saturation:** the interval stays at the 60 s cap (A6.11), and the cancellation stays due and visible in the backlog.
+- **Generation format:** accepted only as a canonical decimal of at most 18 digits. Anything else is refused before the database is
+  reached, so no value is converted to a JavaScript number (A6.11b).
+
+Retry metadata history is preserved: attempts and last-attempt time are kept after success, as before.
 
 **Retry exhaustion.** There is none. A failing cancellation is retried every 60 s indefinitely. This is deliberate: a cancellation the user
 requested must not be dropped silently. It is visible in the backlog counts. **There is no automatic dead-letter and no operator action in
@@ -122,8 +134,10 @@ commit or roll back, or are terminated by an operator. Under these, the followin
   also waits. Its outcome is deferred and it stays due. Each such row costs at most one lock timeout per cycle. Locks acquired at that
   moment are the only remaining case where the batch can pay a cost; the cost is bounded.
 - **Multiple orchestrator instances.** Discovery is lock-aware and takes no lock that persists. Two instances may pick the same candidate
-  when neither sees it locked; the row lock serialises the finalisations, and the loser sees a terminal execution and returns `skipped`.
-  Test A5.4 verifies one `cancelled` event.
+  when neither sees it locked. Test A5.4 holds both reconcilers at a gate after discovery, then holds the row lock from a third session, so
+  both finalisations genuinely queue on the same row. After release, exactly one applies the transition and the other reports `skipped`.
+  The test asserts one `cancelled` event, no retry metadata left active, and no revival on a later cycle. A test-only gate
+  (`ReconcileOptions.injectFault`, now awaitable) provides the deterministic point; the runtime never passes it.
 - **Database temporarily unavailable.** The cycle throws. The runtime backs off to 30 s. Nothing is recorded or lost, because every
   schedule is in the database and nothing is held in memory.
 - **New cancellations keep arriving.** No bounded completion is claimed. If arrivals exceed the batch rate, a healthy row can wait
@@ -139,7 +153,11 @@ commit or roll back, or are terminated by an operator. Under these, the followin
 - definer rights are set where required, and `search_path` is pinned to `pg_catalog, aegis`;
 - the owner is a superuser or has BYPASSRLS, **and** has `SELECT` on `agent_executions` (BYPASSRLS alone is not proof of access);
 - PUBLIC holds no EXECUTE; no role other than the owner and the intended caller holds EXECUTE; the intended caller does;
-- both cancellation triggers exist, are attached to the intended relation and function, and are enabled (`tgenabled = 'O'`);
+- both cancellation triggers exist, are attached to the intended relation and function, are enabled (`tgenabled = 'O'`), and are
+  row-level `BEFORE UPDATE` triggers (their event configuration is checked, not only their name);
+- the owner has UPDATE privilege on `agent_executions` (required by the `FOR UPDATE` discovery lock), SELECT on
+  `agent_database_roles` (required by the orchestrator-only check), and schema usage on `aegis`;
+- the runtime identity has schema usage on `aegis` and SELECT on `agent_database_roles`;
 - the runtime identity is not a superuser, not BYPASSRLS, maps to the orchestrator in the role table, holds **no role memberships** (so no
   inherited privilege and no role assumption), and can execute the discovery and backlog functions.
 
@@ -165,16 +183,37 @@ implemented**. It is an unresolved deployment limitation, retained with its vali
   (SQLSTATE 40P01) with recovery. No privilege was widened.
 - **Stale failure updates** could advance a newer schedule. Fixed by the generation guard.
 
+Defects fixed in Phase A.2:
+
+- **CI coverage gate failed** (statements 59.93%, threshold 60%). `cancellation.ts` had no unit tests. Fixed with focused unit tests of
+  every outcome class, halting rule, bound and backlog mapping, and of the authority validator (61.37% statements after the change). No
+  threshold, exclusion or collection setting was changed.
+- **Test A5.4 contradicted the algorithm.** It expected a reconciler to block on a row held by a third session, but migration 025 uses
+  `SKIP LOCKED`, so a reconciler never queues during discovery. Corrected as described in section 4.
+- **Saturating scheduling guard.** The guard used the saturating attempt count; see section 5. Fixed by migration 026.
+- **Test cleanup could hang.** Started operations were awaited before the sessions holding their locks were released. Cleanup now aborts
+  barriers, grants a grace period, terminates the test's own sessions if operations are still queued, settles operations within a bound,
+  and releases each client once. A negative test interrupts a contention scenario and checks that the blocker is gone and the pool is
+  available.
+- **Deadlock test assumed one victim and a successful second operation.** A5.5 now accepts either victim, but only the outcomes that the
+  committed cancellation makes possible: if the finalisation is the victim, the consumer is refused with 42501; if the consumer is the
+  victim, the finalisation completes. Exactly one 40P01 is required. The consuming side is the participant login (`aegis_triage`), not
+  the administrative pool. Migration 018 grants that role `UPDATE(status, consumed_at, consumed_by_agent, consumed_by_fencing_token,
+  revoked_at)` on `agent_grants` and a consume policy, so direct SQL consumption is a participant-reachable path, not only an
+  administrative one. It is a SQL path, not the `receiveMessage` path (section 11 covers that path separately).
+
 ## 9. Migration handling
 
-Migrations 001 to 024 are unchanged. Migration 025 is **edited in place within the unmerged draft**. The decision and its basis:
+Migrations 001 to 024 are unchanged. Migration 025 is **not** amended in this phase. Migration 026 is additive and applies after it.
 
-- 025 was pushed to the draft PR but has not been applied to any persistent database. `aegis_local` has not been migrated, and CI uses
-  disposable databases that are created and dropped for each run.
-- The change adds `FOR UPDATE SKIP LOCKED` to a function created in 025 and adds no new object.
-
-If 025 is ever applied to a persistent database, any further change must be a new additive migration (026 or later), and 025 must not be
-rewritten. Fresh installation, upgrade from 024, and upgrade from the previous draft 025 are tested as described in section 11.
+- Migration 025 was pushed to the unmerged draft in two revisions. No persistent database can be shown to have applied only one of them,
+  so the safe rule is that a further change is a new migration.
+- Migration 026 adds `cancellation_generation`, its non-negative CHECK, the replacement discovery function (same signature, extended return
+  columns, so it must be dropped and recreated), and the orchestrator's column grant on the generation.
+- Fresh installation runs 001 to 026. Upgrade from 024 applies 025 and 026 to a database holding a pending cancellation (test
+  `cancellation-authority.integration.test.ts`, upgrade case, asserts generation 0 and the migration version). Migration count assertions
+  are updated to 26 (fresh) and 11 (after 015).
+- The earlier in-place edit to 025 (adding `FOR UPDATE SKIP LOCKED`) is retained as part of 025 and is not reverted.
 
 ## 10. Browser contract
 
@@ -184,25 +223,46 @@ after finalisation.
 
 ## 11. Test evidence
 
-PostgreSQL integration tests, run in CI on the final commit (counts are in the PR, not repeated here):
+PostgreSQL integration tests run in CI on the final commit. Counts are in the PR, not repeated here. Unit tests run without a database.
 
+- `cancellation.test.ts` (unit): discovery bounds, empty candidate set, applied and skipped outcomes, execution refusal, transient and
+  systemic classification, halting on systemic and unrecordable faults, deferral on lock timeout without halting, continued processing,
+  stale generation, injected faults, and backlog mapping.
+- `cancellation-authority.test.ts` (unit): each validator check against a fake catalogue, including the new owner, role-map, schema and
+  trigger event checks, and `CancellationAuthorityError` naming.
 - `cancellation-concurrency.integration.test.ts`
   - the orchestrator and gateway runtime identities pass validation, and the gateway identity is refused as orchestrator;
   - A5.1 cancellation wins: a completion waits on the gateway's PID and is refused as `cancel_requested`;
   - A5.2 completion wins: the gateway request waits on the completion's PID and reports `terminal`;
   - A5.3a consumption first (trigger-level, direct SQL): the gateway request waits on the consumer's PID and is finalised afterwards;
   - A5.3b cancellation first: consumption is refused with 42501, the grant stays open until reconciliation, then is revoked;
-  - A5.4 competing reconcilers: one cancelled event;
-  - A5.5 opposing lock order: one session aborted with 40P01, and recovery;
-  - A6.1 to A6.14: poisoned-first, batch saturation, backoff and saturation, recovery, interruption between finalisation and recording,
-    restart with a fresh pool, full-batch and multi-batch lock-aware fairness, a locked execution not blocking others, generation guard,
-    participant refusal, cross-tenant isolation, backlog visibility;
-  - connection lifecycle: a held lock does not hold pool connections.
+  - A5.4 competing reconcilers (gated, genuine row-lock contention): one applied, one skipped, one cancelled event, no revival;
+  - A5.5 opposing lock order (participant login on the consuming side): exactly one 40P01, the other side's outcome matches the victim,
+    then recovery;
+  - A6.1 to A6.14: poisoned-first, batch saturation, backoff, recovery, interruption between finalisation and recording, restart with a
+    fresh pool, full-batch and multi-batch lock-aware fairness, a locked execution not blocking others, the generation guard (duplicate,
+    stale, concurrent at 999 and at 1000, backoff after saturation, continued retries), the generation format, participant refusal,
+    cross-tenant isolation, and backlog visibility;
+  - connection lifecycle: a held lock does not hold pool connections, and an interrupted contention scenario is cleaned up.
+- `cancellation-production-races.integration.test.ts` (production path; scope and limits in section 12):
+  - 9.1a cancellation commits first: the participant receive is refused with `cancel_requested`, the request grant stays open, and
+    reconciliation finalises;
+  - 9.1b consumption commits first: the request is processed and consumed, the later cancellation is accepted and finalises, and a stale
+    triage result arriving afterwards does not revive the execution;
+  - 9.1c concurrent, cancellation first: the gateway holds its row lock, the receive queues behind it (observed by blocker PID), and is
+    refused once the cancellation commits;
+  - 9.1d concurrent, consumption first: the receive holds its locks at the `receive:accepted` commit boundary, the cancellation queues
+    behind the idle-in-transaction holder, then consumption commits and the cancellation is accepted and finalised;
+  - 9.3 representative crash recovery: the reconciliation worker runs as a subprocess (`messaging-child.ts`, operation `cancel`), is paused
+    at `cancel_finalise:applied` inside an uncommitted finalisation, and is killed with SIGKILL. The committed request survives, the
+    interrupted finalisation leaves no trace, a new worker finalises exactly once, and a later cycle neither duplicates nor revives.
 - `cancellation-authority.integration.test.ts`
-  - fresh install to 025 and the validation passes;
-  - upgrade from 024 with a persisted pending cancellation;
+  - fresh install to 026 and the validation passes;
+  - upgrade from 024 with a persisted pending cancellation, through 025 and 026;
   - negative cases: PUBLIC, unexpected grant, unpinned search path, non-BYPASSRLS owner, BYPASSRLS owner without table privilege, missing
-    function, overloaded signature, dropped trigger, disabled trigger, superuser runtime identity, runtime role membership.
+    function, overloaded signature, dropped trigger, disabled trigger, superuser runtime identity, runtime role membership, a BYPASSRLS
+    owner with SELECT but without UPDATE for locking, a BYPASSRLS owner without role-map access, an AFTER trigger under the required name,
+    and a required trigger attached to a different function.
 - `investigation/gateway.test.ts`: request, idempotent repeat, lost race to terminal, principal refusal, finished executions.
 
 Tests inject faults only through `ReconcileOptions.injectFault`, a test seam the runtime never passes. Backoff is exercised with a
@@ -210,9 +270,13 @@ persisted, test-only timestamp, not waiting.
 
 ## 12. Residual risks and unsupported guarantees
 
-- **Not implemented in this phase:** a production-path grant-consumption race through a participant login with `receiveMessage` and the
-  consume-decision path (section 11 covers the trigger and direct SQL only); a real process-kill crash recovery matrix (restart is
-  simulated with a fresh pool); a two-process reconciler test.
+- **Not implemented in this phase:** the approved-result finalisation race (reviewer approval persistence against cancellation, both
+  orderings, with reviewer authority and fencing checks). The generic `release` tests do not exercise that path. A full crash matrix covering
+  every instruction boundary; the crash test covers one representative boundary (`cancel_finalise:applied`) and one SIGKILL. Crashes
+  inside the receive path are not tested by subprocess. Restart with a fresh pool remains a separate in-process test.
+- **Participant consumption path.** The production-path races (section 11) use the participant login through `receiveMessage` at the
+  `receive:accepted` commit boundary and at the lock wait. They do not cover a crash inside that path.
+- **Narrowing the owner** to a dedicated NOLOGIN role remains a deployment qualification item, not an accepted risk.
 - No bounded completion under unlimited arrivals, permanent database unavailability, or permanently held locks (section 6).
 - No dead-letter, no retry exhaustion, no operator closure of a cancellation that cannot be finalised (section 5).
 - The owner of the privileged functions must be a superuser or BYPASSRLS. Validated, not narrowed (section 7).
